@@ -39,6 +39,7 @@ wheels/
 Dockerfile.bak
 docker-compose.yml.bak
 *.env
+!.env.example
 .env
 .env.*
 !docker-compose.yml
