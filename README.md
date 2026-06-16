@@ -1,15 +1,10 @@
+## 프로젝트 구조
+
+```text
 itsmart_codeMind/
 ├─ .env
-├─ .env.example
 ├─ .gitignore
 ├─ docker-compose.yml
-├─ itsmart_codeMind.iml
-├─ paths.txt
-├─ .idea/
-│  ├─ misc.xml
-│  ├─ modules.xml
-│  ├─ vcs.xml
-│  └─ workspace.xml
 ├─ backend/
 │  ├─ config.py
 │  ├─ Dockerfile
@@ -30,3 +25,4 @@ itsmart_codeMind/
    ├─ app.py
    ├─ Dockerfile
    └─ requirements.txt
+```
