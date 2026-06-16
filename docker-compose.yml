@@ -1,0 +1,66 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: chatbot-qdrant
+    ports: ["6333:6333"]
+    volumes: ["qdrant_data:/qdrant/storage"]
+    networks: ["chatbot-net"]
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: chatbot-ollama
+    ports: ["11434:11434"]
+    volumes: ["ollama_data:/root/.ollama"]
+    networks: ["chatbot-net"]
+    restart: unless-stopped
+
+  fastapi:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: chatbot-backend
+    volumes:
+      - .:/app
+      - upload_data:/data/uploads
+    environment:
+      - OLLAMA_BASE_URL=http://chatbot-ollama:11434
+      - QDRANT_URL=http://chatbot-qdrant:6333
+      - OLLAMA_MODEL=qwen2.5-coder:3b
+      - UPLOAD_DIR=/data/uploads
+    networks: ["chatbot-net"]
+    depends_on: ["qdrant", "ollama"]
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: chatbot-frontend
+    ports: ["8501:8501"]
+    volumes:
+      - .:/app
+    environment:
+      - FASTAPI_URL=http://chatbot-backend:8000
+    networks: ["chatbot-net"]
+    depends_on:
+      fastapi:
+        condition: service_healthy
+    command: streamlit run frontend/app.py --server.address=0.0.0.0
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+  ollama_data:
+  upload_data:
+
+networks:
+  chatbot-net:
+    driver: bridge

@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python/
+env/
+venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.hypothesis/
+.pytest_cache/
+celerybeat-schedule
+.spyderproject
+.spyderproject.bak
+.ropeproject/
+.dmypy.json
+.mypy_cache/
+.pyre/
+.ipynb_checkpoints
+.egg-info/
+*.egg
+
+# Distribution / packaging
+.Python
+build/
+dist/
+wheels/
+*.whl
+*.zip
+*.tar.gz
+*.egg-info/
+
+# Docker
+.dockerignore
+Dockerfile.bak
+docker-compose.yml.bak
+*.env
+.env
+.env.*
+!docker-compose.yml
+
+# IDEs and editors
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.project
+.classpath
+.settings/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+temp/
+tmp/
+
+# OS generated files
+.DS_Store
+.localized
+.project
+.settings
+.vs/
+Desktop.ini
+ehthumbs.db
+Icon?
+Thumbs.db
+
+# Misc
+*.swp
+*.swo
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*

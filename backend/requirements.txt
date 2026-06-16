@@ -1,0 +1,17 @@
+# API 서버
+fastapi==0.115.0
+uvicorn==0.30.0
+
+# 임베딩 모델
+sentence-transformers==3.0.1
+
+# 벡터 DB 클라이언트
+qdrant-client==1.9.0
+
+# Ollama 통신
+httpx==0.28.1
+
+# 환경변수 및 설정
+python-dotenv==1.0.0
+pydantic-settings==2.5.2
+numpy==1.26.4
