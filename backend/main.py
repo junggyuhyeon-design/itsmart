@@ -1,68 +1,95 @@
 import sys
 import os
+import logging
 from pathlib import Path
-from fastapi import FastAPI, Body, HTTPException
+from fastapi import FastAPI, Body, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from typing import List
 
-# 현재 파일(backend/main.py)의 부모의 부모인 루트 폴더를 경로에 추가
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
 
-# 패키지 경로로 임포트
 from backend.rag.rag_service import RAGService
 from backend.config import get_settings
+from backend.utils.file_utils import process_uploads_and_collect
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="IT-Smart Bot API")
 
-# 업로드 디렉토리 설정: 환경 변수 UPLOAD_DIR 사용
-# 기본값을 /data/uploads로 설정하여 로컬 프로젝트 폴더(/app)와 분리합니다.
-UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/data/uploads")
+settings = get_settings()
+UPLOAD_DIR = settings.upload_dir
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# 전역 서비스 초기화
+rag_service = None
+
 try:
-    settings = get_settings()
     rag_service = RAGService(settings)
 except Exception as e:
-    print(f"초기화 에러: {e}")
-    raise HTTPException(status_code=500, detail=f"서비스 초기화 실패: {e}")
+    logger.error(f"초기화 에러: {e}")
+    # 모듈 로드 시점에 HTTPException을 raise하면 uvicorn이 앱 자체를 띄우지 못하고 죽음.
+    # 여기서는 raise하지 않고 None으로 두고, 각 엔드포인트에서 체크함.
+    rag_service = None
+    INIT_ERROR = str(e)
+else:
+    INIT_ERROR = None
+
+
+def get_rag_service():
+    if rag_service is None:
+        raise HTTPException(status_code=500, detail=f"서비스 초기화 실패: {INIT_ERROR}")
+    return rag_service
+
+
+@app.post("/upload")
+async def upload(files: List[UploadFile] = File(...)):
+    """파일을 백엔드(도커 볼륨)에 저장하고 분석 대상 목록을 반환"""
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    for f in files:
+        dest = Path(UPLOAD_DIR) / f.filename
+        content = await f.read()
+        dest.write_bytes(content)
+
+    targets = process_uploads_and_collect(Path(UPLOAD_DIR))
+    return {"targets": [t.__dict__ for t in targets], "count": len(targets)}
 
 @app.post("/index")
 def index(targets: List = Body(...)):
-    """파일 인덱싱 엔드포인트"""
-    return rag_service.index_files(targets)
+    service = get_rag_service()
+    result = service.index_files(targets)
+    result["total_chunks"] = int(result.get("total_chunks") or 0)
+    return result
 
 @app.post("/summary")
 def summary(targets: List = Body(...)):
-    """프로젝트 구조 요약 엔드포인트"""
-    return rag_service.generate_project_summary(targets)
+    service = get_rag_service()
+    return service.generate_project_summary(targets)
 
 @app.post("/analyze-db")
 def analyze_db(targets: List = Body(...)):
-    """DB 관계 분석 엔드포인트"""
-    db_data = rag_service.analyze_db_relations(targets)
-    mermaid = rag_service.generate_source_to_table_mermaid(db_data)
+    service = get_rag_service()
+    db_data = service.analyze_db_relations(targets)
+    mermaid = service.generate_source_to_table_mermaid(db_data)
     return {"db_data": db_data, "mermaid": mermaid}
 
 @app.get("/ask")
 async def ask(question: str, top_k: int = 3, extra_context: str = ""):
-    """RAG 질문 답변 엔드포인트 (스트리밍)"""
-    gen, hits = await rag_service.ask_with_context_stream(question + extra_context, top_k)
+    service = get_rag_service()
+    gen, hits = await service.ask_with_context_stream(question + extra_context, top_k)
     return StreamingResponse(gen, media_type="text/plain")
 
 @app.get("/status")
 def status():
-    """Qdrant 상태 조회 엔드포인트"""
-    return {"chunk_count": rag_service.qdrant_service.count_points()}
+    service = get_rag_service()
+    return {"chunk_count": int(service.qdrant_service.count_points() or 0)}
 
 @app.delete("/reset")
 def reset():
-    """데이터 전체 초기화 엔드포인트"""
-    rag_service.qdrant_service.delete_all()
+    service = get_rag_service()
+    service.qdrant_service.delete_all()
     return {"status": "success"}
 
 @app.get("/health")
 def health():
-    """헬스체크 엔드포인트"""
-    return {"status": "ok"}
+    return {"status": "ok", "rag_initialized": rag_service is not None}

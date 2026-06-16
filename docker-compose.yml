@@ -28,6 +28,7 @@ services:
       - QDRANT_URL=http://chatbot-qdrant:6333
       - OLLAMA_MODEL=qwen2.5-coder:3b
       - UPLOAD_DIR=/data/uploads
+      - EMBEDDING_MODEL=BAAI/bge-m3
     networks: ["chatbot-net"]
     depends_on: ["qdrant", "ollama"]
     command: uvicorn backend.main:app --host 0.0.0.0 --port 8000

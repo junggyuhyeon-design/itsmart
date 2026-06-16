@@ -32,8 +32,11 @@ class QdrantService:
         return [{"score": r.score, **r.payload} for r in results]
 
     def count_points(self) -> int:
-        try: return self.client.count(collection_name=self.settings.qdrant_collection).count
-        except: return 0
+        try:
+            result = self.client.count(collection_name=self.settings.qdrant_collection)
+            return int(result.count or 0)
+        except Exception:
+            return 0
 
     def delete_all(self):
         try: self.client.delete_collection(collection_name=self.settings.qdrant_collection)
