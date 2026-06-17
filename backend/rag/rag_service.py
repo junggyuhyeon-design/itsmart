@@ -93,7 +93,8 @@ class RAGService:
                 }
             )
 
-        table_names, table_definitions = self._extract_table_definitions(parsed_files)
+        table_names, table_definitions, table_details = self._extract_table_definitions(parsed_files)
+        table_list = sorted(table_names)
 
         relations = []
         source_to_tables = defaultdict(lambda: defaultdict(lambda: {
@@ -103,12 +104,16 @@ class RAGService:
         }))
 
         for file_info in parsed_files:
+            if file_info["extension"] == "sql":
+                continue
+
             entities = self._extract_entities(file_info["raw_text"], file_info["extension"])
 
             for entity in entities:
                 entity_text_upper = entity["text"].upper()
+                mentioned_tables = self._find_mentioned_tables(entity_text_upper, table_list)
 
-                for table in table_names:
+                for table in mentioned_tables:
                     usage_ops = self._detect_table_usage(entity_text_upper, table)
                     if not usage_ops:
                         continue
@@ -131,14 +136,14 @@ class RAGService:
                     bucket["categories"].update(categories)
                     bucket["scopes"].add(f"{entity['type']}:{entity['name']}")
 
-            if file_info["relative_path"] not in source_to_tables:
-                for table in table_names:
-                    if re.search(rf"\b{re.escape(table)}\b", file_info["raw_upper"]):
-                        bucket = source_to_tables[file_info["relative_path"]][table]
-                        if not bucket["ops"]:
-                            bucket["ops"].add("REF")
-                            bucket["categories"].add("REF")
-                            bucket["scopes"].add(f"file:{Path(file_info['relative_path']).name}")
+            file_path = file_info["relative_path"]
+            file_tables = self._find_mentioned_tables(file_info["raw_upper"], table_list)
+            for table in file_tables:
+                bucket = source_to_tables[file_path][table]
+                if not bucket["ops"]:
+                    bucket["ops"].add("REF")
+                    bucket["categories"].add("REF")
+                    bucket["scopes"].add(f"file:{Path(file_path).name}")
 
         normalized_source_to_tables = {}
         for file_path, table_map in source_to_tables.items():
@@ -151,15 +156,20 @@ class RAGService:
                 }
 
         return {
-            "tables": sorted(table_names),
+            "tables": table_list,
             "table_definitions": table_definitions,
+            "table_details": table_details,
             "relations": relations,
             "source_to_tables": normalized_source_to_tables,
         }
 
+    def _find_mentioned_tables(self, text_upper: str, table_names: list[str]) -> list[str]:
+        return [table for table in table_names if re.search(rf"\b{re.escape(table)}\b", text_upper)]
+
     def _extract_table_definitions(self, parsed_files: list[dict]):
         table_names = set()
         table_definitions = {}
+        table_details = {}
 
         sql_candidates = sorted(
             [f for f in parsed_files if f["extension"] == "sql"],
@@ -169,20 +179,54 @@ class RAGService:
             ),
         )
 
-        patterns = [
-            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[`\"\[]?[\w]+[`\"\]]?\.)?[`\"\[]?([a-zA-Z0-9_]+)[`\"\]]?",
-            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z0-9_]+)",
-        ]
+        create_table_pattern = re.compile(
+            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+            r"(?:[`\"\[]?[\w]+[`\"\]]?\.)?"
+            r"[`\"\[]?([a-zA-Z0-9_]+)[`\"\]]?\s*\((.*?)\)\s*;?",
+            re.I | re.S,
+        )
 
         for file_info in sql_candidates:
             text = file_info["raw_text"]
-            for pattern in patterns:
-                for table in re.findall(pattern, text, re.I):
-                    table_upper = table.upper()
-                    table_names.add(table_upper)
-                    table_definitions.setdefault(table_upper, file_info["relative_path"])
+            source_file = file_info["relative_path"]
 
-        return table_names, table_definitions
+            for match in create_table_pattern.finditer(text):
+                table_upper = match.group(1).upper()
+                body = match.group(2)
+                columns = self._parse_column_names(body)
+
+                table_names.add(table_upper)
+                table_definitions.setdefault(table_upper, source_file)
+
+                if table_upper not in table_details:
+                    table_details[table_upper] = {
+                        "table_name": table_upper,
+                        "source_file": source_file,
+                        "columns": columns,
+                        "column_count": len(columns),
+                    }
+                elif columns:
+                    existing = table_details[table_upper]
+                    merged = list(dict.fromkeys(existing["columns"] + columns))
+                    existing["columns"] = merged
+                    existing["column_count"] = len(merged)
+
+        return table_names, table_definitions, list(table_details.values())
+
+    def _parse_column_names(self, table_body: str) -> list[str]:
+        columns = []
+        for line in table_body.splitlines():
+            line = line.strip()
+            if not line or line.startswith("--"):
+                continue
+            line = line.rstrip(",").strip()
+            upper = line.upper()
+            if upper.startswith(("PRIMARY KEY", "FOREIGN KEY", "UNIQUE", "CHECK", "CONSTRAINT", "INDEX", "KEY ")):
+                continue
+            col_match = re.match(r"^[`\"\[]?([a-zA-Z0-9_]+)[`\"\]]?", line)
+            if col_match:
+                columns.append(col_match.group(1).upper())
+        return columns
 
     def _extract_entities(self, text: str, extension: str):
         entities = [{"type": "file", "name": "FILE_SCOPE", "text": text}]
@@ -245,23 +289,16 @@ class RAGService:
         escaped = re.escape(table_upper)
         ops = set()
 
-        patterns = {
-            "SELECT": [
-                rf"\bSELECT\b.*?\bFROM\b\s+{escaped}\b",
-                rf"\bSELECT\b.*?\bJOIN\b\s+{escaped}\b",
-                rf"\bFROM\b\s+{escaped}\b",
-            ],
-            "INSERT": [rf"\bINSERT\s+INTO\b\s+{escaped}\b"],
-            "UPDATE": [rf"\bUPDATE\b\s+{escaped}\b"],
-            "DELETE": [rf"\bDELETE\s+FROM\b\s+{escaped}\b"],
-            "JOIN": [rf"\bJOIN\b\s+{escaped}\b"],
-        }
-
-        for op, regex_list in patterns.items():
-            for pattern in regex_list:
-                if re.search(pattern, text_upper, re.I | re.S):
-                    ops.add(op)
-                    break
+        if re.search(rf"\bFROM\b\s+{escaped}\b", text_upper):
+            ops.add("SELECT")
+        if re.search(rf"\bJOIN\b\s+{escaped}\b", text_upper):
+            ops.add("JOIN")
+        if re.search(rf"\bINSERT\s+INTO\b\s+{escaped}\b", text_upper):
+            ops.add("INSERT")
+        if re.search(rf"\bUPDATE\b\s+{escaped}\b", text_upper):
+            ops.add("UPDATE")
+        if re.search(rf"\bDELETE\s+FROM\b\s+{escaped}\b", text_upper):
+            ops.add("DELETE")
 
         if not ops and re.search(rf"\b{escaped}\b", text_upper):
             ops.add("REF")
