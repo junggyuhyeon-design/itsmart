@@ -19,7 +19,6 @@ class Settings:
 @lru_cache
 def get_settings() -> Settings:
     load_dotenv()
-    base_dir = Path(__file__).resolve().parent.parent
     return Settings(
         ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://codeMind-ollama:11434"),
         ollama_model=os.getenv("OLLAMA_MODEL", "qwen2.5-coder:3b"),
@@ -29,5 +28,5 @@ def get_settings() -> Settings:
         chunk_size=int(os.getenv("CHUNK_SIZE", 800)),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", 100)),
         top_k=int(os.getenv("TOP_K", 5)),
-        upload_dir=Path(os.getenv("UPLOAD_DIR", str(base_dir / "data" / "uploads")))
+        upload_dir=Path(os.getenv("UPLOAD_DIR", "/data/uploads"))
     )
