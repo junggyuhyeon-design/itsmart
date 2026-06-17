@@ -1,5 +1,5 @@
 from sentence_transformers import SentenceTransformer
-from backend.config import Settings # 경로 수정
+from config import Settings # 경로 수정
 
 class EmbeddingService:
     def __init__(self, settings: Settings):

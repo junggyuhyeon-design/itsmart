@@ -1,7 +1,7 @@
 from typing import Any
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
-from backend.config import Settings # 경로 수정
+from config import Settings # 경로 수정
 
 class QdrantService:
     def __init__(self, settings: Settings) -> None:

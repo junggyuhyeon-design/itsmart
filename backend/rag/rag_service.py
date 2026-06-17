@@ -3,12 +3,12 @@ import logging
 from pathlib import Path
 from collections import Counter, defaultdict
 
-from backend.config import Settings
-from backend.parser.file_parser import parse_text_file
-from backend.parser.chunk_service import ChunkService
-from backend.embedder.embedder import EmbeddingService
-from backend.rag.qdrant_service import QdrantService
-from backend.rag.ollama_service import OllamaService
+from config import Settings
+from parser.file_parser import parse_text_file
+from parser.chunk_service import ChunkService
+from embedder.embedder import EmbeddingService
+from rag.qdrant_service import QdrantService
+from rag.ollama_service import OllamaService
 
 logger = logging.getLogger(__name__)
 

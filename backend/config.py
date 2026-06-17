@@ -21,11 +21,11 @@ def get_settings() -> Settings:
     load_dotenv()
     base_dir = Path(__file__).resolve().parent.parent
     return Settings(
-        ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://chatbot-ollama:11434"),
+        ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://codeMind-ollama:11434"),
         ollama_model=os.getenv("OLLAMA_MODEL", "qwen2.5-coder:3b"),
-        qdrant_url=os.getenv("QDRANT_URL", "http://chatbot-qdrant:6333"),
+        qdrant_url=os.getenv("QDRANT_URL", "http://codeMind-qdrant:6333"),
         qdrant_collection=os.getenv("QDRANT_COLLECTION", "source_chunks"),
-        embedding_model=os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
+        embedding_model=os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"),
         chunk_size=int(os.getenv("CHUNK_SIZE", 800)),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", 100)),
         top_k=int(os.getenv("TOP_K", 5)),
