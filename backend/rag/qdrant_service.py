@@ -1,7 +1,7 @@
 from typing import Any
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
-from backend.config import Settings # 경로 수정
+from config import Settings # 경로 수정
 
 class QdrantService:
     def __init__(self, settings: Settings) -> None:
@@ -32,8 +32,11 @@ class QdrantService:
         return [{"score": r.score, **r.payload} for r in results]
 
     def count_points(self) -> int:
-        try: return self.client.count(collection_name=self.settings.qdrant_collection).count
-        except: return 0
+        try:
+            result = self.client.count(collection_name=self.settings.qdrant_collection)
+            return int(result.count or 0)
+        except Exception:
+            return 0
 
     def delete_all(self):
         try: self.client.delete_collection(collection_name=self.settings.qdrant_collection)
