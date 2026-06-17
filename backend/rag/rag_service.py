@@ -179,20 +179,25 @@ class RAGService:
             ),
         )
 
-        create_table_pattern = re.compile(
+        create_table_header = re.compile(
             r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
             r"(?:[`\"\[]?[\w]+[`\"\]]?\.)?"
-            r"[`\"\[]?([a-zA-Z0-9_]+)[`\"\]]?\s*\((.*?)\)\s*;?",
-            re.I | re.S,
+            r"[`\"\[]?([a-zA-Z0-9_]+)[`\"\]]?\s*\(",
+            re.I,
         )
 
         for file_info in sql_candidates:
             text = file_info["raw_text"]
             source_file = file_info["relative_path"]
 
-            for match in create_table_pattern.finditer(text):
+            for match in create_table_header.finditer(text):
                 table_upper = match.group(1).upper()
-                body = match.group(2)
+                open_paren = match.end() - 1
+                close_paren = self._find_balanced_paren_end(text, open_paren)
+                if close_paren is None:
+                    continue
+
+                body = text[open_paren + 1:close_paren]
                 columns = self._parse_column_names(body)
 
                 table_names.add(table_upper)
@@ -212,6 +217,44 @@ class RAGService:
                     existing["column_count"] = len(merged)
 
         return table_names, table_definitions, list(table_details.values())
+
+    def _find_balanced_paren_end(self, text: str, open_index: int) -> int | None:
+        if open_index >= len(text) or text[open_index] != "(":
+            return None
+
+        depth = 0
+        in_single_quote = False
+        in_double_quote = False
+        i = open_index
+
+        while i < len(text):
+            ch = text[i]
+            if in_single_quote:
+                if ch == "'" and i + 1 < len(text) and text[i + 1] == "'":
+                    i += 2
+                    continue
+                if ch == "'":
+                    in_single_quote = False
+            elif in_double_quote:
+                if ch == '"' and i + 1 < len(text) and text[i + 1] == '"':
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_double_quote = False
+            else:
+                if ch == "'":
+                    in_single_quote = True
+                elif ch == '"':
+                    in_double_quote = True
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        return i
+            i += 1
+
+        return None
 
     def _parse_column_names(self, table_body: str) -> list[str]:
         columns = []
