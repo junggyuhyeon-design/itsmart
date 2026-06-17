@@ -170,6 +170,7 @@ def main():
                     resp = httpx.post(
                         f"{FASTAPI_URL}/summary",
                         json=st.session_state.analysis_targets,
+                        timeout=120.0,
                     )
                     data = resp.json()
                     st.code(data.get("tree_str"))
@@ -183,23 +184,74 @@ def main():
             if not st.session_state.analysis_targets:
                 st.warning("먼저 파일을 업로드해주세요.")
             else:
-                try:
-                    resp = httpx.post(
-                        f"{FASTAPI_URL}/analyze-db",
-                        json=st.session_state.analysis_targets,
-                    )
-                    resp.raise_for_status()
-                    st.session_state.db_analysis = resp.json()
-                except Exception as e:
-                    st.error(f"백엔드 통신 에러: {e}")
+                with st.spinner("DDL 파싱 및 소스-테이블 관계 분석 중..."):
+                    try:
+                        resp = httpx.post(
+                            f"{FASTAPI_URL}/analyze-db",
+                            json=st.session_state.analysis_targets,
+                            timeout=300.0,
+                        )
+                        resp.raise_for_status()
+                        st.session_state.db_analysis = resp.json()
+                    except Exception as e:
+                        st.error(f"백엔드 통신 에러: {e}")
 
         if st.session_state.db_analysis:
-            mermaid_code = st.session_state.db_analysis.get("mermaid", "")
-            st.success("✅ Mermaid 다이어그램 생성 완료")
-            render_mermaid(mermaid_code, height=1000)
+            db_data = st.session_state.db_analysis.get("db_data", {})
+            tables = db_data.get("tables", [])
+            table_details = db_data.get("table_details", [])
+            relations = db_data.get("relations", [])
 
-            with st.expander("Mermaid 원본 코드 보기"):
-                st.code(mermaid_code, language="mermaid")
+            st.markdown(f"### 📋 DDL 테이블 목록 ({len(tables)}개)")
+            if table_details:
+                table_rows = []
+                for detail in table_details:
+                    columns = detail.get("columns", [])
+                    table_rows.append({
+                        "테이블명": detail.get("table_name", ""),
+                        "컬럼 수": detail.get("column_count", len(columns)),
+                        "컬럼": ", ".join(columns) if columns else "-",
+                        "DDL 파일": detail.get("source_file", ""),
+                    })
+                st.dataframe(table_rows, use_container_width=True, hide_index=True)
+            elif tables:
+                table_defs = db_data.get("table_definitions", {})
+                table_rows = [
+                    {
+                        "테이블명": name,
+                        "DDL 파일": table_defs.get(name, "-"),
+                    }
+                    for name in tables
+                ]
+                st.dataframe(table_rows, use_container_width=True, hide_index=True)
+            else:
+                st.warning("DDL SQL 파일에서 CREATE TABLE 정의를 찾지 못했습니다. .sql 파일을 함께 업로드해주세요.")
+
+            st.markdown(f"### 🔗 소스-테이블 관계 ({len(relations)}건)")
+            if relations:
+                relation_rows = []
+                for rel in relations:
+                    relation_rows.append({
+                        "파일": rel.get("file_name", rel.get("file", "")),
+                        "엔티티 유형": rel.get("entity_type", ""),
+                        "엔티티명": rel.get("entity_name", ""),
+                        "테이블": rel.get("table", ""),
+                        "작업": ", ".join(rel.get("operations", [])),
+                        "분류": ", ".join(rel.get("categories", [])),
+                    })
+                st.dataframe(relation_rows, use_container_width=True, hide_index=True)
+            else:
+                st.info("소스 코드에서 DDL 테이블 참조를 찾지 못했습니다.")
+
+            mermaid_code = st.session_state.db_analysis.get("mermaid", "")
+            if mermaid_code.strip():
+                st.markdown("### 📊 Mermaid 관계도")
+                render_mermaid(mermaid_code, height=1000)
+
+                with st.expander("Mermaid 원본 코드 보기"):
+                    st.code(mermaid_code, language="mermaid")
+            else:
+                st.warning("표시할 Mermaid 다이어그램이 없습니다.")
 
     with tabs[3]:
         st.subheader("💬 AI 코드 분석 (RAG)")
