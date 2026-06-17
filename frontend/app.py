@@ -6,7 +6,7 @@ import httpx
 import streamlit as st
 import streamlit.components.v1 as components
 
-FASTAPI_URL = os.getenv("FASTAPI_URL", "http://chatbot-backend:8000")
+FASTAPI_URL = os.getenv("FASTAPI_URL", "http://codeMind-backend:8000")
 
 st.set_page_config(page_title="IT-Smart Source Analyzer", layout="wide")
 

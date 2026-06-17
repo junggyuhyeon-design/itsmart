@@ -9,9 +9,9 @@ from typing import List
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
 
-from backend.rag.rag_service import RAGService
-from backend.config import get_settings
-from backend.utils.file_utils import process_uploads_and_collect
+from rag.rag_service import RAGService
+from config import get_settings
+from utils.file_utils import process_uploads_and_collect
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

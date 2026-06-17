@@ -1,6 +1,6 @@
 import uuid
 from typing import Any
-from backend.config import Settings # 경로 수정
+from config import Settings # 경로 수정
 
 class ChunkService:
     def __init__(self, settings: Settings) -> None:

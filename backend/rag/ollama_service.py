@@ -1,6 +1,6 @@
 import httpx
 import json
-from backend.config import Settings
+from config import Settings
 
 
 class OllamaService:
