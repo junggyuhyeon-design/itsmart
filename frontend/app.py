@@ -1,21 +1,29 @@
-import streamlit as st
-import httpx
 import os
-import sys
-from pathlib import Path
+import re
+import html
 
-# 프로젝트 루트를 경로에 추가
-ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.append(str(ROOT_DIR))
+import httpx
+import streamlit as st
+import streamlit.components.v1 as components
 
-from backend.utils.file_utils import save_uploaded_file, process_uploads_and_collect, ALLOWED_EXTENSIONS
-from backend.config import get_settings
-
-# Docker 내부 네트워크 주소 (chatbot-backend 서비스 이름 사용)
 FASTAPI_URL = os.getenv("FASTAPI_URL", "http://chatbot-backend:8000")
-settings = get_settings()
 
 st.set_page_config(page_title="IT-Smart Source Analyzer", layout="wide")
+
+
+def format_count(value) -> str:
+    return f"{(value or 0):,}"
+
+
+def api_error_message(resp: httpx.Response) -> str:
+    try:
+        detail = resp.json().get("detail")
+        if detail:
+            return str(detail)
+    except Exception:
+        pass
+    return resp.text or f"HTTP {resp.status_code}"
+
 
 def init_session():
     if "analysis_targets" not in st.session_state:
@@ -23,15 +31,78 @@ def init_session():
     if "db_analysis" not in st.session_state:
         st.session_state.db_analysis = None
 
+
 def get_streaming_response(question, extra=""):
-    """FastAPI로부터 스트리밍 답변을 받아오는 제너레이터"""
     try:
         with httpx.Client(timeout=300.0) as client:
-            with client.stream("GET", f"{FASTAPI_URL}/ask", params={"question": question, "extra_context": extra}) as r:
+            with client.stream(
+                    "GET",
+                    f"{FASTAPI_URL}/ask",
+                    params={"question": question, "extra_context": extra},
+            ) as r:
                 for chunk in r.iter_text():
                     yield chunk
     except Exception as e:
         yield f"\n❌ 백엔드 연결 실패: {str(e)}\n(접속 시도 URL: {FASTAPI_URL})"
+
+
+def render_mermaid(mermaid_code: str, height: int = 900):
+    if not mermaid_code or not mermaid_code.strip():
+        st.warning("렌더링할 Mermaid 코드가 없습니다.")
+        return
+
+    escaped_code = html.escape(mermaid_code)
+
+    components.html(
+        f"""
+        <div style="width:100%; overflow:auto; border:1px solid #e5e7eb; border-radius:12px; padding:16px; background:#ffffff;">
+            <pre class="mermaid" style="text-align:center;">{escaped_code}</pre>
+        </div>
+
+        <script type="module">
+            import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+
+            mermaid.initialize({{
+                startOnLoad: true,
+                theme: "default",
+                securityLevel: "loose",
+                flowchart: {{
+                    useMaxWidth: true,
+                    htmlLabels: true,
+                    curve: "basis"
+                }}
+            }});
+        </script>
+        """,
+        height=height,
+        scrolling=True,
+    )
+
+
+def extract_mermaid_blocks(text: str):
+    if not text:
+        return []
+
+    patterns = [
+        r"```mermaid\s*(.*?)```",
+        r"```[\r\n]+(graph\s+(?:TD|LR|RL|BT).*?)```",
+        r"```[\r\n]+(flowchart\s+(?:TD|LR|RL|BT).*?)```",
+    ]
+
+    blocks = []
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.I | re.S)
+        for match in matches:
+            code = match.strip()
+            if code and code not in blocks:
+                blocks.append(code)
+
+    if not blocks:
+        direct_match = re.search(r"((?:graph|flowchart)\s+(?:TD|LR|RL|BT)\b.*)", text, re.I | re.S)
+        if direct_match:
+            blocks.append(direct_match.group(1).strip())
+
+    return blocks
 
 
 def main():
@@ -40,7 +111,6 @@ def main():
 
     tabs = st.tabs(["업로드 & 인덱싱", "구조 요약", "DB 관계도", "AI 질문하기", "상태 관리"])
 
-    # 1. 업로드 & 인덱싱 탭
     with tabs[0]:
         st.subheader("📁 소스 파일 업로드")
         files = st.file_uploader("ZIP 또는 소스 파일을 선택하세요", accept_multiple_files=True)
@@ -49,71 +119,119 @@ def main():
             if not files:
                 st.warning("파일을 먼저 선택해주세요.")
             else:
-                for f in files:
-                    save_uploaded_file(f, settings.upload_dir)
-                # ZIP 압축 해제 및 파일 목록 수집
-                targets = process_uploads_and_collect(settings.upload_dir)
-                st.session_state.analysis_targets = [t.__dict__ for t in targets]
-                st.success(f"✅ {len(st.session_state.analysis_targets)}개 파일 수집 완료")
-
-        if st.session_state.analysis_targets:
-            st.info(f"현재 수집된 파일: {len(st.session_state.analysis_targets)}개")
-            if st.button("🚀 전체 인덱싱 시작 (Qdrant 저장)", type="primary"):
-                with st.spinner("백엔드에서 인덱싱 중..."):
+                with st.spinner("백엔드로 파일 전송 중..."):
                     try:
-                        resp = httpx.post(f"{FASTAPI_URL}/index", json=st.session_state.analysis_targets, timeout=None)
-                        st.success(f"✅ 인덱싱 완료! 생성된 청크: {resp.json().get('total_chunks')}")
+                        upload_files = [
+                            (f.name, f.getvalue(), "application/octet-stream") for f in files
+                        ]
+                        resp = httpx.post(
+                            f"{FASTAPI_URL}/upload",
+                            files=[("files", uf) for uf in upload_files],
+                            timeout=300.0,
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        st.session_state.analysis_targets = data.get("targets", [])
+                        st.success(f"✅ {data.get('count', 0)}개 파일 수집 완료 (백엔드 저장)")
                     except Exception as e:
                         st.error(f"백엔드 통신 에러: {e}")
 
-    # 2. 구조 요약 탭
+        if st.session_state.analysis_targets:
+            st.info(f"현재 수집된 파일: {len(st.session_state.analysis_targets)}개")
+
+            if st.button("🚀 전체 인덱싱 시작 (Qdrant 저장)", type="primary"):
+                with st.spinner("백엔드에서 인덱싱 중..."):
+                    try:
+                        resp = httpx.post(
+                            f"{FASTAPI_URL}/index",
+                            json=st.session_state.analysis_targets,
+                            timeout=None,
+                        )
+                        if resp.is_success:
+                            data = resp.json()
+                            total_chunks = data.get("total_chunks") or 0
+                            st.success(f"✅ 인덱싱 완료! 생성된 청크: {format_count(total_chunks)}")
+                            if data.get("logs"):
+                                with st.expander("인덱싱 로그"):
+                                    st.text("\n".join(data["logs"]))
+                        else:
+                            st.error(f"인덱싱 실패: {api_error_message(resp)}")
+                    except Exception as e:
+                        st.error(f"백엔드 통신 에러: {e}")
+
     with tabs[1]:
         st.subheader("📊 프로젝트 구조")
+
         if st.button("구조 분석 실행"):
             if not st.session_state.analysis_targets:
                 st.warning("먼저 파일을 업로드해주세요.")
             else:
                 try:
-                    resp = httpx.post(f"{FASTAPI_URL}/summary", json=st.session_state.analysis_targets)
+                    resp = httpx.post(
+                        f"{FASTAPI_URL}/summary",
+                        json=st.session_state.analysis_targets,
+                    )
                     data = resp.json()
                     st.code(data.get("tree_str"))
                 except Exception as e:
                     st.error(f"백엔드 통신 에러: {e}")
 
-    # 3. DB 관계도 탭
     with tabs[2]:
         st.subheader("🗄️ 소스-DB 관계 분석")
+
         if st.button("관계 분석 및 Mermaid 생성"):
             if not st.session_state.analysis_targets:
                 st.warning("먼저 파일을 업로드해주세요.")
             else:
                 try:
-                    resp = httpx.post(f"{FASTAPI_URL}/analyze-db", json=st.session_state.analysis_targets)
+                    resp = httpx.post(
+                        f"{FASTAPI_URL}/analyze-db",
+                        json=st.session_state.analysis_targets,
+                    )
+                    resp.raise_for_status()
                     st.session_state.db_analysis = resp.json()
-                    st.code(st.session_state.db_analysis.get("mermaid"), language="mermaid")
-                    st.info("💡 위 코드를 복사하여 Mermaid Live Editor 등에서 시각화할 수 있습니다.")
                 except Exception as e:
                     st.error(f"백엔드 통신 에러: {e}")
 
-    # 4. 질문하기 탭
+        if st.session_state.db_analysis:
+            mermaid_code = st.session_state.db_analysis.get("mermaid", "")
+            st.success("✅ Mermaid 다이어그램 생성 완료")
+            render_mermaid(mermaid_code, height=1000)
+
+            with st.expander("Mermaid 원본 코드 보기"):
+                st.code(mermaid_code, language="mermaid")
+
     with tabs[3]:
         st.subheader("💬 AI 코드 분석 (RAG)")
         query = st.text_input("소스 코드에 대해 궁금한 점을 물어보세요")
+
         if query:
             extra = ""
             if st.session_state.db_analysis:
                 extra = f"\n\n[참고: DB 분석 데이터]\n{st.session_state.db_analysis.get('db_data')}"
 
             with st.chat_message("assistant"):
-                st.write_stream(get_streaming_response(query, extra))
+                full_text = st.write_stream(get_streaming_response(query, extra))
 
-    # 5. 상태 관리 탭
+            if isinstance(full_text, str):
+                mermaid_blocks = extract_mermaid_blocks(full_text)
+                if mermaid_blocks:
+                    st.markdown("### Mermaid 다이어그램")
+                    for idx, block in enumerate(mermaid_blocks, start=1):
+                        st.markdown(f"#### 다이어그램 {idx}")
+                        render_mermaid(block, height=900)
+
     with tabs[4]:
         st.subheader("⚙️ 시스템 상태")
+
         if st.button("상태 새로고침"):
             try:
-                status = httpx.get(f"{FASTAPI_URL}/status").json()
-                st.metric("저장된 청크 수", f"{status.get('chunk_count'):,}")
+                resp = httpx.get(f"{FASTAPI_URL}/status", timeout=30.0)
+                if resp.is_success:
+                    status = resp.json()
+                    st.metric("저장된 청크 수", format_count(status.get("chunk_count")))
+                else:
+                    st.error(f"상태 조회 실패: {api_error_message(resp)}")
             except Exception as e:
                 st.error(f"백엔드 연결 실패: {e}")
 
@@ -124,6 +242,7 @@ def main():
                 st.rerun()
             except Exception as e:
                 st.error(f"초기화 실패: {e}")
+
 
 if __name__ == "__main__":
     main()
