@@ -16,15 +16,6 @@ from utils.file_utils import process_uploads_and_collect
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── /health 요청만 access log에서 제외 ──────────────────────
-class HealthCheckFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        return "/health" not in record.getMessage()
-
-
-logging.getLogger("uvicorn.access").addFilter(HealthCheckFilter())
-# ────────────────────────────────────────────────────────────
-
 app = FastAPI(title="IT-Smart Bot API")
 
 settings = get_settings()
