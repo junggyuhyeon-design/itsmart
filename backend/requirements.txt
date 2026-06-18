@@ -18,3 +18,4 @@ httpx==0.28.1
 python-dotenv==1.2.2
 numpy==2.4.6
 python-multipart==0.0.32
+aiofiles==25.1.0         # 파일 업로드 지원
