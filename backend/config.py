@@ -1,5 +1,4 @@
 import os
-
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -15,6 +14,9 @@ class Settings:
     chunk_size: int
     chunk_overlap: int
     top_k: int
+    upload_chunk_size: int
+    max_file_size: int
+    max_files_per_request: int
     upload_dir: Path
 
 
@@ -49,6 +51,15 @@ def get_settings() -> Settings:
         ),
         top_k=int(
             os.environ.get("TOP_K", 5)
+        ),
+        upload_chunk_size=int(
+            os.environ.get("UPLOAD_CHUNK_SIZE", 1024 * 1024)
+        ),
+        max_file_size=int(
+            os.environ.get("MAX_FILE_SIZE", 1024 * 1024 * 200)
+        ),
+        max_files_per_request=int(
+            os.environ.get("MAX_FILES_PER_REQUEST", 5)
         ),
         upload_dir=Path(
             os.environ.get("UPLOAD_DIR", "/data/uploads")
