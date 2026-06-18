@@ -5,4 +5,4 @@ streamlit==1.58.0
 httpx==0.28.1
 
 # 환경변수
-python-dotenv==1.0.0
+python-dotenv==1.2.2
