@@ -93,10 +93,6 @@ async def _save_upload_stream(upload: UploadFile, dest: Path) -> int:
                         f"{settings.max_file_size} bytes 를 초과했습니다.",
                     )
                 await out_file.write(chunk)
-    except Exception:
-        if dest.exists():
-            dest.unlink(missing_ok=True)  # 부분 파일 삭제
-        raise
     except Exception as e:
         if dest.exists():
             dest.unlink(missing_ok=True)  # 부분 파일 삭제
@@ -120,7 +116,8 @@ async def upload(files: List[UploadFile] = File(...)):
     for f in files:
         if not f.filename:
             raise HTTPException(
-                status_code=400, detail="파일명이 없는 업로드는 허용되지 않습니다."
+                status_code=400, # Bad Request
+                detail=f"허용되지 않는 파일 형식입니다: {f.filename}",
             )
 
         if not is_allowed_upload_extension(f.filename):

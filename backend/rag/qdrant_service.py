@@ -1,7 +1,7 @@
 from typing import Any
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
-from config import Settings # 경로 수정
+from qdrant_client import QdrantClient, models
+from qdrant_client.models import Distance, VectorParams, PointStruct
+from config import Settings
 
 class QdrantService:
     def __init__(self, settings: Settings) -> None:
@@ -28,8 +28,18 @@ class QdrantService:
         return len(points)
 
     def search(self, query_vector: list[float], top_k: int = 5) -> list[dict[str, Any]]:
-        results = self.client.search(collection_name=self.settings.qdrant_collection, query_vector=query_vector, limit=top_k, with_payload=True)
-        return [{"score": r.score, **r.payload} for r in results]
+        try:
+            results = self.client.query_points(
+                collection_name=self.settings.qdrant_collection,
+                query=query_vector,
+                limit=top_k,
+                with_payload=True,
+            ).points
+            return [{"score": r.score, **r.payload} for r in results]
+        except Exception as e:
+            if "doesn't exist" in str(e) or "Not found" in str(e):
+                return []  # 컬렉션 없음 → 빈 결과 반환 (인덱싱 전 상태)
+            raise
 
     def count_points(self) -> int:
         try:
@@ -39,5 +49,7 @@ class QdrantService:
             return 0
 
     def delete_all(self):
-        try: self.client.delete_collection(collection_name=self.settings.qdrant_collection)
-        except: pass
+        try:
+            self.client.delete_collection(collection_name=self.settings.qdrant_collection)
+        except Exception:
+            pass

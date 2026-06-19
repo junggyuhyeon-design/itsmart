@@ -133,8 +133,11 @@ def main():
                         data = resp.json()
                         st.session_state.analysis_targets = data.get("targets", [])
                         st.success(f"✅ {data.get('count', 0)}개 파일 수집 완료 (백엔드 저장)")
+                    except httpx.HTTPStatusError as e: # FastAPI에서 HTTP 오류 발생 시 처리.
+                        error_data = e.response.json()
+                        st.error(f"ERROR :{e.response.status_code} {error_data.get('detail', str(e))}")
                     except Exception as e:
-                        st.error(f"백엔드 통신 에러: {e}")
+                        st.error(f"백엔드 통신 에러: {str(e)}") 
 
         if st.session_state.analysis_targets:
             st.info(f"현재 수집된 파일: {len(st.session_state.analysis_targets)}개")
@@ -145,7 +148,7 @@ def main():
                         resp = httpx.post(
                             f"{FASTAPI_URL}/index",
                             json=st.session_state.analysis_targets,
-                            timeout=None,
+                            timeout=1800.0,
                         )
                         if resp.is_success:
                             data = resp.json()
