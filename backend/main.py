@@ -11,6 +11,7 @@ sys.path.append(str(ROOT_DIR))
 
 from rag.rag_service import RAGService
 from config import get_settings
+from health_service import build_system_status
 from utils.file_utils import process_uploads_and_collect
 
 logging.basicConfig(level=logging.INFO)
@@ -90,8 +91,16 @@ async def ask(question: str, top_k: int = 3, extra_context: str = ""):
 
 @app.get("/status")
 def status():
-    service = get_rag_service()
-    return {"chunk_count": int(service.qdrant_service.count_points() or 0)}
+    chunk_count = 0
+    if rag_service is not None:
+        try:
+            chunk_count = int(rag_service.qdrant_service.count_points() or 0)
+        except Exception:
+            chunk_count = 0
+
+    result = build_system_status(settings, rag_service is not None, INIT_ERROR)
+    result["chunk_count"] = chunk_count
+    return result
 
 @app.delete("/reset")
 def reset():

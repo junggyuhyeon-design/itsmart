@@ -30,6 +30,8 @@ def init_session():
         st.session_state.analysis_targets = []
     if "db_analysis" not in st.session_state:
         st.session_state.db_analysis = None
+    if "system_status" not in st.session_state:
+        st.session_state.system_status = None
 
 
 def get_streaming_response(question, extra=""):
@@ -103,6 +105,77 @@ def extract_mermaid_blocks(text: str):
             blocks.append(direct_match.group(1).strip())
 
     return blocks
+
+
+def status_label(status: str) -> str:
+    labels = {
+        "running": "🟢 실행 중",
+        "available": "🟢 사용 가능",
+        "loaded": "🟢 로드됨",
+        "stopped": "🔴 중지됨",
+        "missing": "🔴 없음",
+        "not_loaded": "🟡 미로드",
+        "error": "🟠 오류",
+        "healthy": "🟢 정상",
+        "degraded": "🟠 일부 문제",
+    }
+    return labels.get(status, f"⚪ {status}")
+
+
+def fetch_system_status():
+    resp = httpx.get(f"{FASTAPI_URL}/status", timeout=30.0)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def render_status_panel(status: dict):
+    overall = status.get("overall", "degraded")
+    st.markdown(f"**전체 상태:** {status_label(overall)}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("저장된 청크 수", format_count(status.get("chunk_count")))
+    with col2:
+        rag_ok = status.get("rag_initialized", False)
+        st.metric("RAG 서비스", "초기화됨" if rag_ok else "미초기화")
+
+    if not rag_ok and status.get("init_error"):
+        st.warning(f"RAG 초기화 오류: {status['init_error']}")
+
+    st.markdown("### 컨테이너 / 서비스")
+    service_rows = []
+    for svc in status.get("services", []):
+        service_rows.append({
+            "이름": svc.get("name", ""),
+            "컨테이너": svc.get("container", "-"),
+            "상태": status_label(svc.get("status", "")),
+            "설명": svc.get("message", ""),
+            "URL": svc.get("url", ""),
+        })
+    if service_rows:
+        st.dataframe(service_rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("서비스 정보가 없습니다.")
+
+    st.markdown("### 모델")
+    model_rows = []
+    for model in status.get("models", []):
+        row = {
+            "모델": model.get("name", ""),
+            "유형": model.get("kind", ""),
+            "제공자": model.get("provider", "-"),
+            "상태": status_label(model.get("status", "")),
+            "설명": model.get("message", ""),
+        }
+        model_rows.append(row)
+    if model_rows:
+        st.dataframe(model_rows, use_container_width=True, hide_index=True)
+
+    ollama_model = next((m for m in status.get("models", []) if m.get("kind") == "llm"), None)
+    if ollama_model and ollama_model.get("installed_models"):
+        with st.expander("Ollama에 설치된 모델 목록"):
+            for name in ollama_model["installed_models"]:
+                st.text(name)
 
 
 def main():
@@ -275,17 +348,24 @@ def main():
 
     with tabs[4]:
         st.subheader("⚙️ 시스템 상태")
+        st.caption("필요한 Docker 컨테이너와 LLM/임베딩 모델의 연결 상태를 확인합니다.")
 
-        if st.button("상태 새로고침"):
-            try:
-                resp = httpx.get(f"{FASTAPI_URL}/status", timeout=30.0)
-                if resp.is_success:
-                    status = resp.json()
-                    st.metric("저장된 청크 수", format_count(status.get("chunk_count")))
-                else:
-                    st.error(f"상태 조회 실패: {api_error_message(resp)}")
-            except Exception as e:
-                st.error(f"백엔드 연결 실패: {e}")
+        refresh_col, _ = st.columns([1, 4])
+        with refresh_col:
+            refresh_clicked = st.button("🔄 상태 새로고침", type="primary", use_container_width=True)
+
+        if refresh_clicked or st.session_state.system_status is None:
+            with st.spinner("상태 확인 중..."):
+                try:
+                    st.session_state.system_status = fetch_system_status()
+                except Exception as e:
+                    st.session_state.system_status = None
+                    st.error(f"백엔드 연결 실패: {e}")
+
+        if st.session_state.get("system_status"):
+            render_status_panel(st.session_state.system_status)
+
+        st.divider()
 
         if st.button("⚠️ 모든 데이터 초기화", type="secondary"):
             try:
