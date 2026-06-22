@@ -9,6 +9,7 @@ itsmart_codeMind/
 │  ├─ config.py
 │  ├─ Dockerfile
 │  ├─ main.py
+│  ├─ health_service.py
 │  ├─ requirements.txt
 │  ├─ embedder/
 │  │  └─ embedder.py
