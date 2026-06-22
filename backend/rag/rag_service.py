@@ -49,119 +49,119 @@ class RAGService:
 
         return results
 
-    def generate_project_summary(self, targets: list):
-        total_files = len(targets)
-        extensions = Counter([t.get("extension") for t in targets])
+    # def generate_project_summary(self, targets: list):
+    #     total_files = len(targets)
+    #     extensions = Counter([t.get("extension") for t in targets])
 
-        tree_dict = {}
-        for t in targets:
-            curr = tree_dict
-            for p in Path(t.get("relative_path")).parts:
-                curr = curr.setdefault(p, {})
+    #     tree_dict = {}
+    #     for t in targets:
+    #         curr = tree_dict
+    #         for p in Path(t.get("relative_path")).parts:
+    #             curr = curr.setdefault(p, {})
 
-        def build_tree(d, indent=""):
-            lines = []
-            for k, v in sorted(d.items()):
-                if not v:
-                    lines.append(f"{indent}📄 {k}")
-                else:
-                    lines.append(f"{indent}📁 {k}/")
-                    lines.append(build_tree(v, indent + "  "))
-            return "\n".join(lines)
+    #     def build_tree(d, indent=""):
+    #         lines = []
+    #         for k, v in sorted(d.items()):
+    #             if not v:
+    #                 lines.append(f"{indent}📄 {k}")
+    #             else:
+    #                 lines.append(f"{indent}📁 {k}/")
+    #                 lines.append(build_tree(v, indent + "  "))
+    #         return "\n".join(lines)
 
-        return {
-            "total_files": total_files,
-            "extensions": dict(extensions),
-            "tree_str": build_tree(tree_dict),
-        }
+    #     return {
+    #         "total_files": total_files,
+    #         "extensions": dict(extensions),
+    #         "tree_str": build_tree(tree_dict),
+    #     }
 
-    def analyze_db_relations(self, targets: list):
-        parsed_files = []
+    # def analyze_db_relations(self, targets: list):
+    #     parsed_files = []
 
-        for t in targets:
-            parsed = parse_text_file(t)
-            if not parsed:
-                continue
-            parsed_files.append(
-                {
-                    "target": t,
-                    "relative_path": parsed.get("relative_path", ""),
-                    "file_name": parsed.get("file_name", ""),
-                    "extension": (parsed.get("extension") or "").lower(),
-                    "raw_text": parsed.get("raw_text", ""),
-                    "raw_upper": (parsed.get("raw_text", "") or "").upper(),
-                }
-            )
+    #     for t in targets:
+    #         parsed = parse_text_file(t)
+    #         if not parsed:
+    #             continue
+    #         parsed_files.append(
+    #             {
+    #                 "target": t,
+    #                 "relative_path": parsed.get("relative_path", ""),
+    #                 "file_name": parsed.get("file_name", ""),
+    #                 "extension": (parsed.get("extension") or "").lower(),
+    #                 "raw_text": parsed.get("raw_text", ""),
+    #                 "raw_upper": (parsed.get("raw_text", "") or "").upper(),
+    #             }
+    #         )
 
-        table_names, table_definitions, table_details = self._extract_table_definitions(parsed_files)
-        table_list = sorted(table_names)
+    #     table_names, table_definitions, table_details = self._extract_table_definitions(parsed_files)
+    #     table_list = sorted(table_names)
 
-        relations = []
-        source_to_tables = defaultdict(lambda: defaultdict(lambda: {
-            "ops": set(),
-            "categories": set(),
-            "scopes": set(),
-        }))
+    #     relations = []
+    #     source_to_tables = defaultdict(lambda: defaultdict(lambda: {
+    #         "ops": set(),
+    #         "categories": set(),
+    #         "scopes": set(),
+    #     }))
 
-        for file_info in parsed_files:
-            if file_info["extension"] == "sql":
-                continue
+    #     for file_info in parsed_files:
+    #         if file_info["extension"] == "sql":
+    #             continue
 
-            entities = self._extract_entities(file_info["raw_text"], file_info["extension"])
+    #         entities = self._extract_entities(file_info["raw_text"], file_info["extension"])
 
-            for entity in entities:
-                entity_text_upper = entity["text"].upper()
-                mentioned_tables = self._find_mentioned_tables(entity_text_upper, table_list)
+    #         for entity in entities:
+    #             entity_text_upper = entity["text"].upper()
+    #             mentioned_tables = self._find_mentioned_tables(entity_text_upper, table_list)
 
-                for table in mentioned_tables:
-                    usage_ops = self._detect_table_usage(entity_text_upper, table)
-                    if not usage_ops:
-                        continue
+    #             for table in mentioned_tables:
+    #                 usage_ops = self._detect_table_usage(entity_text_upper, table)
+    #                 if not usage_ops:
+    #                     continue
 
-                    categories = {self._map_op_category(op) for op in usage_ops}
+    #                 categories = {self._map_op_category(op) for op in usage_ops}
 
-                    relation = {
-                        "file": file_info["relative_path"],
-                        "file_name": Path(file_info["relative_path"]).name if file_info["relative_path"] else file_info["file_name"],
-                        "entity_type": entity["type"],
-                        "entity_name": entity["name"],
-                        "table": table,
-                        "operations": sorted(usage_ops),
-                        "categories": sorted(categories),
-                    }
-                    relations.append(relation)
+    #                 relation = {
+    #                     "file": file_info["relative_path"],
+    #                     "file_name": Path(file_info["relative_path"]).name if file_info["relative_path"] else file_info["file_name"],
+    #                     "entity_type": entity["type"],
+    #                     "entity_name": entity["name"],
+    #                     "table": table,
+    #                     "operations": sorted(usage_ops),
+    #                     "categories": sorted(categories),
+    #                 }
+    #                 relations.append(relation)
 
-                    bucket = source_to_tables[file_info["relative_path"]][table]
-                    bucket["ops"].update(usage_ops)
-                    bucket["categories"].update(categories)
-                    bucket["scopes"].add(f"{entity['type']}:{entity['name']}")
+    #                 bucket = source_to_tables[file_info["relative_path"]][table]
+    #                 bucket["ops"].update(usage_ops)
+    #                 bucket["categories"].update(categories)
+    #                 bucket["scopes"].add(f"{entity['type']}:{entity['name']}")
 
-            file_path = file_info["relative_path"]
-            file_tables = self._find_mentioned_tables(file_info["raw_upper"], table_list)
-            for table in file_tables:
-                bucket = source_to_tables[file_path][table]
-                if not bucket["ops"]:
-                    bucket["ops"].add("REF")
-                    bucket["categories"].add("REF")
-                    bucket["scopes"].add(f"file:{Path(file_path).name}")
+    #         file_path = file_info["relative_path"]
+    #         file_tables = self._find_mentioned_tables(file_info["raw_upper"], table_list)
+    #         for table in file_tables:
+    #             bucket = source_to_tables[file_path][table]
+    #             if not bucket["ops"]:
+    #                 bucket["ops"].add("REF")
+    #                 bucket["categories"].add("REF")
+    #                 bucket["scopes"].add(f"file:{Path(file_path).name}")
 
-        normalized_source_to_tables = {}
-        for file_path, table_map in source_to_tables.items():
-            normalized_source_to_tables[file_path] = {}
-            for table, meta in table_map.items():
-                normalized_source_to_tables[file_path][table] = {
-                    "operations": sorted(meta["ops"]),
-                    "categories": sorted(meta["categories"]),
-                    "scopes": sorted(meta["scopes"]),
-                }
+    #     normalized_source_to_tables = {}
+    #     for file_path, table_map in source_to_tables.items():
+    #         normalized_source_to_tables[file_path] = {}
+    #         for table, meta in table_map.items():
+    #             normalized_source_to_tables[file_path][table] = {
+    #                 "operations": sorted(meta["ops"]),
+    #                 "categories": sorted(meta["categories"]),
+    #                 "scopes": sorted(meta["scopes"]),
+    #             }
 
-        return {
-            "tables": table_list,
-            "table_definitions": table_definitions,
-            "table_details": table_details,
-            "relations": relations,
-            "source_to_tables": normalized_source_to_tables,
-        }
+    #     return {
+    #         "tables": table_list,
+    #         "table_definitions": table_definitions,
+    #         "table_details": table_details,
+    #         "relations": relations,
+    #         "source_to_tables": normalized_source_to_tables,
+    #     }
 
     def _find_mentioned_tables(self, text_upper: str, table_names: list[str]) -> list[str]:
         return [table for table in table_names if re.search(rf"\b{re.escape(table)}\b", text_upper)]
@@ -357,88 +357,88 @@ class RAGService:
             return "JOINS"
         return "REF"
 
-    def generate_source_to_table_mermaid(self, db_data: dict) -> str:
-        lines = ["flowchart LR"]
+    # def generate_source_to_table_mermaid(self, db_data: dict) -> str:
+    #     lines = ["flowchart LR"]
 
-        table_ids = {}
-        file_ids = {}
-        entity_ids = {}
+    #     table_ids = {}
+    #     file_ids = {}
+    #     entity_ids = {}
 
-        for idx, table in enumerate(db_data.get("tables", [])):
-            table_ids[table] = f"T{idx}"
+    #     for idx, table in enumerate(db_data.get("tables", [])):
+    #         table_ids[table] = f"T{idx}"
 
-        source_to_tables = db_data.get("source_to_tables", {})
-        relations = db_data.get("relations", [])
+    #     source_to_tables = db_data.get("source_to_tables", {})
+    #     relations = db_data.get("relations", [])
 
-        file_list = sorted(source_to_tables.keys())
-        for idx, file_path in enumerate(file_list):
-            file_ids[file_path] = f"F{idx}"
+    #     file_list = sorted(source_to_tables.keys())
+    #     for idx, file_path in enumerate(file_list):
+    #         file_ids[file_path] = f"F{idx}"
 
-        relation_entities = []
-        for rel in relations:
-            if rel["entity_type"] == "file":
-                continue
-            entity_key = (rel["file"], rel["entity_type"], rel["entity_name"])
-            if entity_key not in relation_entities:
-                relation_entities.append(entity_key)
+    #     relation_entities = []
+    #     for rel in relations:
+    #         if rel["entity_type"] == "file":
+    #             continue
+    #         entity_key = (rel["file"], rel["entity_type"], rel["entity_name"])
+    #         if entity_key not in relation_entities:
+    #             relation_entities.append(entity_key)
 
-        for idx, entity_key in enumerate(relation_entities):
-            entity_ids[entity_key] = f"E{idx}"
+    #     for idx, entity_key in enumerate(relation_entities):
+    #         entity_ids[entity_key] = f"E{idx}"
 
-        for table, tid in table_ids.items():
-            lines.append(f'    {tid}[("🗄️ {table}")]')
+    #     for table, tid in table_ids.items():
+    #         lines.append(f'    {tid}[("🗄️ {table}")]')
 
-        for file_path, fid in file_ids.items():
-            file_name = Path(file_path).name
-            lines.append(f'    {fid}["📄 {file_name}"]')
+    #     for file_path, fid in file_ids.items():
+    #         file_name = Path(file_path).name
+    #         lines.append(f'    {fid}["📄 {file_name}"]')
 
-        for (file_path, entity_type, entity_name), eid in entity_ids.items():
-            icon = "🧩" if entity_type == "class" else "⚙️"
-            safe_name = self._escape_mermaid(entity_name)
-            lines.append(f'    {eid}["{icon} {safe_name}"]')
+    #     for (file_path, entity_type, entity_name), eid in entity_ids.items():
+    #         icon = "🧩" if entity_type == "class" else "⚙️"
+    #         safe_name = self._escape_mermaid(entity_name)
+    #         lines.append(f'    {eid}["{icon} {safe_name}"]')
 
-        for rel in relations:
-            file_path = rel["file"]
-            table = rel["table"]
-            entity_type = rel["entity_type"]
-            entity_name = rel["entity_name"]
-            categories = rel.get("categories", [])
-            operations = rel.get("operations", [])
+    #     for rel in relations:
+    #         file_path = rel["file"]
+    #         table = rel["table"]
+    #         entity_type = rel["entity_type"]
+    #         entity_name = rel["entity_name"]
+    #         categories = rel.get("categories", [])
+    #         operations = rel.get("operations", [])
 
-            label_parts = categories[:] if categories else []
-            detail_ops = [op for op in operations if op != "REF"]
-            if detail_ops:
-                label_parts.append("/".join(detail_ops))
-            elif not label_parts:
-                label_parts.append("REF")
+    #         label_parts = categories[:] if categories else []
+    #         detail_ops = [op for op in operations if op != "REF"]
+    #         if detail_ops:
+    #             label_parts.append("/".join(detail_ops))
+    #         elif not label_parts:
+    #             label_parts.append("REF")
 
-            edge_label = ", ".join(label_parts)
-            target_id = table_ids[table]
+    #         edge_label = ", ".join(label_parts)
+    #         target_id = table_ids[table]
 
-            if entity_type == "file":
-                source_id = file_ids[file_path]
-            else:
-                source_id = entity_ids[(file_path, entity_type, entity_name)]
+    #         if entity_type == "file":
+    #             source_id = file_ids[file_path]
+    #         else:
+    #             source_id = entity_ids[(file_path, entity_type, entity_name)]
 
-            lines.append(f'    {source_id} -->|{self._escape_mermaid(edge_label)}| {target_id}')
+    #         lines.append(f'    {source_id} -->|{self._escape_mermaid(edge_label)}| {target_id}')
 
-        for (file_path, entity_type, entity_name), eid in entity_ids.items():
-            fid = file_ids[file_path]
-            lines.append(f"    {fid} -. contains .-> {eid}")
+    #     for (file_path, entity_type, entity_name), eid in entity_ids.items():
+    #         fid = file_ids[file_path]
+    #         lines.append(f"    {fid} -. contains .-> {eid}")
 
-        lines.append("")
-        lines.append("    classDef table fill:#E8F0FE,stroke:#1A73E8,stroke-width:1.5px,color:#111;")
-        lines.append("    classDef file fill:#E6FFFB,stroke:#08979C,stroke-width:1.2px,color:#111;")
-        lines.append("    classDef entity fill:#FFF7E6,stroke:#D46B08,stroke-width:1.2px,color:#111;")
+    #     lines.append("")
+    #     lines.append("    classDef table fill:#E8F0FE,stroke:#1A73E8,stroke-width:1.5px,color:#111;")
+    #     lines.append("    classDef file fill:#E6FFFB,stroke:#08979C,stroke-width:1.2px,color:#111;")
+    #     lines.append("    classDef entity fill:#FFF7E6,stroke:#D46B08,stroke-width:1.2px,color:#111;")
 
-        if table_ids:
-            lines.append("    class " + ",".join(table_ids.values()) + " table;")
-        if file_ids:
-            lines.append("    class " + ",".join(file_ids.values()) + " file;")
-        if entity_ids:
-            lines.append("    class " + ",".join(entity_ids.values()) + " entity;")
+    #     if table_ids:
+    #         lines.append("    class " + ",".join(table_ids.values()) + " table;")
+    #     if file_ids:
+    #         lines.append("    class " + ",".join(file_ids.values()) + " file;")
+    #     if entity_ids:
+    #         lines.append("    class " + ",".join(entity_ids.values()) + " entity;")
 
-        return "\n".join(lines)
+    #     return "\n".join(lines)
 
     def _escape_mermaid(self, text: str) -> str:
         return (
