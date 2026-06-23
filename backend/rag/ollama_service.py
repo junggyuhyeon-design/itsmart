@@ -108,7 +108,14 @@ M1[UserMapper_xml] -->|WRITES| T2[TB_LOGIN_LOG]
             messages.append({"role": "user", "content": row["question"]})
             messages.append({"role": "assistant", "content": row["answer"]})
 
-        context_parts = [f"File: {h['file_name']}\nContent: {h['text']}" for h in hits]
+        # 검색된 청크를 파일/프로젝트별로 구성
+        context_parts = []
+        for h in hits:
+            project_info = ""
+            if h.get("project_name"):
+                project_info = f" [프로젝트: {h['project_name']}]"
+            context_parts.append(f"File: {h['file_name']}{project_info}\nContent: {h['text']}")
+
         if context_parts:
             user_content = f"Context:\n{chr(10).join(context_parts)}\n\nQuestion: {question}"
         else:

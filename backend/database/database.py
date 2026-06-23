@@ -10,6 +10,8 @@ from database.history_repository import (
     delete_history,
     save_uploaded_file,
     get_uploaded_files,
+    get_uploaded_files_by_project_id,
+    get_all_projects,
 )
 
 __all__ = [
@@ -22,4 +24,6 @@ __all__ = [
     "delete_history",
     "save_uploaded_file",
     "get_uploaded_files",
+    "get_uploaded_files_by_project_id",
+    "get_all_projects",
 ]

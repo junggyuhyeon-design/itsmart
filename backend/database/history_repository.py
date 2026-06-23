@@ -92,16 +92,16 @@ def delete_history(user_id: str) -> int:
 
 # ── 공통 업로드 파일 ─────────────────────────────────────────────
 
-def save_uploaded_file(filename: str, saved_path: str) -> int:
+def save_uploaded_file(project_id: str, project_name: str, saved_path: str) -> str:
     try:
         with get_connection() as conn:
-            cur = conn.execute(
-                "INSERT INTO uploaded_files (filename, saved_path) VALUES (?, ?)",
-                (filename, saved_path),
+            conn.execute(
+                "INSERT OR IGNORE INTO uploaded_files (project_id, project_name, saved_path) VALUES (?, ?, ?)",
+                (project_id, project_name, saved_path),
             )
-            return cur.lastrowid
+            return project_id
     except Exception:
-        logger.exception("save_uploaded_file 실패: filename=%s", filename)
+        logger.exception("save_uploaded_file 실패: project_id=%s", project_id)
         raise
 
 
@@ -111,7 +111,7 @@ def get_uploaded_files() -> list[dict[str, Any]]:
         with get_connection() as conn:
             rows = conn.execute(
                 """
-                SELECT id, filename, saved_path, uploaded_at
+                SELECT project_id, project_name, saved_path, uploaded_at
                 FROM uploaded_files
                 ORDER BY uploaded_at DESC
                 """
@@ -119,4 +119,39 @@ def get_uploaded_files() -> list[dict[str, Any]]:
             return [dict(row) for row in rows]
     except Exception:
         logger.exception("get_uploaded_files 실패")
+        return []
+
+
+def get_uploaded_files_by_project_id(project_id: str) -> dict[str, Any] | None:
+    """특정 project_id의 업로드 파일 정보 반환."""
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT project_id, project_name, saved_path, uploaded_at
+                FROM uploaded_files
+                WHERE project_id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+            return dict(row) if row else None
+    except Exception:
+        logger.exception("get_uploaded_files_by_project_id 실패: project_id=%s", project_id)
+        return None
+
+
+def get_all_projects() -> list[dict[str, Any]]:
+    """전체 프로젝트 목록 반환 (project_id, project_name, uploaded_at)."""
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT project_id, project_name, uploaded_at
+                FROM uploaded_files
+                ORDER BY uploaded_at DESC
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+    except Exception:
+        logger.exception("get_all_projects 실패")
         return []

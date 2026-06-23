@@ -51,6 +51,8 @@ class AnalysisTargetFile:
     relative_path: str
     extension: str
     size: int
+    project_id: str = ""
+    project_name: str = ""
     root_container_name: str = ""
 
 
@@ -121,20 +123,19 @@ def collect_target_files(
     targets = []
     if not base_dir.exists():
         return targets
-    
 
     for path in sorted(base_dir.rglob("*")):
         if path.is_file() and path.suffix.lower() in ANALYSIS_TARGET_EXTENSIONS:
             targets.append(
                 AnalysisTargetFile(
-                    project_id=project_id,
-                    project_name=project_name,
                     source_type=source_type,
                     original_name=path.name,
                     saved_path=str(path.resolve()),
                     relative_path=path.relative_to(base_dir).as_posix(),
                     extension=path.suffix.lstrip(".").lower(),
                     size=path.stat().st_size,
+                    project_id=project_id,
+                    project_name=project_name,
                     root_container_name=root_container_name,
                 )
             )
@@ -144,12 +145,11 @@ def collect_target_files(
 def process_uploads_and_collect(save_dir: Path) -> list[AnalysisTargetFile]:
     """
     save_dir(업로드 원본이 저장된 디렉터리)를 순회하며 분석 대상을 수집.
+    각 ZIP 파일마다 고유한 project_id를 생성.
     """
     all_targets: list[AnalysisTargetFile] = []
     extracted_root = save_dir.parent / "extracted"
     ensure_dir(extracted_root)
-    project_id = str(uuid.uuid4())
-    project_name = Path.stem
 
     for path in save_dir.glob("*"):
         if not path.is_file():
@@ -157,6 +157,8 @@ def process_uploads_and_collect(save_dir: Path) -> list[AnalysisTargetFile]:
         ext = path.suffix.lstrip(".").lower()
 
         if ext == "zip":
+            project_id = str(uuid.uuid4())
+            project_name = path.stem
             extract_dir = extracted_root / path.stem
             try:
                 extract_zip(path, extract_dir)
@@ -165,7 +167,7 @@ def process_uploads_and_collect(save_dir: Path) -> list[AnalysisTargetFile]:
                 continue
             all_targets.extend(
                 collect_target_files(
-                    extract_dir, source_type="zip_entry", root_container_name=path.stem, project_id=project_id, project_name=project_name
+                    extract_dir, project_id=project_id, project_name=project_name, source_type="zip_entry", root_container_name=path.stem
                 )
             )
     return all_targets

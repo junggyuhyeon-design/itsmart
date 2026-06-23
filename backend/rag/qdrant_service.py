@@ -61,26 +61,30 @@ class QdrantService:
             logger.exception("upsert_chunks 실패 (chunk 수: %d)", len(chunks))
             raise
 
-    def search(self, 
+    def search(self,
                 query_vector: list[float],
-                project_id: str,
+                project_id: str | None = None,
                 top_k: int = 5
         ) -> list[dict[str, Any]]:
-        """유사 벡터 검색. 컬렉션 없으면 빈 리스트 반환."""
-
-        query_filter=Filter(
-            must=[FieldCondition(
-                key="project_id",
-                match=MatchValue(value=project_id)
-            )]
-        )
+        """유사 벡터 검색. project_id 지정 시 해당 프로젝트만 검색, None이면 전체."""
         if not self._collection_exists():
             logger.warning("search 호출 시 컬렉션 없음 — 인덱싱 전 상태")
             return []
+
+        query_filter = None
+        if project_id:
+            query_filter = Filter(
+                must=[FieldCondition(
+                    key="project_id",
+                    match=MatchValue(value=project_id)
+                )]
+            )
+
         try:
             results = self.client.query_points(
                 collection_name=self.settings.qdrant_collection,
                 query=query_vector,
+                query_filter=query_filter,
                 limit=top_k,
                 with_payload=True,
             ).points

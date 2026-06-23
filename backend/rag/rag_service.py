@@ -58,13 +58,14 @@ class RAGService:
     async def ask_with_context_stream(
         self,
         question: str,
+        project_id: str | None = None,
         extra_context: str = "",
         top_k: int | None = None,
         chat_history: list[dict] | None = None,
     ):
         """
         질문에 맞는 컨텍스트를 검색하고 Ollama 스트리밍 응답을 반환.
-        벡터 검색은 현재 질문만 사용하고, 대화 기록은 LLM messages 에 주입한다.
+        project_id가 None이면 모든 프로젝트에서 검색.
         Returns: (async_generator, hits)
         """
         if top_k is None:
@@ -73,7 +74,7 @@ class RAGService:
         llm_question = f"{question}\n{extra_context}".strip() if extra_context else question
 
         query_vector = self.embedding_service.embed_query(question)
-        hits = self.qdrant_service.search(query_vector, top_k=top_k)
+        hits = self.qdrant_service.search(query_vector, project_id=project_id, top_k=top_k)
 
         gen = self.ollama_service.generate_response_stream(
             llm_question, hits, chat_history=chat_history

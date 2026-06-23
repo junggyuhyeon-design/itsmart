@@ -4,6 +4,7 @@ IT-Smart CodeMind — FastAPI 백엔드 진입점
 import logging
 import os
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List
@@ -20,6 +21,8 @@ from database.history_repository import (
     get_history,
     save_history,
     save_uploaded_file,
+    get_all_projects,
+    get_uploaded_files_by_project_id,
     upsert_user,
 )
 from database.init_db import init_db
@@ -159,7 +162,7 @@ async def upload(
     files: List[UploadFile] = File(...),
     x_user_id: str | None = Header(default=None),
 ):
-    """ZIP 파일을 서버에 저장. 업로드 파일은 모든 사용자가 공유."""
+    """ZIP 파일을 서버에 저장. 각 ZIP마다 project_id 생성."""
     _require_user(x_user_id)
 
     if not files:
@@ -186,14 +189,22 @@ async def upload(
             )
         dest = Path(UPLOAD_DIR) / safe_filename(f.filename)
         await _save_upload_stream(f, dest)
-        try:
-            save_uploaded_file(f.filename, str(dest))
-        except Exception as e:
-            logger.error("업로드 이력 DB 저장 실패: %s", e)
 
     targets = await run_in_threadpool(process_uploads_and_collect, Path(UPLOAD_DIR))
-    logger.info("업로드 완료: %d개 파일 수집", len(targets))
-    return {"targets": [t.__dict__ for t in targets], "count": len(targets)}
+
+    # 각 프로젝트별 정보 저장
+    projects_created = {}
+    for target in targets:
+        if target.project_id not in projects_created:
+            projects_created[target.project_id] = target.project_name
+            try:
+                zip_file_path = Path(UPLOAD_DIR) / f"{target.project_name}.zip"
+                save_uploaded_file(target.project_id, target.project_name, str(zip_file_path))
+            except Exception as e:
+                logger.error("업로드 이력 DB 저장 실패: %s", e)
+
+    logger.info("업로드 완료: %d개 파일 수집, %d개 프로젝트", len(targets), len(projects_created))
+    return {"targets": [t.__dict__ for t in targets], "count": len(targets), "projects": len(projects_created)}
 
 
 @app.post("/index")
@@ -215,22 +226,83 @@ async def index(
         raise HTTPException(status_code=500, detail=f"인덱싱 중 오류: {e}") from e
 
 
+# ── 프로젝트 관리 ──────────────────────────
+
+@app.get("/projects")
+def list_projects():
+    """전체 프로젝트 목록 반환."""
+    try:
+        projects = get_all_projects()
+        return {"projects": projects, "count": len(projects)}
+    except Exception as e:
+        logger.exception("프로젝트 목록 조회 실패")
+        raise HTTPException(status_code=500, detail=f"프로젝트 조회 중 오류: {e}") from e
+
+
+@app.get("/projects/{project_name}/files")
+def list_project_files(project_name: str):
+    """특정 프로젝트의 업로드된 파일 정보 반환."""
+    try:
+        all_projects = get_all_projects()
+        project_info = None
+        for proj in all_projects:
+            if proj["project_name"] == project_name.strip():
+                project_info = proj
+                break
+
+        if not project_info:
+            raise HTTPException(
+                status_code=404,
+                detail=f"프로젝트 '{project_name}'을(를) 찾을 수 없습니다."
+            )
+
+        return {
+            "project_id": project_info["project_id"],
+            "project_name": project_info["project_name"],
+            "uploaded_at": project_info["uploaded_at"],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("프로젝트 파일 조회 실패")
+        raise HTTPException(status_code=500, detail=f"조회 중 오류: {e}") from e
+
+
 # ── 질문 / 히스토리 ──────────────────────────────────────────────
 
 @app.get("/ask")
 async def ask(
     request: Request,
     question: str,
+    project_name: str | None = None,
     top_k: int = 5,
     extra_context: str = "",
     x_user_id: str | None = Header(default=None),
 ):
-    """질문에 대한 RAG 스트리밍 응답 (최근 대화 기록을 LLM 컨텍스트에 포함)."""
+    """질문에 대한 RAG 스트리밍 응답. project_name이 없으면 모든 프로젝트 대상."""
     user_id = _require_user(x_user_id)
     if not question or not question.strip():
         raise HTTPException(status_code=400, detail="질문이 비어 있습니다.")
     if top_k < 1 or top_k > 20:
         top_k = settings.top_k
+
+    # 전체 프로젝트 목록 조회
+    all_projects = get_all_projects()
+
+    # project_name 검증 (지정된 경우)
+    project_id = None
+    selected_project_name = project_name
+    if project_name:
+        for proj in all_projects:
+            if proj["project_name"] == project_name.strip():
+                project_id = proj["project_id"]
+                selected_project_name = proj["project_name"]
+                break
+        if not project_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"프로젝트 '{project_name}'을(를) 찾을 수 없습니다. 사용 가능한 프로젝트: {[p['project_name'] for p in all_projects]}"
+            )
 
     history_limit = max(1, min(settings.chat_history_turns, 20))
     recent_rows = get_history(user_id, limit=history_limit)
@@ -238,12 +310,38 @@ async def ask(
 
     service = get_rag_service(request)
     try:
-        gen, _ = await service.ask_with_context_stream(
-            question=question.strip(),
-            extra_context=extra_context,
-            top_k=top_k,
-            chat_history=chat_history,
-        )
+        # 프로젝트 정보를 LLM 컨텍스트에 추가
+        projects_info = "\n".join([f"- {p['project_name']}" for p in all_projects])
+
+        if not project_name:
+            # project_name이 없으면: LLM이 질문에서 관련 프로젝트를 판단하도록 정보 제공
+            context_with_projects = (
+                f"사용 가능한 프로젝트:\n{projects_info}\n\n"
+                f"질문을 분석하여 관련 프로젝트를 판단하고 답변하세요.\n"
+                f"답변할 때는 어느 프로젝트의 정보를 사용했는지 명시하세요.\n\n{extra_context}"
+            ).strip()
+            # 모든 프로젝트의 청크에서 검색 (project_id=None)
+            gen, hits = await service.ask_with_context_stream(
+                question=question.strip(),
+                project_id=None,  # 모든 프로젝트 검색
+                extra_context=context_with_projects,
+                top_k=top_k,
+                chat_history=chat_history,
+            )
+        else:
+            # project_name이 지정됨: 해당 프로젝트만 검색
+            context_with_projects = (
+                f"사용 가능한 프로젝트:\n{projects_info}\n\n"
+                f"현재 프로젝트: {selected_project_name}\n{extra_context}"
+            ).strip()
+            gen, hits = await service.ask_with_context_stream(
+                question=question.strip(),
+                project_id=project_id,
+                extra_context=context_with_projects,
+                top_k=top_k,
+                chat_history=chat_history,
+            )
+
         return StreamingResponse(gen, media_type="text/plain")
     except Exception as e:
         logger.error("ask 처리 실패: %s", e)
@@ -301,7 +399,7 @@ def clear_history(
 
 @app.get("/status")
 def status(request: Request):
-    """전체 시스템 상태 반환 (Qdrant, Ollama, 모델, 청크 수)."""
+    """전체 시스템 상태 반환 (Qdrant, Ollama, 모델, 청크 수, 프로젝트 정보)."""
     rag_initialized = getattr(request.app.state, "rag_initialized", False)
     init_error      = getattr(request.app.state, "init_error", None)
     base = build_system_status(settings, rag_initialized, init_error)
@@ -312,6 +410,16 @@ def status(request: Request):
         base["chunk_count"] = svc.qdrant_service.count_points()
     except Exception:
         base["chunk_count"] = 0
+
+    # 프로젝트 정보 추가
+    try:
+        projects = get_all_projects()
+        base["projects"] = projects
+        base["project_count"] = len(projects)
+    except Exception:
+        base["projects"] = []
+        base["project_count"] = 0
+
     return base
 
 
