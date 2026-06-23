@@ -224,12 +224,16 @@ async def ask(
     extra_context: str = "",
     x_user_id: str | None = Header(default=None),
 ):
-    """질문에 대한 RAG 스트리밍 응답."""
-    _require_user(x_user_id)
+    """질문에 대한 RAG 스트리밍 응답 (최근 대화 기록을 LLM 컨텍스트에 포함)."""
+    user_id = _require_user(x_user_id)
     if not question or not question.strip():
         raise HTTPException(status_code=400, detail="질문이 비어 있습니다.")
     if top_k < 1 or top_k > 20:
         top_k = settings.top_k
+
+    history_limit = max(1, min(settings.chat_history_turns, 20))
+    recent_rows = get_history(user_id, limit=history_limit)
+    chat_history = list(reversed(recent_rows))
 
     service = get_rag_service(request)
     try:
@@ -237,6 +241,7 @@ async def ask(
             question=question.strip(),
             extra_context=extra_context,
             top_k=top_k,
+            chat_history=chat_history,
         )
         return StreamingResponse(gen, media_type="text/plain")
     except Exception as e:

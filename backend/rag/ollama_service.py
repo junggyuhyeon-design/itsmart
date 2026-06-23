@@ -65,21 +65,69 @@ M1[UserMapper_xml] -->|WRITES| T2[TB_LOGIN_LOG]
 ```
 """.strip()
 
-        return "당신은 소스 코드 분석 도우미입니다. 한국어로 답변하세요."
+        return (
+            "당신은 소스 코드 분석 도우미입니다. 한국어로 답변하세요.\n"
+            "이전 대화 기록이 제공되면 후속 질문(직전 질문, 아까 답변 등)은 "
+            "대화 기록을 우선 참고하세요.\n"
+            "소스코드 관련 질문은 마지막 메시지의 Context(검색된 코드)를 "
+            "우선 근거로 사용하세요.\n"
+            "근거가 없으면 추측하지 말고 모른다고 답하세요."
+        )
 
-    async def generate_response_stream(self, question: str, hits: list[dict]):
-        url = f"{self.settings.ollama_base_url}/api/chat"
-        context_parts = [f"File: {h['file_name']}\nContent: {h['text']}" for h in hits]
-        prompt = f"Context:\n{chr(10).join(context_parts)}\n\nQuestion: {question}"
+    def _trim_chat_history(self, chat_history: list[dict]) -> list[dict]:
+        """오래된 턴부터 제거해 문자 상한 이내로 유지 (시간순 입력 가정)."""
+        max_chars = self.settings.chat_history_max_chars
+        if max_chars <= 0 or not chat_history:
+            return []
 
+        trimmed: list[dict] = []
+        total = 0
+        for row in reversed(chat_history):
+            question = (row.get("question") or "").strip()
+            answer = (row.get("answer") or "").strip()
+            if not question or not answer:
+                continue
+            pair_len = len(question) + len(answer)
+            if trimmed and total + pair_len > max_chars:
+                break
+            trimmed.append({"question": question, "answer": answer})
+            total += pair_len
+        trimmed.reverse()
+        return trimmed
+
+    def _build_messages(
+        self,
+        question: str,
+        hits: list[dict],
+        chat_history: list[dict] | None,
+    ) -> list[dict]:
         system_prompt = self._build_system_prompt(question)
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+
+        for row in self._trim_chat_history(chat_history or []):
+            messages.append({"role": "user", "content": row["question"]})
+            messages.append({"role": "assistant", "content": row["answer"]})
+
+        context_parts = [f"File: {h['file_name']}\nContent: {h['text']}" for h in hits]
+        if context_parts:
+            user_content = f"Context:\n{chr(10).join(context_parts)}\n\nQuestion: {question}"
+        else:
+            user_content = f"Question: {question}"
+        messages.append({"role": "user", "content": user_content})
+        return messages
+
+    async def generate_response_stream(
+        self,
+        question: str,
+        hits: list[dict],
+        chat_history: list[dict] | None = None,
+    ):
+        url = f"{self.settings.ollama_base_url}/api/chat"
+        messages = self._build_messages(question, hits, chat_history)
 
         payload = {
             "model": self.settings.ollama_model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
+            "messages": messages,
             "stream": True
         }
 

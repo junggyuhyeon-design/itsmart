@@ -60,20 +60,24 @@ class RAGService:
         question: str,
         extra_context: str = "",
         top_k: int | None = None,
+        chat_history: list[dict] | None = None,
     ):
         """
         질문에 맞는 컨텍스트를 검색하고 Ollama 스트리밍 응답을 반환.
+        벡터 검색은 현재 질문만 사용하고, 대화 기록은 LLM messages 에 주입한다.
         Returns: (async_generator, hits)
         """
         if top_k is None:
             top_k = self.settings.top_k
 
-        full_question = f"{question}\n{extra_context}".strip() if extra_context else question
+        llm_question = f"{question}\n{extra_context}".strip() if extra_context else question
 
-        query_vector = self.embedding_service.embed_query(full_question)
+        query_vector = self.embedding_service.embed_query(question)
         hits = self.qdrant_service.search(query_vector, top_k=top_k)
 
-        gen = self.ollama_service.generate_response_stream(full_question, hits)
+        gen = self.ollama_service.generate_response_stream(
+            llm_question, hits, chat_history=chat_history
+        )
         return gen, hits
 
     # ── 전체 초기화 ──────────────────────────────────────────────

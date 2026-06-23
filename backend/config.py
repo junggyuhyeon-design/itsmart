@@ -9,18 +9,20 @@ _MB = 1024 * 1024          # 1 MiB in bytes
 
 @dataclass(frozen=True)
 class Settings:
-    ollama_base_url:       str
-    ollama_model:          str
-    qdrant_url:            str
-    qdrant_collection:     str
-    embedding_model:       str
-    chunk_size:            int
-    chunk_overlap:         int
-    top_k:                 int
-    upload_chunk_size:     int   # 스트리밍 청크 단위 (bytes)
-    max_file_size:         int   # 단일 파일 최대 크기 (bytes)
-    max_files_per_request: int
-    upload_dir:            Path
+    ollama_base_url:        str
+    ollama_model:           str
+    qdrant_url:             str
+    qdrant_collection:      str
+    embedding_model:        str
+    chunk_size:             int
+    chunk_overlap:          int
+    top_k:                  int
+    upload_chunk_size:      int   # 스트리밍 청크 단위 (bytes)
+    max_file_size:          int   # 단일 파일 최대 크기 (bytes)
+    max_files_per_request:  int
+    upload_dir:             Path
+    chat_history_turns:     int   # LLM에 넣을 최근 Q&A 쌍 수
+    chat_history_max_chars: int   # 대화 기록 문자 상한 (RAG 컨텍스트 공간 확보)
 
 
 @lru_cache
@@ -66,5 +68,11 @@ def get_settings() -> Settings:
         ),
         upload_dir=Path(
             os.environ.get("UPLOAD_DIR", "/data/uploads")
-        )
+        ),
+        chat_history_turns=int(
+            os.environ.get("CHAT_HISTORY_TURNS", 6)
+        ),
+        chat_history_max_chars=int(
+            os.environ.get("CHAT_HISTORY_MAX_CHARS", 4000)
+        ),
     )
