@@ -30,18 +30,15 @@ def parse_text_file(file_info: Any) -> dict[str, Any]:
         raw_text = read_text_file(path)
         if not raw_text.strip(): return {}
         return {
-            "raw_text": raw_text, "file_name": name, "extension": ext,
-            "relative_path": rel_path, "language": detect_language_by_extension(ext), "file_size": size,
+            "raw_text": raw_text,
+            "project_id": file_info["project_id"],
+            "project_name": file_info["project_name"],
+            "file_name": name, 
+            "extension": ext,
+            "relative_path": rel_path, 
+            "language": detect_language_by_extension(ext), 
+            "file_size": size,
         }
     except Exception as e:
         logging.error(f"파일 파싱 실패: {path}, 에러: {e}")
         return {}
-
-class FileParser:
-    def __init__(self, settings: Settings) -> None:
-        self.settings = settings
-        # self.extracted_root = get_extracted_root(settings.upload_dir) # 사용하지 않으므로 제거
-
-    def collect_analysis_targets(self, saved_files: list[SavedFileInfo]) -> list[AnalysisTargetFile]:
-        # 이 함수는 현재 사용되지 않음 (process_uploads_and_collect가 대체)
-        return []

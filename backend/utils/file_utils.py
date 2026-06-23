@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
+import uuid
 
 ANALYSIS_TARGET_EXTENSIONS = (
     ".py",
@@ -112,7 +113,7 @@ def extract_zip(zip_path: Path, extract_dir: Path) -> Path:
 
 
 def collect_target_files(
-    base_dir: Path, source_type: str = "direct_upload", root_container_name: str = ""
+    base_dir: Path, project_id: str, project_name: str, source_type: str = "direct_upload", root_container_name: str = ""
 ) -> list[AnalysisTargetFile]:
     """
     업로드(혹은 압축 해제)된 디렉터리를 재귀 탐색하여 분석 대상 파일 목록을 만든다.
@@ -120,11 +121,14 @@ def collect_target_files(
     targets = []
     if not base_dir.exists():
         return targets
+    
 
     for path in sorted(base_dir.rglob("*")):
         if path.is_file() and path.suffix.lower() in ANALYSIS_TARGET_EXTENSIONS:
             targets.append(
                 AnalysisTargetFile(
+                    project_id=project_id,
+                    project_name=project_name,
                     source_type=source_type,
                     original_name=path.name,
                     saved_path=str(path.resolve()),
@@ -144,6 +148,8 @@ def process_uploads_and_collect(save_dir: Path) -> list[AnalysisTargetFile]:
     all_targets: list[AnalysisTargetFile] = []
     extracted_root = save_dir.parent / "extracted"
     ensure_dir(extracted_root)
+    project_id = str(uuid.uuid4())
+    project_name = Path.stem
 
     for path in save_dir.glob("*"):
         if not path.is_file():
@@ -159,19 +165,7 @@ def process_uploads_and_collect(save_dir: Path) -> list[AnalysisTargetFile]:
                 continue
             all_targets.extend(
                 collect_target_files(
-                    extract_dir, source_type="zip_entry", root_container_name=path.stem
-                )
-            )
-        elif f".{ext}" in ANALYSIS_TARGET_EXTENSIONS:
-            all_targets.append(
-                AnalysisTargetFile(
-                    source_type="direct_upload",
-                    original_name=path.name,
-                    saved_path=str(path.resolve()),
-                    relative_path=path.name,
-                    extension=ext,
-                    size=path.stat().st_size,
-                    root_container_name=path.name,
+                    extract_dir, source_type="zip_entry", root_container_name=path.stem, project_id=project_id, project_name=project_name
                 )
             )
     return all_targets

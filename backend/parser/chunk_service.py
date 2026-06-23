@@ -19,8 +19,13 @@ class ChunkService:
 
             if len(chunk_text.strip()) >= 10:
                 chunks.append({
-                    "chunk_id": str(uuid.uuid4()), "chunk_index": chunk_index,
-                    "text": chunk_text, "start_pos": start, "end_pos": end,
+                    "chunk_id": str(uuid.uuid4()),
+                    "project_id": file_metadata.get("project_id"),
+                    "project_name": file_metadata.get("project_name"),
+                    "chunk_index": chunk_index,
+                    "text": chunk_text, 
+                    "start_pos": start, 
+                    "end_pos": end,
                     "file_name": file_metadata.get("file_name"),
                     "extension": file_metadata.get("extension"),
                     "relative_path": file_metadata.get("relative_path"),

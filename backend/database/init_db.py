@@ -50,10 +50,10 @@ def init_db() -> None:
                 );
 
                 CREATE TABLE IF NOT EXISTS uploaded_files (
-                    id          INTEGER  PRIMARY KEY AUTOINCREMENT,
-                    filename    TEXT     NOT NULL,
-                    saved_path  TEXT     NOT NULL,
-                    uploaded_at DATETIME DEFAULT (datetime('now', 'localtime'))
+                    project_id   TEXT     PRIMARY KEY,
+                    project_name TEXT     NOT NULL,
+                    saved_path   TEXT     NOT NULL,
+                    uploaded_at  DATETIME DEFAULT (datetime('now', 'localtime'))
                 );
 
                 CREATE TABLE IF NOT EXISTS chat_history (
