@@ -2,19 +2,20 @@
 IT-Smart Source Analyzer — Streamlit 프론트엔드
 
 사용자 식별 전략:
-  - extra-streamlit-components 의 CookieManager 로 실제 HTTP 쿠키에 UUID v4 저장
-  - 브라우저를 닫아도 쿠키 만료 전까지 동일 UUID 유지 (기본 1년)
+  - extra-streamlit-components CookieManager 로 브라우저 쿠키에 UUID v4 저장
+  - 새로고침(F5) 시 st.context.cookies 로 HTTP 쿠키를 즉시 읽어 동일 UUID 유지
+  - 컴포넌트 동기화 전에는 st.stop() 으로 대기 — 동기화 전 UUID 신규 발급 방지
   - 모든 API 요청에 X-User-Id 헤더 포함
-  - 업로드 파일은 전체 공유 / 채팅 히스토리는 사용자별 분리
-  - 페이지 재진입 시 DB 히스토리를 자동 복원해 대화 누적 표시
+  - 업로드 파일은 전체 사용자 공유 / 채팅 히스토리는 사용자별 완전 분리
+  - 페이지 재진입·새로고침 시 DB 히스토리를 자동 복원해 대화 누적 표시
 """
 import logging
 import os
 import re
 import html as html_mod
 import uuid
-from datetime import datetime, timedelta
 from typing import Any, Generator
+from datetime import datetime, timedelta
 
 import httpx
 import streamlit as st
@@ -23,8 +24,9 @@ import extra_streamlit_components as stx
 logger = logging.getLogger(__name__)
 
 # ── 설정 ─────────────────────────────────────────────────────────
-FASTAPI_URL     = os.getenv("FASTAPI_URL", "http://codeMind-backend:8000").rstrip("/")
-COOKIE_KEY      = "codemind_user_id"
+FASTAPI_URL = os.getenv("FASTAPI_URL", "http://codeMind-backend:8000").rstrip("/")
+COOKIE_KEY  = "codemind_user_id"
+COOKIE_TTL  = timedelta(days=365)
 HISTORY_LIMIT   = 100
 REQUEST_TIMEOUT = 30.0
 STREAM_TIMEOUT  = 300.0
@@ -33,53 +35,67 @@ INDEX_TIMEOUT   = 1800.0
 
 st.set_page_config(page_title="IT-Smart Source Analyzer", layout="wide")
 
-
-# ── 쿠키 매니저 싱글턴 ───────────────────────────────────────────
-# @st.cache_resource 안에서 위젯을 렌더링하면 CachedWidgetWarning 이 발생한다.
-# → session_state 에 인스턴스를 직접 보관해 매 rerun 마다 재사용한다.
+# ── 쿠키 / 사용자 ID ─────────────────────────────────────────────
+# CookieManager.getAll 은 컴포넌트 1회 렌더 후에야 브라우저 쿠키를 반환한다.
+# 동기화 전 mgr.get() 이 None 이면 "쿠키 없음"으로 오인해 UUID 를 매번 새로 만든다.
+# → F5 새로고침: st.context.cookies (HTTP 헤더) 우선
+# → 최초 방문·rerun: _xsrf 존재 시 동기화 완료로 판단 후 읽기/생성
 
 def _get_cookie_manager() -> stx.CookieManager:
-    """session_state 기반 싱글턴 CookieManager."""
     if "_cookie_mgr" not in st.session_state:
         st.session_state["_cookie_mgr"] = stx.CookieManager(key="codemind_cookie_mgr")
     return st.session_state["_cookie_mgr"]
 
 
+def _cookies_synced(mgr: stx.CookieManager) -> bool:
+    """Streamlit 이 항상 설정하는 _xsrf 가 보이면 getAll 동기화가 끝난 것."""
+    return bool(mgr.cookies) and "_xsrf" in mgr.cookies
+
+
 def get_or_create_user_id() -> str:
-    """
-    UUID 획득 우선순위:
-      1. session_state["user_id"] — rerun 간 캐시
-      2. 쿠키                    — 브라우저 재접속 후에도 유지
-      3. 신규 UUID 생성           — 최초 방문
-    """
-    # 1순위: session_state 캐시
-    cached = st.session_state.get("user_id", "")
+    cached = (st.session_state.get("user_id") or "").strip()
     if cached:
         return cached
 
-    # 2순위: 쿠키
+    # 브라우저 새로고침 시: 초기 HTTP 요청의 Cookie 헤더에서 즉시 읽음 (가장 안정적)
+    uid = (st.context.cookies.get(COOKIE_KEY) or "").strip()
+    if uid:
+        st.session_state["user_id"] = uid
+        return uid
+
     mgr = _get_cookie_manager()
+    if not _cookies_synced(mgr):
+        st.stop()
+
     uid = (mgr.get(COOKIE_KEY) or "").strip()
+    if uid:
+        st.session_state["user_id"] = uid
+        return uid
 
-    if not uid:
-        # 3순위: 신규 생성 후 쿠키 저장 (만료 1년)
-        uid = str(uuid.uuid4())
-        mgr.set(COOKIE_KEY, uid, expires_at=datetime.now() + timedelta(days=365))
-
+    uid = str(uuid.uuid4())
+    mgr.set(
+        COOKIE_KEY,
+        uid,
+        key="set_codemind_user_id",
+        expires_at=datetime.now() + COOKIE_TTL,
+        same_site="lax",
+    )
     st.session_state["user_id"] = uid
+    st.rerun()
     return uid
 
 
 # ── session_state 초기화 ─────────────────────────────────────────
 
 def init_session() -> None:
+    """앱 진입 시 1회 실행. 모든 session_state 키를 안전하게 보장한다."""
     defaults: dict[str, Any] = {
         "analysis_targets":  [],
         "db_analysis":       None,
         "messages":          [],     # {"role": "user"|"assistant", "content": str}
-        "history_loaded":    False,  # DB 히스토리 최초 1회 로드 여부
-        "system_status":     None,   # 상태 관리 탭 캐시
-        "show_reset_dialog": False,  # 초기화 확인 다이얼로그 표시 여부
+        "history_loaded":    False,  # DB 히스토리 최초 1회 로드 완료 여부
+        "system_status":     None,   # 상태 탭 캐시
+        "show_reset_dialog": False,  # 벡터 DB 초기화 확인 다이얼로그
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -109,8 +125,10 @@ def api_error_message(resp: httpx.Response) -> str:
     return resp.text or f"HTTP {resp.status_code}"
 
 
+# ── 히스토리 API ─────────────────────────────────────────────────
+
 def fetch_history(user_id: str) -> list[dict]:
-    """DB에서 사용자 히스토리 로드 후 오래된 순으로 반환."""
+    """해당 사용자의 히스토리를 DB에서 로드. 오래된 순으로 반환."""
     try:
         resp = httpx.get(
             f"{FASTAPI_URL}/history",
@@ -119,8 +137,9 @@ def fetch_history(user_id: str) -> list[dict]:
             timeout=REQUEST_TIMEOUT,
         )
         if resp.is_success:
+            # 백엔드는 최신순(DESC) 반환 → reversed() 로 오래된 순 정렬
             return list(reversed(resp.json().get("history", [])))
-        logger.warning("fetch_history 실패: %s", api_error_message(resp))
+        logger.warning("fetch_history 실패 [%s]: %s", resp.status_code, api_error_message(resp))
     except httpx.TimeoutException:
         st.warning("히스토리 조회 시간이 초과되었습니다.")
     except httpx.ConnectError:
@@ -132,6 +151,7 @@ def fetch_history(user_id: str) -> list[dict]:
 
 
 def post_history(user_id: str, question: str, answer: str) -> None:
+    """스트리밍 완료 후 Q&A 쌍을 해당 사용자의 DB에 저장."""
     try:
         resp = httpx.post(
             f"{FASTAPI_URL}/history",
@@ -140,7 +160,7 @@ def post_history(user_id: str, question: str, answer: str) -> None:
             timeout=REQUEST_TIMEOUT,
         )
         if not resp.is_success:
-            logger.warning("post_history 실패: %s", api_error_message(resp))
+            logger.warning("post_history 실패 [%s]: %s", resp.status_code, api_error_message(resp))
     except httpx.TimeoutException:
         st.warning("히스토리 저장 시간이 초과되었습니다.")
     except Exception as e:
@@ -148,21 +168,26 @@ def post_history(user_id: str, question: str, answer: str) -> None:
         st.warning(f"히스토리 저장 실패: {e}")
 
 
-def clear_history_api(user_id: str) -> None:
+def clear_history_api(user_id: str) -> bool:
+    """해당 사용자의 히스토리 전체 삭제. 성공 여부 반환."""
     try:
         resp = httpx.delete(
             f"{FASTAPI_URL}/history",
             headers=_headers(user_id),
             timeout=REQUEST_TIMEOUT,
         )
-        if not resp.is_success:
-            st.error(f"히스토리 초기화 실패: {api_error_message(resp)}")
+        if resp.is_success:
+            return True
+        st.error(f"히스토리 초기화 실패: {api_error_message(resp)}")
     except httpx.TimeoutException:
         st.error("히스토리 초기화 시간이 초과되었습니다.")
     except Exception as e:
         logger.exception("clear_history_api 예외")
         st.error(f"히스토리 초기화 실패: {e}")
+    return False
 
+
+# ── 스트리밍 응답 ────────────────────────────────────────────────
 
 def get_streaming_response(
     user_id: str, question: str, extra: str = ""
@@ -308,6 +333,210 @@ def render_status_panel(status: dict) -> None:
         st.info("모델 정보가 없습니다.")
 
 
+# ── 탭 렌더링 ────────────────────────────────────────────────────
+
+def render_upload_tab(user_id: str) -> None:
+    st.subheader("📁 소스 파일 업로드")
+    st.info("업로드된 소스 파일은 **모든 사용자가 공통으로 공유**합니다.")
+
+    uploaded_file = st.file_uploader("ZIP 파일 업로드 (최대 1GB)", type=["zip"])
+
+    if st.button("📤 파일 저장 및 소스 수집"):
+        if not uploaded_file:
+            st.warning("파일을 먼저 업로드해주세요.")
+        else:
+            with st.spinner("백엔드로 파일 전송 중..."):
+                try:
+                    resp = httpx.post(
+                        f"{FASTAPI_URL}/upload",
+                        files=[("files", (
+                            uploaded_file.name,
+                            uploaded_file.getvalue(),
+                            "application/octet-stream",
+                        ))],
+                        headers=_headers(user_id),
+                        timeout=UPLOAD_TIMEOUT,
+                    )
+                    if resp.is_success:
+                        data = resp.json()
+                        st.session_state.analysis_targets = data.get("targets", [])
+                        st.success(f"✅ {data.get('count', 0)}개 소스 파일 수집 완료")
+                    else:
+                        st.error(
+                            f"업로드 실패 (HTTP {resp.status_code}): "
+                            f"{api_error_message(resp)}"
+                        )
+                except httpx.TimeoutException:
+                    st.error("업로드 시간이 초과되었습니다.")
+                except httpx.ConnectError:
+                    st.error("백엔드 서버에 연결할 수 없습니다.")
+                except Exception as e:
+                    logger.exception("업로드 예외")
+                    st.error(f"업로드 중 오류: {e}")
+
+    if st.session_state.analysis_targets:
+        count = len(st.session_state.analysis_targets)
+        st.info(f"수집된 소스 파일: **{count}개** — 아래 버튼으로 인덱싱을 시작하세요.")
+
+        if st.button("🚀 전체 인덱싱 시작 (Qdrant 저장)", type="primary"):
+            with st.spinner("인덱싱 중... 파일 크기에 따라 수 분이 걸릴 수 있습니다."):
+                try:
+                    resp = httpx.post(
+                        f"{FASTAPI_URL}/index",
+                        json=st.session_state.analysis_targets,
+                        headers=_headers(user_id),
+                        timeout=INDEX_TIMEOUT,
+                    )
+                    if resp.is_success:
+                        data = resp.json()
+                        total = format_count(data.get("total_chunks") or 0)
+                        st.success(f"✅ 인덱싱 완료! 생성된 청크: {total}")
+                        if data.get("logs"):
+                            with st.expander("인덱싱 로그 보기"):
+                                st.text("\n".join(data["logs"]))
+                    else:
+                        st.error(f"인덱싱 실패: {api_error_message(resp)}")
+                except httpx.TimeoutException:
+                    st.error("인덱싱 시간이 초과되었습니다.")
+                except httpx.ConnectError:
+                    st.error("백엔드 서버에 연결할 수 없습니다.")
+                except Exception as e:
+                    logger.exception("인덱싱 예외")
+                    st.error(f"인덱싱 중 오류: {e}")
+
+
+def render_chat_tab(user_id: str) -> None:
+    st.subheader("💬 AI 코드 분석")
+
+    if st.button("🗑️ 대화 초기화", key="clear_chat"):
+        with st.spinner("대화 초기화 중..."):
+            if clear_history_api(user_id):
+                st.session_state.messages = []
+                st.rerun()
+
+    # 누적 대화 렌더링
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg["role"] == "assistant":
+                for block in extract_mermaid_blocks(msg["content"]):
+                    render_mermaid(block)
+
+    # 새 질문 입력
+    query = st.chat_input("소스 코드에 대해 궁금한 점을 물어보세요")
+    if not query or not query.strip():
+        return
+
+    question = query.strip()
+    st.session_state.messages.append({"role": "user", "content": question})
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    collected: list[str] = []
+    with st.chat_message("assistant"):
+        def _gen():
+            extra = ""
+            if st.session_state.db_analysis:
+                extra = (
+                    f"\n\n[참고: DB 분석 데이터]\n"
+                    f"{st.session_state.db_analysis.get('db_data', '')}"
+                )
+            for chunk in get_streaming_response(user_id, question, extra):
+                collected.append(chunk)
+                yield chunk
+        st.write_stream(_gen())
+
+    answer = "".join(collected)
+    if answer:
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+        post_history(user_id, question, answer)
+        for block in extract_mermaid_blocks(answer):
+            render_mermaid(block)
+    else:
+        st.session_state.messages.pop()
+        st.warning("응답을 받지 못했습니다. 다시 시도해주세요.")
+
+    st.rerun()
+
+
+def render_status_tab(user_id: str) -> None:
+    st.subheader("⚙️ 시스템 상태")
+    st.caption("Docker 컨테이너와 LLM/임베딩 모델의 연결 상태를 확인합니다.")
+
+    refresh_col, _ = st.columns([1, 4])
+    with refresh_col:
+        refresh_clicked = st.button(
+            "🔄 상태 새로고침", type="primary", use_container_width=True
+        )
+
+    if refresh_clicked or st.session_state.system_status is None:
+        with st.spinner("상태 확인 중..."):
+            try:
+                st.session_state.system_status = fetch_system_status()
+            except httpx.TimeoutException:
+                st.session_state.system_status = {}
+                st.error("상태 조회 시간이 초과되었습니다.")
+            except httpx.ConnectError:
+                st.session_state.system_status = {}
+                st.error("백엔드 서버에 연결할 수 없습니다.")
+            except Exception as e:
+                st.session_state.system_status = {}
+                st.error(f"상태 조회 실패: {e}")
+
+    if st.session_state.system_status:
+        render_status_panel(st.session_state.system_status)
+    else:
+        st.info("상태 정보가 없습니다. 새로고침 버튼을 눌러주세요.")
+
+    st.divider()
+    st.subheader("🗑️ 벡터 DB 초기화")
+
+    if not st.session_state.show_reset_dialog:
+        if st.button("⚠️ 모든 벡터 데이터 초기화", type="secondary"):
+            st.session_state.show_reset_dialog = True
+            st.rerun()
+    else:
+        st.warning(
+            "**주의:** 벡터 DB의 모든 인덱싱 데이터가 삭제됩니다.\n\n"
+            "채팅 히스토리는 유지됩니다. 계속하려면 아래에 **RESET** 을 입력하세요."
+        )
+        confirm_text = st.text_input(
+            "초기화 확인", key="reset_confirm_input", placeholder="RESET 입력"
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("초기화 실행", type="primary"):
+                if confirm_text != "RESET":
+                    st.error("RESET 을 정확히 입력해야 합니다.")
+                else:
+                    with st.spinner("초기화 중..."):
+                        try:
+                            resp = httpx.delete(
+                                f"{FASTAPI_URL}/reset",
+                                params={"confirm_text": "RESET"},
+                                timeout=REQUEST_TIMEOUT,
+                            )
+                            if resp.is_success:
+                                st.success("✅ 벡터 DB 초기화 완료")
+                                st.session_state.show_reset_dialog = False
+                                st.session_state.system_status = None
+                                st.session_state.analysis_targets = []
+                                st.rerun()
+                            else:
+                                st.error(f"초기화 실패: {api_error_message(resp)}")
+                        except httpx.TimeoutException:
+                            st.error("초기화 시간이 초과되었습니다.")
+                        except httpx.ConnectError:
+                            st.error("백엔드 서버에 연결할 수 없습니다.")
+                        except Exception as e:
+                            logger.exception("reset 예외")
+                            st.error(f"초기화 중 오류: {e}")
+        with col2:
+            if st.button("취소"):
+                st.session_state.show_reset_dialog = False
+                st.rerun()
+
+
 # ── 메인 ─────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -328,206 +557,12 @@ def main() -> None:
         st.session_state.history_loaded = True
 
     tabs = st.tabs(["📁 업로드 & 인덱싱", "💬 AI 질문하기", "⚙️ 상태 관리"])
-
-    # ── Tab 0: 업로드 & 인덱싱 ──────────────────────────────────
     with tabs[0]:
-        st.subheader("📁 소스 파일 업로드 (전체 공유)")
-        st.info("업로드된 소스는 모든 사용자가 공통으로 사용합니다.")
-
-        uploaded_file = st.file_uploader("ZIP 파일 업로드 (최대 1GB)", type=["zip"])
-
-        if st.button("파일 저장 및 분석 실행"):
-            if not uploaded_file:
-                st.warning("파일을 먼저 업로드해주세요.")
-            else:
-                with st.spinner("백엔드로 파일 전송 중..."):
-                    try:
-                        resp = httpx.post(
-                            f"{FASTAPI_URL}/upload",
-                            files=[("files", (
-                                uploaded_file.name,
-                                uploaded_file.getvalue(),
-                                "application/octet-stream",
-                            ))],
-                            headers=_headers(user_id),
-                            timeout=UPLOAD_TIMEOUT,
-                        )
-                        if resp.is_success:
-                            data = resp.json()
-                            st.session_state.analysis_targets = data.get("targets", [])
-                            st.success(f"✅ {data.get('count', 0)}개 파일 수집 완료")
-                        else:
-                            st.error(f"업로드 실패 (HTTP {resp.status_code}): {api_error_message(resp)}")
-                    except httpx.TimeoutException:
-                        st.error("업로드 시간이 초과되었습니다.")
-                    except httpx.ConnectError:
-                        st.error("백엔드 서버에 연결할 수 없습니다.")
-                    except Exception as e:
-                        logger.exception("업로드 예외")
-                        st.error(f"업로드 중 오류: {e}")
-
-        if st.session_state.analysis_targets:
-            st.info(f"현재 수집된 파일: {len(st.session_state.analysis_targets)}개")
-            if st.button("🚀 전체 인덱싱 시작 (Qdrant 저장)", type="primary"):
-                with st.spinner("백엔드에서 인덱싱 중... (시간이 걸릴 수 있습니다)"):
-                    try:
-                        resp = httpx.post(
-                            f"{FASTAPI_URL}/index",
-                            json=st.session_state.analysis_targets,
-                            headers=_headers(user_id),
-                            timeout=INDEX_TIMEOUT,
-                        )
-                        if resp.is_success:
-                            data = resp.json()
-                            st.success(
-                                f"✅ 인덱싱 완료! 생성된 청크: "
-                                f"{format_count(data.get('total_chunks') or 0)}"
-                            )
-                            if data.get("logs"):
-                                with st.expander("인덱싱 로그"):
-                                    st.text("\n".join(data["logs"]))
-                        else:
-                            st.error(f"인덱싱 실패: {api_error_message(resp)}")
-                    except httpx.TimeoutException:
-                        st.error("인덱싱 시간이 초과되었습니다.")
-                    except httpx.ConnectError:
-                        st.error("백엔드 서버에 연결할 수 없습니다.")
-                    except Exception as e:
-                        logger.exception("인덱싱 예외")
-                        st.error(f"인덱싱 중 오류: {e}")
-
-    # ── Tab 1: AI 질문 (대화형 누적) ────────────────────────────
+        render_upload_tab(user_id)
     with tabs[1]:
-        st.subheader("💬 AI 코드 분석 (RAG)")
-
-        if st.button("🗑️ 대화 초기화", key="clear_chat"):
-            with st.spinner("대화 초기화 중..."):
-                clear_history_api(user_id)
-            st.session_state.messages = []
-            st.rerun()
-
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-                if msg["role"] == "assistant":
-                    for block in extract_mermaid_blocks(msg["content"]):
-                        render_mermaid(block)
-
-        query = st.chat_input("소스 코드에 대해 궁금한 점을 물어보세요")
-        if query and query.strip():
-            question = query.strip()
-            st.session_state.messages.append({"role": "user", "content": question})
-
-            with st.chat_message("user"):
-                st.markdown(question)
-
-            with st.chat_message("assistant"):
-                collected: list[str] = []
-
-                def _gen():
-                    extra = ""
-                    if st.session_state.db_analysis:
-                        extra = (
-                            f"\n\n[참고: DB 분석 데이터]\n"
-                            f"{st.session_state.db_analysis.get('db_data', '')}"
-                        )
-                    for chunk in get_streaming_response(user_id, question, extra):
-                        collected.append(chunk)
-                        yield chunk
-
-                full_text = st.write_stream(_gen())
-
-            answer = "".join(collected) if collected else (full_text or "")
-
-            if answer:
-                st.session_state.messages.append({"role": "assistant", "content": answer})
-                post_history(user_id, question, answer)
-                for block in extract_mermaid_blocks(answer):
-                    render_mermaid(block)
-            else:
-                st.warning("응답을 받지 못했습니다. 다시 시도해주세요.")
-
-            st.rerun()
-
-    # ── Tab 2: 상태 관리 ─────────────────────────────────────────
+        render_chat_tab(user_id)
     with tabs[2]:
-        st.subheader("⚙️ 시스템 상태")
-        st.caption("Docker 컨테이너와 LLM/임베딩 모델의 연결 상태를 확인합니다.")
-
-        refresh_col, _ = st.columns([1, 4])
-        with refresh_col:
-            refresh_clicked = st.button(
-                "🔄 상태 새로고침", type="primary", use_container_width=True
-            )
-
-        if refresh_clicked or st.session_state.system_status is None:
-            with st.spinner("상태 확인 중..."):
-                try:
-                    st.session_state.system_status = fetch_system_status()
-                except httpx.TimeoutException:
-                    st.session_state.system_status = {}
-                    st.error("상태 조회 시간이 초과되었습니다.")
-                except httpx.ConnectError:
-                    st.session_state.system_status = {}
-                    st.error("백엔드 서버에 연결할 수 없습니다.")
-                except Exception as e:
-                    st.session_state.system_status = {}
-                    st.error(f"상태 조회 실패: {e}")
-
-        if st.session_state.system_status:
-            render_status_panel(st.session_state.system_status)
-        else:
-            st.info("상태 정보가 없습니다. 새로고침 버튼을 눌러주세요.")
-
-        st.divider()
-        st.subheader("🗑️ 벡터 DB 초기화")
-
-        if not st.session_state.show_reset_dialog:
-            if st.button("⚠️ 모든 벡터 데이터 초기화", type="secondary"):
-                st.session_state.show_reset_dialog = True
-                st.rerun()
-        else:
-            st.warning(
-                "**주의:** 벡터 DB의 모든 인덱싱 데이터가 삭제됩니다.\n\n"
-                "채팅 히스토리는 유지됩니다. 계속하려면 아래에 **RESET** 을 입력하세요."
-            )
-            confirm_text = st.text_input(
-                "초기화 확인 (RESET 입력)",
-                key="reset_confirm_input",
-                placeholder="RESET",
-            )
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("초기화 실행", type="primary"):
-                    if confirm_text != "RESET":
-                        st.error("RESET 을 정확히 입력해야 합니다.")
-                    else:
-                        with st.spinner("초기화 중..."):
-                            try:
-                                resp = httpx.delete(
-                                    f"{FASTAPI_URL}/reset",
-                                    params={"confirm_text": "RESET"},
-                                    timeout=REQUEST_TIMEOUT,
-                                )
-                                if resp.is_success:
-                                    st.success("✅ 벡터 DB 초기화 완료")
-                                    st.session_state.show_reset_dialog = False
-                                    st.session_state.system_status = None
-                                    st.session_state.analysis_targets = []
-                                    st.rerun()
-                                else:
-                                    st.error(f"초기화 실패: {api_error_message(resp)}")
-                            except httpx.TimeoutException:
-                                st.error("초기화 시간이 초과되었습니다.")
-                            except httpx.ConnectError:
-                                st.error("백엔드 서버에 연결할 수 없습니다.")
-                            except Exception as e:
-                                logger.exception("reset 예외")
-                                st.error(f"초기화 중 오류: {e}")
-            with col2:
-                if st.button("취소"):
-                    st.session_state.show_reset_dialog = False
-                    st.rerun()
+        render_status_tab(user_id)
 
 
 if __name__ == "__main__":

@@ -19,8 +19,9 @@ def get_connection() -> sqlite3.Connection:
     """
     SQLite 커넥션 반환.
     - check_same_thread=False : FastAPI/uvicorn 멀티스레드 환경에서 안전하게 사용
-    - WAL 모드는 init_db() 에서 설정하므로 여기서는 PRAGMA 미적용
-    - timeout=10 : 다른 스레드 쓰기 락 대기 최대 10초
+    - timeout=10              : 다른 스레드 쓰기 락 대기 최대 10초
+    PRAGMA foreign_keys 는 커넥션별로 설정해야 하므로 여기서 적용한다.
+    (executescript() 는 암묵적 COMMIT 을 먼저 실행하므로 PRAGMA 가 무시됨)
     """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(
@@ -29,35 +30,38 @@ def get_connection() -> sqlite3.Connection:
         timeout=10,
     )
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
 def init_db() -> None:
-    """앱 시작 시 1회 호출 — 테이블이 없으면 생성한다."""
+    """
+    앱 시작 시 1회 호출 — 테이블이 없으면 생성한다.
+    WAL 모드는 executescript 로 설정해도 DB 파일에 영구 적용되므로 여기서 설정.
+    """
     try:
         with get_connection() as conn:
             conn.executescript("""
-                PRAGMA journal_mode=WAL;
-                PRAGMA foreign_keys=ON;
+                PRAGMA journal_mode = WAL;
 
                 CREATE TABLE IF NOT EXISTS users (
                     user_id    TEXT PRIMARY KEY,
-                    created_at DATETIME DEFAULT (datetime('now','localtime'))
+                    created_at DATETIME DEFAULT (datetime('now', 'localtime'))
                 );
 
                 CREATE TABLE IF NOT EXISTS uploaded_files (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    filename    TEXT    NOT NULL,
-                    saved_path  TEXT    NOT NULL,
-                    uploaded_at DATETIME DEFAULT (datetime('now','localtime'))
+                    id          INTEGER  PRIMARY KEY AUTOINCREMENT,
+                    filename    TEXT     NOT NULL,
+                    saved_path  TEXT     NOT NULL,
+                    uploaded_at DATETIME DEFAULT (datetime('now', 'localtime'))
                 );
 
                 CREATE TABLE IF NOT EXISTS chat_history (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id    TEXT    NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                    question   TEXT    NOT NULL,
-                    answer     TEXT    NOT NULL,
-                    created_at DATETIME DEFAULT (datetime('now','localtime'))
+                    id         INTEGER  PRIMARY KEY AUTOINCREMENT,
+                    user_id    TEXT     NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    question   TEXT     NOT NULL,
+                    answer     TEXT     NOT NULL,
+                    created_at DATETIME DEFAULT (datetime('now', 'localtime'))
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_chat_user

@@ -1,3 +1,6 @@
+"""
+IT-Smart CodeMind — FastAPI 백엔드 진입점
+"""
 import logging
 import os
 import sys
@@ -31,21 +34,35 @@ from utils.file_utils import (
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
 
+# ── 로깅 설정 ────────────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,                          # 기본: WARNING 이상만 출력
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger(__name__)
 
+# 앱 자체 로거는 INFO 유지 (startup·shutdown·오류 등 핵심 메시지)
+logging.getLogger("main").setLevel(logging.INFO)
+logging.getLogger("rag").setLevel(logging.INFO)
+logging.getLogger("database").setLevel(logging.INFO)
 
-# ── /health 요청만 access log에서 제외 ──────────────────────
-class HealthCheckFilter(logging.Filter):
+# uvicorn access log: /health, /status, Qdrant count 요청 제외
+class _AccessLogFilter(logging.Filter):
+    _SKIP = ("/health", "/status", "/collections/")
+
     def filter(self, record: logging.LogRecord) -> bool:
-        return "/health" not in record.getMessage()
+        msg = record.getMessage()
+        return not any(s in msg for s in self._SKIP)
 
-# TODO : /collection 관련 access log 제외 추가 필요.
-logging.getLogger("uvicorn.access").addFilter(HealthCheckFilter())
-# ────────────────────────────────────────────────────────────
+_access_logger = logging.getLogger("uvicorn.access")
+_access_logger.addFilter(_AccessLogFilter())
+_access_logger.setLevel(logging.WARNING)   # 나머지 access log 도 경고 이상만
+
+# httpx 내부 로그(Qdrant HTTP 통신 등) 억제
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# ── 앱 로거 ──────────────────────────────────────────────────────
+logger = logging.getLogger("main")
 
 settings = get_settings()
 UPLOAD_DIR = settings.upload_dir
@@ -55,23 +72,20 @@ UPLOAD_DIR = settings.upload_dir
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Application startup")
+    logger.info("Starting up...")
     try:
         init_db()
-        logger.info("Database initialized")
-
         rag = RAGService(settings)
         app.state.rag_service = rag
         app.state.rag_initialized = True
         app.state.init_error = None
-        logger.info("RAGService initialized")
+        logger.info("Startup complete")
     except Exception as e:
-        logger.exception("Startup failed")
-        raise RuntimeError(f"Application startup failed: {e}") from e
+        logger.exception("Startup failed: %s", e)
+        raise RuntimeError(f"Startup failed: {e}") from e
 
     yield
-
-    logger.info("Application shutdown")
+    logger.info("Shutdown complete")
 
 
 app = FastAPI(title="IT-Smart CodeMind API", lifespan=lifespan)
@@ -131,7 +145,7 @@ async def _save_upload_stream(upload: UploadFile, dest: Path) -> int:
         raise
     except Exception as e:
         dest.unlink(missing_ok=True)
-        logger.exception("파일 저장 실패: %s", dest)
+        logger.error("파일 저장 실패: %s — %s", dest.name, e)
         raise HTTPException(status_code=500, detail=f"파일 저장 중 오류: {e}") from e
     return total_written
 
@@ -149,7 +163,6 @@ async def upload(
 
     if not files:
         raise HTTPException(status_code=400, detail="업로드할 파일이 없습니다.")
-
     if len(files) > settings.max_files_per_request:
         raise HTTPException(
             status_code=400,
@@ -170,17 +183,15 @@ async def upload(
                 status_code=400,
                 detail=f"허용되지 않는 파일 형식입니다: {f.filename}",
             )
-
         dest = Path(UPLOAD_DIR) / safe_filename(f.filename)
         await _save_upload_stream(f, dest)
-
         try:
             save_uploaded_file(f.filename, str(dest))
         except Exception as e:
-            logger.error("DB 저장 실패 (파일 업로드 이력): %s", e)
-            # 파일 자체는 저장됐으므로 계속 진행
+            logger.error("업로드 이력 DB 저장 실패: %s", e)
 
     targets = await run_in_threadpool(process_uploads_and_collect, Path(UPLOAD_DIR))
+    logger.info("업로드 완료: %d개 파일 수집", len(targets))
     return {"targets": [t.__dict__ for t in targets], "count": len(targets)}
 
 
@@ -192,11 +203,11 @@ async def index(
     """수집된 파일 목록을 Qdrant 에 인덱싱."""
     if not targets:
         raise HTTPException(status_code=400, detail="인덱싱할 파일 목록이 없습니다.")
-
     service = get_rag_service(request)
     try:
         result = await run_in_threadpool(service.index_files, targets)
         result["total_chunks"] = int(result.get("total_chunks") or 0)
+        logger.info("인덱싱 완료: %d chunks", result["total_chunks"])
         return result
     except Exception as e:
         logger.exception("인덱싱 실패")
@@ -215,10 +226,8 @@ async def ask(
 ):
     """질문에 대한 RAG 스트리밍 응답."""
     _require_user(x_user_id)
-
     if not question or not question.strip():
         raise HTTPException(status_code=400, detail="질문이 비어 있습니다.")
-
     if top_k < 1 or top_k > 20:
         top_k = settings.top_k
 
@@ -231,7 +240,7 @@ async def ask(
         )
         return StreamingResponse(gen, media_type="text/plain")
     except Exception as e:
-        logger.exception("ask 처리 실패")
+        logger.error("ask 처리 실패: %s", e)
         raise HTTPException(status_code=500, detail=f"질문 처리 중 오류: {e}") from e
 
 
@@ -243,18 +252,16 @@ def add_history(
     """스트리밍 완료 후 프론트에서 question + answer 를 저장."""
     user_id = _require_user(x_user_id)
     question = (payload.get("question") or "").strip()
-    answer = (payload.get("answer") or "").strip()
-
+    answer   = (payload.get("answer")   or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="question 이 비어 있습니다.")
     if not answer:
         raise HTTPException(status_code=400, detail="answer 가 비어 있습니다.")
-
     try:
         row_id = save_history(user_id, question, answer)
         return {"id": row_id, "status": "saved"}
     except Exception as e:
-        logger.exception("히스토리 저장 실패")
+        logger.error("히스토리 저장 실패: %s", e)
         raise HTTPException(status_code=500, detail=f"히스토리 저장 중 오류: {e}") from e
 
 
@@ -290,8 +297,7 @@ def clear_history(
 def status(request: Request):
     """전체 시스템 상태 반환 (Qdrant, Ollama, 모델, 청크 수)."""
     rag_initialized = getattr(request.app.state, "rag_initialized", False)
-    init_error = getattr(request.app.state, "init_error", None)
-
+    init_error      = getattr(request.app.state, "init_error", None)
     base = build_system_status(settings, rag_initialized, init_error)
 
     # 청크 수를 직접 조회해 추가
@@ -300,25 +306,20 @@ def status(request: Request):
         base["chunk_count"] = svc.qdrant_service.count_points()
     except Exception:
         base["chunk_count"] = 0
-
     return base
 
 
 @app.delete("/reset")
-async def reset(
-    request: Request,
-    confirm_text: str,
-):
-    """벡터 DB 전체 초기화. confirm_text="RESET" 이어야 실행."""
+async def reset(request: Request, confirm_text: str):
     if confirm_text != "RESET":
         raise HTTPException(status_code=400, detail="초기화하려면 confirm_text=RESET 을 전달하세요.")
-
     service = get_rag_service(request)
     try:
         await run_in_threadpool(service.reset)
+        logger.info("벡터 DB 초기화 완료")
         return {"status": "success", "message": "벡터 DB 초기화 완료"}
     except Exception as e:
-        logger.exception("reset 실패")
+        logger.error("reset 실패: %s", e)
         raise HTTPException(status_code=500, detail=f"초기화 중 오류: {e}") from e
 
 
