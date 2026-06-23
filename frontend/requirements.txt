@@ -7,5 +7,7 @@ httpx==0.28.1
 # 환경변수
 python-dotenv==1.2.2
 
-# 브라우저 쿠키로 UUID 영구 저장 (브라우저 재접속 후에도 동일 사용자 유지)
-streamlit-cookies-manager==0.2.0
+# 브라우저 쿠키로 UUID 영구 저장
+# streamlit-cookies-manager 는 Streamlit 1.40+ 내부 API 변경으로 동작 불가
+# → extra-streamlit-components 로 교체 (activelib 기준 최신 호환 버전)
+extra-streamlit-components==0.1.71

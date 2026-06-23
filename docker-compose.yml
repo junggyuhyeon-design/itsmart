@@ -68,11 +68,11 @@ services:
     restart: unless-stopped
 
 volumes:
-  qdrant_data:          # Qdrant 벡터 DB 데이터 (필수)
-  ollama_data:          # Ollama LLM 모델 데이터 (필수)
-  model_cache:          # HuggingFace 임베딩 모델 캐시 (필수)
-  upload_data:          # 업로드된 소스코드 파일 (필수)
-  sqlite_data:          # SQLite 사용자/히스토리 DB (필수)
+  qdrant_data:          # Qdrant 벡터 DB 데이터
+  ollama_data:          # Ollama LLM 모델 데이터
+  model_cache:          # HuggingFace 임베딩 모델 캐시
+  upload_data:          # 업로드된 소스코드 파일
+  sqlite_data:          # SQLite 사용자/히스토리 DB
 
 networks:
   codeMind-net:
