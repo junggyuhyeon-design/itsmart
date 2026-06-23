@@ -1,14 +1,3 @@
-"""
-IT-Smart Source Analyzer — Streamlit 프론트엔드
-
-사용자 식별 전략:
-  - extra-streamlit-components CookieManager 로 브라우저 쿠키에 UUID v4 저장
-  - 새로고침(F5) 시 st.context.cookies 로 HTTP 쿠키를 즉시 읽어 동일 UUID 유지
-  - 컴포넌트 동기화 전에는 st.stop() 으로 대기 — 동기화 전 UUID 신규 발급 방지
-  - 모든 API 요청에 X-User-Id 헤더 포함
-  - 업로드 파일은 전체 사용자 공유 / 채팅 히스토리는 사용자별 완전 분리
-  - 페이지 재진입·새로고침 시 DB 히스토리를 자동 복원해 대화 누적 표시
-"""
 import logging
 import os
 import re
@@ -35,11 +24,7 @@ INDEX_TIMEOUT   = 1800.0
 
 st.set_page_config(page_title="IT-Smart Source Analyzer", layout="wide")
 
-# ── 쿠키 / 사용자 ID ─────────────────────────────────────────────
-# CookieManager.getAll 은 컴포넌트 1회 렌더 후에야 브라우저 쿠키를 반환한다.
-# 동기화 전 mgr.get() 이 None 이면 "쿠키 없음"으로 오인해 UUID 를 매번 새로 만든다.
-# → F5 새로고침: st.context.cookies (HTTP 헤더) 우선
-# → 최초 방문·rerun: _xsrf 존재 시 동기화 완료로 판단 후 읽기/생성
+# ── 쿠키 ─────────────────────────────────────────────────────────
 
 def _get_cookie_manager() -> stx.CookieManager:
     if "_cookie_mgr" not in st.session_state:
@@ -47,43 +32,52 @@ def _get_cookie_manager() -> stx.CookieManager:
     return st.session_state["_cookie_mgr"]
 
 
-def _cookies_synced(mgr: stx.CookieManager) -> bool:
-    """Streamlit 이 항상 설정하는 _xsrf 가 보이면 getAll 동기화가 끝난 것."""
-    return bool(mgr.cookies) and "_xsrf" in mgr.cookies
-
-
 def get_or_create_user_id() -> str:
-    cached = (st.session_state.get("user_id") or "").strip()
-    if cached:
-        return cached
+    # 1. session_state
+    uid = st.session_state.get("user_id")
+    if uid:
+        return uid
 
-    # 브라우저 새로고침 시: 초기 HTTP 요청의 Cookie 헤더에서 즉시 읽음 (가장 안정적)
+    # 2. HTTP Cookie
     uid = (st.context.cookies.get(COOKIE_KEY) or "").strip()
+
     if uid:
         st.session_state["user_id"] = uid
         return uid
 
-    mgr = _get_cookie_manager()
-    if not _cookies_synced(mgr):
-        st.stop()
+    # 3. CookieManager
+    try:
+        mgr = _get_cookie_manager()
 
-    uid = (mgr.get(COOKIE_KEY) or "").strip()
-    if uid:
-        st.session_state["user_id"] = uid
-        return uid
+        uid = (mgr.get(COOKIE_KEY) or "").strip()
 
+        if uid:
+            st.session_state["user_id"] = uid
+            return uid
+
+    except Exception:
+        logger.exception("CookieManager read failed")
+
+    # 4. 신규 UUID 생성
     uid = str(uuid.uuid4())
-    mgr.set(
-        COOKIE_KEY,
-        uid,
-        key="set_codemind_user_id",
-        expires_at=datetime.now() + COOKIE_TTL,
-        same_site="lax",
-    )
-    st.session_state["user_id"] = uid
-    st.rerun()
-    return uid
 
+    st.session_state["user_id"] = uid
+
+    try:
+        mgr = _get_cookie_manager()
+
+        mgr.set(
+            COOKIE_KEY,
+            uid,
+            key=COOKIE_KEY,
+            expires_at=datetime.now() + COOKIE_TTL,
+            same_site="Lax",
+        )
+
+    except Exception:
+        logger.exception("Cookie save failed")
+
+    return uid
 
 # ── session_state 초기화 ─────────────────────────────────────────
 
