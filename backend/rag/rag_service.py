@@ -24,8 +24,13 @@ class RAGService:
     # ── 인덱싱 ──────────────────────────────────────────────────
 
     def index_files(self, targets: list) -> dict:
+        from database.history_repository import bulk_insert_file_index
+
         self.qdrant_service.ensure_collection(self.embedding_service.dimension)
         results: dict = {"success": 0, "failed": 0, "total_chunks": 0, "logs": []}
+
+        # 성공적으로 파싱된 파일의 메타데이터를 모아 일괄 저장
+        indexed_meta: list[dict] = []
 
         for t in targets:
             rel_path = t.get("relative_path", "unknown")
@@ -46,10 +51,28 @@ class RAGService:
                 results["success"] += 1
                 results["total_chunks"] += count
                 results["logs"].append(f"✅ {rel_path} ({count} chunks)")
+
+                # file_index 에 저장할 메타데이터 수집
+                indexed_meta.append({
+                    "project_id":    parsed["project_id"],
+                    "project_name":  parsed["project_name"],
+                    "file_name":     parsed["file_name"],
+                    "relative_path": parsed["relative_path"],
+                    "extension":     parsed["extension"],
+                    "file_size":     parsed.get("file_size", 0),
+                })
             except Exception as e:
                 results["failed"] += 1
                 results["logs"].append(f"❌ {rel_path}: {e}")
                 logger.exception("index_files 실패: %s", rel_path)
+
+        # file_index 일괄 저장 (Qdrant 성공분만)
+        if indexed_meta:
+            try:
+                saved = bulk_insert_file_index(indexed_meta)
+                logger.info("file_index 저장 완료: %d건", saved)
+            except Exception:
+                logger.exception("file_index 저장 실패 — Qdrant 인덱싱은 이미 완료됨")
 
         return results
 

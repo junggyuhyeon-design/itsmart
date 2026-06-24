@@ -3,7 +3,8 @@ SQLite 데이터베이스 초기화 모듈
 
 테이블 구조:
 - users         : UUID 기반 사용자 등록 테이블
-- uploaded_files: 모든 사용자 공통 업로드 파일 테이블 (공유 소스)
+- uploaded_files: 프로젝트(ZIP) 단위 등록 테이블
+- file_index    : ZIP 내 개별 파일 메타데이터 (uploaded_files 1:N)
 - chat_history  : 사용자별 질문/답변 히스토리 테이블
 """
 import logging
@@ -36,8 +37,8 @@ def get_connection() -> sqlite3.Connection:
 
 def init_db() -> None:
     """
-    앱 시작 시 1회 호출 — 테이블이 없으면 생성한다.
-    WAL 모드는 executescript 로 설정해도 DB 파일에 영구 적용되므로 여기서 설정.
+    앱 시작 시 1회 호출.
+    - 테이블이 없으면 생성
     """
     try:
         with get_connection() as conn:
@@ -55,6 +56,23 @@ def init_db() -> None:
                     saved_path   TEXT     NOT NULL,
                     uploaded_at  DATETIME DEFAULT (datetime('now', 'localtime'))
                 );
+
+                -- ZIP 내 개별 파일 메타데이터 (uploaded_files 와 1:N)
+                CREATE TABLE IF NOT EXISTS file_index (
+                    id            INTEGER  PRIMARY KEY AUTOINCREMENT,
+                    project_id    TEXT     NOT NULL
+                                           REFERENCES uploaded_files(project_id)
+                                           ON DELETE CASCADE,
+                    project_name  TEXT     NOT NULL,
+                    file_name     TEXT     NOT NULL,
+                    relative_path TEXT     NOT NULL,
+                    extension     TEXT     NOT NULL,
+                    file_size     INTEGER  NOT NULL DEFAULT 0,
+                    indexed_at    DATETIME DEFAULT (datetime('now', 'localtime'))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_file_project
+                    ON file_index(project_id, extension);
 
                 CREATE TABLE IF NOT EXISTS chat_history (
                     id         INTEGER  PRIMARY KEY AUTOINCREMENT,

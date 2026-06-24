@@ -66,7 +66,10 @@ class QdrantService:
                 project_id: str | None = None,
                 top_k: int = 5
         ) -> list[dict[str, Any]]:
-        """유사 벡터 검색. project_id 지정 시 해당 프로젝트만 검색, None이면 전체."""
+        """유사 벡터 검색. top_k=0 이면 즉시 빈 리스트 반환 (SQLite 분기용)."""
+        if top_k <= 0:
+            return []
+
         if not self._collection_exists():
             logger.warning("search 호출 시 컬렉션 없음 — 인덱싱 전 상태")
             return []

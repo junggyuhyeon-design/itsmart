@@ -23,6 +23,8 @@ from database.history_repository import (
     save_uploaded_file,
     get_all_projects,
     get_uploaded_files_by_project_id,
+    get_file_index,
+    get_file_index_summary,
     upsert_user,
 )
 from database.init_db import init_db
@@ -240,32 +242,91 @@ def list_projects():
 
 
 @app.get("/projects/{project_name}/files")
-def list_project_files(project_name: str):
-    """특정 프로젝트의 업로드된 파일 정보 반환."""
+def list_project_files(project_name: str, extension: str | None = None):
+    """
+    특정 프로젝트의 인덱싱된 파일 목록 반환.
+    extension 파라미터로 필터 가능 (예: ?extension=xml).
+    """
     try:
         all_projects = get_all_projects()
-        project_info = None
-        for proj in all_projects:
-            if proj["project_name"] == project_name.strip():
-                project_info = proj
-                break
-
+        project_info = next(
+            (p for p in all_projects if p["project_name"] == project_name.strip()),
+            None,
+        )
         if not project_info:
             raise HTTPException(
                 status_code=404,
                 detail=f"프로젝트 '{project_name}'을(를) 찾을 수 없습니다."
             )
 
+        pid = project_info["project_id"]
+        files = get_file_index(pid, extension)
         return {
-            "project_id": project_info["project_id"],
+            "project_id":   pid,
             "project_name": project_info["project_name"],
-            "uploaded_at": project_info["uploaded_at"],
+            "uploaded_at":  project_info["uploaded_at"],
+            "extension_filter": extension,
+            "files": files,
+            "count": len(files),
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("프로젝트 파일 조회 실패")
         raise HTTPException(status_code=500, detail=f"조회 중 오류: {e}") from e
+
+
+# ── 질문 유형 감지 ───────────────────────────────────────────────
+
+_LISTING_KEYWORDS = (
+    "목록", "전체", "모든", "몇 개", "몇개", "어떤 파일",
+    "list", "all files", "show all", "enumerate",
+)
+_DIAGRAM_KEYWORDS = (
+    "관계도", "다이어그램", "mermaid", "diagram", "flowchart",
+    "그려", "그려줘", "표현해", "시각화",
+)
+
+def _detect_query_type(question: str) -> str:
+    """
+    질문 문자열을 보고 처리 전략을 결정한다.
+    - 'listing' : 파일 목록/열거 요청 → SQLite file_index 로 응답
+    - 'diagram' : 관계도/다이어그램 요청 → file_index 컨텍스트 + Qdrant 병행
+    - 'qa'      : 일반 코드 질문 → Qdrant RAG
+    """
+    q = question.lower()
+    if any(k in q for k in _LISTING_KEYWORDS):
+        return "listing"
+    if any(k in q for k in _DIAGRAM_KEYWORDS):
+        return "diagram"
+    return "qa"
+
+
+def _build_listing_context(summary: dict, extension_filter: str | None) -> str:
+    """file_index_summary 를 LLM 에 주입할 텍스트로 변환."""
+    lines: list[str] = []
+    if extension_filter:
+        filtered = [f for f in summary["files"] if f["extension"] == extension_filter]
+        lines.append(f"[{extension_filter.upper()} 파일 목록 — 총 {len(filtered)}개]")
+        for f in filtered:
+            lines.append(f"  - {f['relative_path']}")
+    else:
+        lines.append(f"[프로젝트 전체 파일 목록 — 총 {summary['total']}개]")
+        by_ext: dict[str, list] = {}
+        for f in summary["files"]:
+            by_ext.setdefault(f["extension"], []).append(f["relative_path"])
+        for ext, paths in sorted(by_ext.items()):
+            lines.append(f"\n  [{ext.upper()}] {len(paths)}개")
+            for p in paths:
+                lines.append(f"    - {p}")
+    return "\n".join(lines)
+
+
+def _extract_extension_filter(question: str) -> str | None:
+    """질문에서 확장자 필터를 추출. 예: 'xml 파일 목록' → 'xml'"""
+    import re
+    m = re.search(r"\b(xml|java|sql|py|json|yml|yaml|md|txt)\b", question.lower())
+    return m.group(1) if m else None
 
 
 # ── 질문 / 히스토리 ──────────────────────────────────────────────
@@ -310,38 +371,67 @@ async def ask(
 
     service = get_rag_service(request)
     try:
-        # 프로젝트 정보를 LLM 컨텍스트에 추가
         projects_info = "\n".join([f"- {p['project_name']}" for p in all_projects])
+        query_type = _detect_query_type(question)
 
-        if not project_name:
-            # project_name이 없으면: LLM이 질문에서 관련 프로젝트를 판단하도록 정보 제공
-            context_with_projects = (
-                f"사용 가능한 프로젝트:\n{projects_info}\n\n"
-                f"질문을 분석하여 관련 프로젝트를 판단하고 답변하세요.\n"
-                f"답변할 때는 어느 프로젝트의 정보를 사용했는지 명시하세요.\n\n{extra_context}"
-            ).strip()
-            # 모든 프로젝트의 청크에서 검색 (project_id=None)
-            gen, hits = await service.ask_with_context_stream(
-                question=question.strip(),
-                project_id=None,  # 모든 프로젝트 검색
-                extra_context=context_with_projects,
-                top_k=top_k,
-                chat_history=chat_history,
-            )
-        else:
-            # project_name이 지정됨: 해당 프로젝트만 검색
-            context_with_projects = (
-                f"사용 가능한 프로젝트:\n{projects_info}\n\n"
-                f"현재 프로젝트: {selected_project_name}\n{extra_context}"
-            ).strip()
-            gen, hits = await service.ask_with_context_stream(
+        # ── listing: Qdrant 전혀 사용 안 함, SQLite → 직접 스트리밍 ─────
+        if query_type == "listing" and project_id:
+            ext_filter = _extract_extension_filter(question)
+            summary = get_file_index_summary(project_id)
+            if summary["total"] > 0:
+                listing_text = _build_listing_context(summary, ext_filter)
+
+                async def _listing_stream():
+                    # LLM 없이 file_index 결과를 그대로 스트리밍
+                    prompt = (
+                        f"아래는 프로젝트 '{selected_project_name}'의 "
+                        f"{'전체' if not ext_filter else ext_filter.upper()} 파일 목록입니다.\n\n"
+                        f"{listing_text}"
+                    )
+                    yield prompt
+
+                return StreamingResponse(_listing_stream(), media_type="text/plain")
+            # file_index 없음 → RAG fallback (아래 qa 분기로 계속)
+            logger.info("file_index 없음 — RAG fallback (project_id=%s)", project_id)
+
+        # ── diagram: file_index 전체 구조 + Qdrant 청크 병행 주입 ─────────
+        if query_type == "diagram" and project_id:
+            summary = get_file_index_summary(project_id)
+            struct_ctx = _build_listing_context(summary, None) if summary["total"] > 0 else ""
+            dynamic_top_k = min(settings.top_k * 10, 80)
+            merged_context = "\n\n".join(filter(None, [
+                f"사용 가능한 프로젝트:\n{projects_info}",
+                f"현재 프로젝트: {selected_project_name}",
+                struct_ctx,
+                extra_context,
+            ]))
+            gen, _ = await service.ask_with_context_stream(
                 question=question.strip(),
                 project_id=project_id,
-                extra_context=context_with_projects,
-                top_k=top_k,
+                extra_context=merged_context,
+                top_k=dynamic_top_k,
                 chat_history=chat_history,
             )
+            return StreamingResponse(gen, media_type="text/plain")
 
+        # ── qa (기본): 순수 Qdrant RAG ───────────────────────────────────
+        if project_id:
+            base_ctx = f"사용 가능한 프로젝트:\n{projects_info}\n\n현재 프로젝트: {selected_project_name}"
+        else:
+            base_ctx = (
+                f"사용 가능한 프로젝트:\n{projects_info}\n\n"
+                "질문을 분석하여 관련 프로젝트를 판단하고 답변하세요. "
+                "답변할 때는 어느 프로젝트의 정보를 사용했는지 명시하세요."
+            )
+        context_with_projects = "\n\n".join(filter(None, [base_ctx, extra_context]))
+
+        gen, _ = await service.ask_with_context_stream(
+            question=question.strip(),
+            project_id=project_id,
+            extra_context=context_with_projects,
+            top_k=top_k,
+            chat_history=chat_history,
+        )
         return StreamingResponse(gen, media_type="text/plain")
     except Exception as e:
         logger.error("ask 처리 실패: %s", e)

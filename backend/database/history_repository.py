@@ -155,3 +155,122 @@ def get_all_projects() -> list[dict[str, Any]]:
     except Exception:
         logger.exception("get_all_projects 실패")
         return []
+
+
+# ── file_index ───────────────────────────────────────────────────
+
+def bulk_insert_file_index(files: list[dict[str, Any]]) -> int:
+    """
+    인덱싱된 파일 메타데이터를 file_index 테이블에 일괄 저장.
+    동일 project_id + relative_path 조합은 IGNORE(중복 재인덱싱 허용).
+    반환값: 실제 삽입된 행 수.
+    """
+    if not files:
+        return 0
+    rows = [
+        (
+            f["project_id"],
+            f["project_name"],
+            f["file_name"],
+            f["relative_path"],
+            f["extension"],
+            f.get("file_size", 0),
+        )
+        for f in files
+    ]
+    try:
+        with get_connection() as conn:
+            # 재인덱싱 시 기존 데이터 교체: project_id 단위로 먼저 삭제 후 삽입
+            project_ids = list({r[0] for r in rows})
+            for pid in project_ids:
+                conn.execute("DELETE FROM file_index WHERE project_id = ?", (pid,))
+            conn.executemany(
+                """
+                INSERT INTO file_index
+                    (project_id, project_name, file_name, relative_path, extension, file_size)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            return len(rows)
+    except Exception:
+        logger.exception("bulk_insert_file_index 실패")
+        raise
+
+
+def get_file_index(
+    project_id: str,
+    extension: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    특정 프로젝트의 파일 메타데이터 목록 반환.
+    extension 지정 시 해당 확장자 파일만 반환 (예: 'xml', 'java').
+    """
+    try:
+        with get_connection() as conn:
+            if extension:
+                rows = conn.execute(
+                    """
+                    SELECT file_name, relative_path, extension, file_size, indexed_at
+                    FROM file_index
+                    WHERE project_id = ? AND extension = ?
+                    ORDER BY relative_path
+                    """,
+                    (project_id, extension.lower().lstrip(".")),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT file_name, relative_path, extension, file_size, indexed_at
+                    FROM file_index
+                    WHERE project_id = ?
+                    ORDER BY extension, relative_path
+                    """,
+                    (project_id,),
+                ).fetchall()
+            return [dict(row) for row in rows]
+    except Exception:
+        logger.exception("get_file_index 실패: project_id=%s", project_id)
+        return []
+
+
+def get_file_index_summary(project_id: str) -> dict[str, Any]:
+    """
+    프로젝트 파일 구조 요약: 확장자별 파일 수 + 전체 목록.
+    /ask 에서 소스코드 열거 질문에 컨텍스트로 주입할 때 사용.
+    """
+    try:
+        with get_connection() as conn:
+            # 확장자별 카운트
+            ext_rows = conn.execute(
+                """
+                SELECT extension, COUNT(*) as cnt
+                FROM file_index
+                WHERE project_id = ?
+                GROUP BY extension
+                ORDER BY cnt DESC
+                """,
+                (project_id,),
+            ).fetchall()
+
+            # 전체 파일 목록 (relative_path 기준 정렬)
+            file_rows = conn.execute(
+                """
+                SELECT file_name, relative_path, extension
+                FROM file_index
+                WHERE project_id = ?
+                ORDER BY extension, relative_path
+                """,
+                (project_id,),
+            ).fetchall()
+
+        ext_summary = {row["extension"]: row["cnt"] for row in ext_rows}
+        files = [dict(r) for r in file_rows]
+        return {
+            "total": len(files),
+            "by_extension": ext_summary,
+            "files": files,
+        }
+    except Exception:
+        logger.exception("get_file_index_summary 실패: project_id=%s", project_id)
+        return {"total": 0, "by_extension": {}, "files": []}

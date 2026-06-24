@@ -90,6 +90,8 @@ def init_session() -> None:
         "history_loaded":    False,  # DB 히스토리 최초 1회 로드 완료 여부
         "system_status":     None,   # 상태 탭 캐시
         "show_reset_dialog": False,  # 벡터 DB 초기화 확인 다이얼로그
+        "selected_project":  None,   # 현재 선택된 프로젝트 이름
+        "projects":          [],     # 프로젝트 목록 캐시
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -181,17 +183,36 @@ def clear_history_api(user_id: str) -> bool:
     return False
 
 
+# ── 프로젝트 API ─────────────────────────────────────────────────
+
+def fetch_projects() -> list[dict]:
+    """백엔드에서 프로젝트 목록 조회."""
+    try:
+        resp = httpx.get(f"{FASTAPI_URL}/projects", timeout=REQUEST_TIMEOUT)
+        if resp.is_success:
+            return resp.json().get("projects", [])
+    except Exception:
+        logger.exception("fetch_projects 예외")
+    return []
+
+
 # ── 스트리밍 응답 ────────────────────────────────────────────────
 
 def get_streaming_response(
-    user_id: str, question: str, extra: str = ""
+    user_id: str,
+    question: str,
+    extra: str = "",
+    project_name: str | None = None,
 ) -> Generator[str, None, None]:
+    params: dict = {"question": question, "extra_context": extra}
+    if project_name:
+        params["project_name"] = project_name
     try:
         with httpx.Client(timeout=STREAM_TIMEOUT) as client:
             with client.stream(
                 "GET",
                 f"{FASTAPI_URL}/ask",
-                params={"question": question, "extra_context": extra},
+                params=params,
                 headers=_headers(user_id),
             ) as r:
                 if not r.is_success:
@@ -402,13 +423,49 @@ def render_upload_tab(user_id: str) -> None:
 def render_chat_tab(user_id: str) -> None:
     st.subheader("💬 AI 코드 분석")
 
-    if st.button("🗑️ 대화 초기화", key="clear_chat"):
-        with st.spinner("대화 초기화 중..."):
-            if clear_history_api(user_id):
-                st.session_state.messages = []
-                st.rerun()
+    # ── 프로젝트 선택 ──────────────────────────────────────────
+    # 앱 시작 or 프로젝트 목록이 비어있으면 갱신
+    if not st.session_state.projects:
+        st.session_state.projects = fetch_projects()
 
-    # 누적 대화 렌더링
+    projects = st.session_state.projects
+    project_names = [p["project_name"] for p in projects]
+
+    col_proj, col_refresh, col_clear = st.columns([4, 1, 1])
+    with col_proj:
+        if project_names:
+            # 이전 선택값이 목록에 없으면 첫 번째로 초기화
+            prev = st.session_state.selected_project
+            default_idx = project_names.index(prev) if prev in project_names else 0
+            selected = st.selectbox(
+                "🗂 분석할 프로젝트",
+                project_names,
+                index=default_idx,
+                key="project_selectbox",
+            )
+            st.session_state.selected_project = selected
+        else:
+            st.info("업로드된 프로젝트가 없습니다. 먼저 ZIP 파일을 업로드하고 인덱싱하세요.")
+            st.session_state.selected_project = None
+
+    with col_refresh:
+        if st.button("🔄", help="프로젝트 목록 새로고침", use_container_width=True):
+            st.session_state.projects = fetch_projects()
+            st.rerun()
+
+    with col_clear:
+        if st.button("🗑️ 초기화", key="clear_chat", use_container_width=True):
+            with st.spinner("대화 초기화 중..."):
+                if clear_history_api(user_id):
+                    st.session_state.messages = []
+                    st.rerun()
+
+    if st.session_state.selected_project:
+        st.caption(f"현재 프로젝트: **{st.session_state.selected_project}**")
+
+    st.divider()
+
+    # ── 누적 대화 렌더링 ───────────────────────────────────────
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -416,14 +473,14 @@ def render_chat_tab(user_id: str) -> None:
                 for block in extract_mermaid_blocks(msg["content"]):
                     render_mermaid(block)
 
-    # 새 질문 입력
+    # ── 새 질문 입력 ───────────────────────────────────────────
     query = st.chat_input("소스 코드에 대해 궁금한 점을 물어보세요")
     if not query or not query.strip():
         return
 
     question = query.strip()
+    project_name = st.session_state.selected_project  # None 이면 전체 프로젝트 대상
 
-    # user 메시지 즉시 표시 (session 추가 전에 렌더링해 중복 방지)
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
@@ -437,7 +494,9 @@ def render_chat_tab(user_id: str) -> None:
                     f"\n\n[참고: DB 분석 데이터]\n"
                     f"{st.session_state.db_analysis.get('db_data', '')}"
                 )
-            for chunk in get_streaming_response(user_id, question, extra):
+            for chunk in get_streaming_response(
+                user_id, question, extra, project_name=project_name
+            ):
                 collected.append(chunk)
                 yield chunk
         st.write_stream(_gen())
@@ -446,13 +505,11 @@ def render_chat_tab(user_id: str) -> None:
     if answer:
         st.session_state.messages.append({"role": "assistant", "content": answer})
         post_history(user_id, question, answer)
-        # mermaid 블록은 스트리밍 직후 여기서만 렌더링 (rerun 시 루프에서 재렌더됨)
         for block in extract_mermaid_blocks(answer):
             render_mermaid(block)
     else:
-        st.session_state.messages.pop()  # user 메시지 롤백
+        st.session_state.messages.pop()
         st.warning("응답을 받지 못했습니다. 다시 시도해주세요.")
-    # ⚠️ st.rerun() 제거 — rerun 하면 messages 루프가 다시 돌아 중복 렌더링 발생
 
 
 def render_status_tab(user_id: str) -> None:
