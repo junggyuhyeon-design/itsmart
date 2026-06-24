@@ -422,6 +422,8 @@ def render_chat_tab(user_id: str) -> None:
         return
 
     question = query.strip()
+
+    # user 메시지 즉시 표시 (session 추가 전에 렌더링해 중복 방지)
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
@@ -444,13 +446,13 @@ def render_chat_tab(user_id: str) -> None:
     if answer:
         st.session_state.messages.append({"role": "assistant", "content": answer})
         post_history(user_id, question, answer)
+        # mermaid 블록은 스트리밍 직후 여기서만 렌더링 (rerun 시 루프에서 재렌더됨)
         for block in extract_mermaid_blocks(answer):
             render_mermaid(block)
     else:
-        st.session_state.messages.pop()
+        st.session_state.messages.pop()  # user 메시지 롤백
         st.warning("응답을 받지 못했습니다. 다시 시도해주세요.")
-
-    st.rerun()
+    # ⚠️ st.rerun() 제거 — rerun 하면 messages 루프가 다시 돌아 중복 렌더링 발생
 
 
 def render_status_tab(user_id: str) -> None:

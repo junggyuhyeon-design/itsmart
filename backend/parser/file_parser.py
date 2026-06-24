@@ -26,17 +26,25 @@ def parse_text_file(file_info: Any) -> dict[str, Any]:
     else:
         path, name, ext, rel_path, size = file_info.saved_path, file_info.original_name, file_info.extension, file_info.relative_path, file_info.size
 
+    # project_id / project_name: 딕셔너리와 dataclass 객체 모두 대응
+    if isinstance(file_info, dict):
+        project_id = file_info.get("project_id", "")
+        project_name = file_info.get("project_name", "")
+    else:
+        project_id = getattr(file_info, "project_id", "")
+        project_name = getattr(file_info, "project_name", "")
+
     try:
         raw_text = read_text_file(path)
         if not raw_text.strip(): return {}
         return {
             "raw_text": raw_text,
-            "project_id": file_info["project_id"],
-            "project_name": file_info["project_name"],
-            "file_name": name, 
+            "project_id": project_id,
+            "project_name": project_name,
+            "file_name": name,
             "extension": ext,
-            "relative_path": rel_path, 
-            "language": detect_language_by_extension(ext), 
+            "relative_path": rel_path,
+            "language": detect_language_by_extension(ext),
             "file_size": size,
         }
     except Exception as e:

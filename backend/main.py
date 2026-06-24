@@ -196,7 +196,7 @@ async def upload(
     projects_created = {}
     for target in targets:
         if target.project_id not in projects_created:
-            projects_created[target.project_id] = target.project_name
+            projects_created[target.project_id] = target.project_id
             try:
                 zip_file_path = Path(UPLOAD_DIR) / f"{target.project_name}.zip"
                 save_uploaded_file(target.project_id, target.project_name, str(zip_file_path))
