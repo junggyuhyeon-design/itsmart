@@ -64,7 +64,7 @@ def get_settings() -> Settings:
             os.environ.get("MAX_FILE_SIZE", _GB)              # 기본 1 GiB
         ),
         max_files_per_request=int(
-            os.environ.get("MAX_FILES_PER_REQUEST", 5)
+            os.environ.get("MAX_FILES_PER_REQUEST", 1)
         ),
         upload_dir=Path(
             os.environ.get("UPLOAD_DIR", "/data/uploads")

@@ -55,10 +55,9 @@ def save_history(user_id: str, question: str, answer: str) -> int:
         logger.exception("save_history 실패: user_id=%s", user_id)
         raise
 
-
-def get_history(user_id: str, limit: int = 50) -> list[dict[str, Any]]:
-    """특정 사용자의 최근 히스토리 반환 (최신순). limit 은 1~200 으로 제한."""
-    limit = max(1, min(limit, 200))
+# 확인 : 앱실행시 최초로 사용자의 이력을 조회하는 query.
+def get_history(user_id: str, limit: int) -> list[dict[str, Any]]:
+    """특정 사용자의 최근 히스토리 반환 (최신순)."""
     try:
         with get_connection() as conn:
             rows = conn.execute(
@@ -99,7 +98,6 @@ def save_uploaded_file(project_id: str, project_name: str, saved_path: str) -> s
                 "INSERT OR IGNORE INTO uploaded_files (project_id, project_name, saved_path) VALUES (?, ?, ?)",
                 (project_id, project_name, saved_path),
             )
-            return project_id
     except Exception:
         logger.exception("save_uploaded_file 실패: project_id=%s", project_id)
         raise

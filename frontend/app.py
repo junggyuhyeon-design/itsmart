@@ -1,14 +1,14 @@
+import html as html_mod
 import logging
 import os
 import re
-import html as html_mod
 import uuid
-from typing import Any, Generator
 from datetime import datetime, timedelta
+from typing import Any, Generator
 
+import extra_streamlit_components as stx
 import httpx
 import streamlit as st
-import extra_streamlit_components as stx
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 FASTAPI_URL = os.getenv("FASTAPI_URL", "http://codeMind-backend:8000").rstrip("/")
 COOKIE_KEY  = "codemind_user_id"
 COOKIE_TTL  = timedelta(days=365)
-HISTORY_LIMIT   = 100
+HISTORY_LIMIT   = 50
 REQUEST_TIMEOUT = 30.0
 STREAM_TIMEOUT  = 300.0
 UPLOAD_TIMEOUT  = 300.0
@@ -26,12 +26,14 @@ st.set_page_config(page_title="IT-Smart Source Analyzer", layout="wide")
 
 # ── 쿠키 ─────────────────────────────────────────────────────────
 
+# 확인 완료.
 def _get_cookie_manager() -> stx.CookieManager:
+    """Streamlit 앱에서 쿠키를 읽고 쓰는 역할을 담당하는 매니저 객체"""
     if "_cookie_mgr" not in st.session_state:
         st.session_state["_cookie_mgr"] = stx.CookieManager(key="codemind_cookie_mgr")
     return st.session_state["_cookie_mgr"]
 
-
+# 확인 완료.
 def get_or_create_user_id() -> str:
     # 1. session_state
     uid = st.session_state.get("user_id")
@@ -49,6 +51,7 @@ def get_or_create_user_id() -> str:
     try:
         mgr = _get_cookie_manager()
 
+        # CookieManager 에 저장된 cookie 읽기.
         uid = (mgr.get(COOKIE_KEY) or "").strip()
 
         if uid:
@@ -66,6 +69,7 @@ def get_or_create_user_id() -> str:
     try:
         mgr = _get_cookie_manager()
 
+        # CookieManager 에 cookie 쓰기.
         mgr.set(
             COOKIE_KEY,
             uid,
@@ -84,9 +88,10 @@ def get_or_create_user_id() -> str:
 def init_session() -> None:
     """앱 진입 시 1회 실행. 모든 session_state 키를 안전하게 보장한다."""
     defaults: dict[str, Any] = {
+        "user_id":           None,
         "analysis_targets":  [],
         "db_analysis":       None,
-        "messages":          [],     # {"role": "user"|"assistant", "content": str}
+        "messages":          [],
         "history_loaded":    False,  # DB 히스토리 최초 1회 로드 완료 여부
         "system_status":     None,   # 상태 탭 캐시
         "show_reset_dialog": False,  # 벡터 DB 초기화 확인 다이얼로그
@@ -100,6 +105,7 @@ def init_session() -> None:
 
 # ── API 헬퍼 ────────────────────────────────────────────────────
 
+# 확인 완료 : 요청 헤더에 user_id 를 입력함.
 def _headers(user_id: str) -> dict[str, str]:
     return {"X-User-Id": user_id}
 
@@ -123,12 +129,13 @@ def api_error_message(resp: httpx.Response) -> str:
 
 # ── 히스토리 API ─────────────────────────────────────────────────
 
+# 확인 완료 : 최초 1회 사용자 히스토리 조회해서 session_state.messages 에 저장.
 def fetch_history(user_id: str) -> list[dict]:
     """해당 사용자의 히스토리를 DB에서 로드. 오래된 순으로 반환."""
     try:
         resp = httpx.get(
             f"{FASTAPI_URL}/history",
-            headers=_headers(user_id),
+            headers=_headers(user_id), # Request 의 Header에 user_id 를 담아서 요청.
             params={"limit": HISTORY_LIMIT},
             timeout=REQUEST_TIMEOUT,
         )
@@ -323,8 +330,8 @@ def render_status_panel(status: dict) -> None:
     if services:
         st.dataframe(
             [{"이름": s.get("name", ""), "컨테이너": s.get("container", "-"),
-              "상태": status_label(s.get("status", "")), "설명": s.get("message", ""),
-              "URL": s.get("url", "")} for s in services],
+            "상태": status_label(s.get("status", "")), "설명": s.get("message", ""),
+            "URL": s.get("url", "")} for s in services],
             use_container_width=True, hide_index=True,
         )
     else:
@@ -335,8 +342,8 @@ def render_status_panel(status: dict) -> None:
     if models:
         st.dataframe(
             [{"모델": m.get("name", ""), "유형": m.get("kind", ""),
-              "제공자": m.get("provider", "-"), "상태": status_label(m.get("status", "")),
-              "설명": m.get("message", "")} for m in models],
+            "제공자": m.get("provider", "-"), "상태": status_label(m.get("status", "")),
+            "설명": m.get("message", "")} for m in models],
             use_container_width=True, hide_index=True,
         )
         ollama_model = next((m for m in models if m.get("kind") == "llm"), None)

@@ -4,30 +4,27 @@ IT-Smart CodeMind — FastAPI 백엔드 진입점
 import logging
 import os
 import sys
-import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List
 
 import aiofiles
+from config import get_settings
+from database.history_repository import (
+    delete_history,
+    get_all_projects,
+    get_file_index,
+    get_file_index_summary,
+    get_history,
+    save_history,
+    save_uploaded_file,
+    upsert_user,
+)
+from database.init_db import init_db
 from fastapi import Body, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-
-from config import get_settings
-from database.history_repository import (
-    delete_history,
-    get_history,
-    save_history,
-    save_uploaded_file,
-    get_all_projects,
-    get_uploaded_files_by_project_id,
-    get_file_index,
-    get_file_index_summary,
-    upsert_user,
-)
-from database.init_db import init_db
 from health_service import build_system_status
 from rag.rag_service import RAGService
 from utils.file_utils import (
@@ -113,22 +110,22 @@ def get_rag_service(request: Request) -> RAGService:
         raise HTTPException(status_code=503, detail="RAGService 초기화 중입니다. 잠시 후 다시 시도하세요.")
     return svc
 
-
+# 확인 완료.
 def _require_user(x_user_id: str | None) -> str:
     """헤더에서 user_id 추출 후 users 테이블에 upsert."""
     if not x_user_id or not x_user_id.strip():
         raise HTTPException(status_code=400, detail="X-User-Id 헤더가 필요합니다.")
     uid = x_user_id.strip()
     try:
-        upsert_user(uid)
+        upsert_user(uid) # SQLite User 테이블에 user_id 저장.
     except Exception as e:
         logger.error("upsert_user 실패: %s", e)
         raise HTTPException(status_code=500, detail="사용자 등록 중 오류가 발생했습니다.")
     return uid
 
-
+# 확인 완료.
 async def _save_upload_stream(upload: UploadFile, dest: Path) -> int:
-    """UploadFile 을 청크 단위로 비동기 스트리밍하여 디스크에 저장."""
+    """UploadFile 을 청크 단위로(1MB) 비동기 스트리밍하여 디스크에 저장."""
     total_written = 0
     try:
         async with aiofiles.open(dest, "wb") as out_file:
@@ -138,12 +135,12 @@ async def _save_upload_stream(upload: UploadFile, dest: Path) -> int:
                     break
                 total_written += len(chunk)
                 if total_written > settings.max_file_size:
-                    dest.unlink(missing_ok=True)
+                    dest.unlink(missing_ok=True) # 업로드 실패 시 중간에 생성된 불완전한 파일을 정리(삭제)
                     raise HTTPException(
                         status_code=413,
                         detail=(
                             f"'{upload.filename}' 파일이 허용 크기 "
-                            f"{settings.max_file_size:,} bytes 를 초과했습니다."
+                            f"{settings.max_file_size} bytes 를 초과했습니다."
                         ),
                     )
                 await out_file.write(chunk)
@@ -153,14 +150,14 @@ async def _save_upload_stream(upload: UploadFile, dest: Path) -> int:
         dest.unlink(missing_ok=True)
         logger.error("파일 저장 실패: %s — %s", dest.name, e)
         raise HTTPException(status_code=500, detail=f"파일 저장 중 오류: {e}") from e
-    return total_written
+    # 현재 return 값에 대해서 사용하지 않으므로 주석.
+    # return total_written
 
 
 # ── 업로드 & 인덱싱 ──────────────────────────────────────────────
-
+# 확인 완료
 @app.post("/upload")
 async def upload(
-    request: Request,
     files: List[UploadFile] = File(...),
     x_user_id: str | None = Header(default=None),
 ):
@@ -177,6 +174,7 @@ async def upload(
 
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+    saved_filenames: list[str] = []   # 이번 요청에서 실제 저장된 파일명만 추적
     for f in files:
         if not f.filename or not f.filename.strip():
             raise HTTPException(
@@ -189,10 +187,15 @@ async def upload(
                 status_code=400,
                 detail=f"허용되지 않는 파일 형식입니다: {f.filename}",
             )
-        dest = Path(UPLOAD_DIR) / safe_filename(f.filename)
+        safe_name = safe_filename(f.filename)
+        dest = Path(UPLOAD_DIR) / safe_name
         await _save_upload_stream(f, dest)
+        saved_filenames.append(safe_name)   # 저장 성공한 파일명 기록
 
-    targets = await run_in_threadpool(process_uploads_and_collect, Path(UPLOAD_DIR))
+    # 이번에 저장된 파일만 수집 (기존 파일 재수집 방지)
+    targets = await run_in_threadpool(
+        process_uploads_and_collect, Path(UPLOAD_DIR), saved_filenames
+    )
 
     # 각 프로젝트별 정보 저장
     projects_created = {}
@@ -201,9 +204,10 @@ async def upload(
             projects_created[target.project_id] = target.project_id
             try:
                 zip_file_path = Path(UPLOAD_DIR) / f"{target.project_name}.zip"
+                # SQLite 에 프로젝트 정보 저장.
                 save_uploaded_file(target.project_id, target.project_name, str(zip_file_path))
             except Exception as e:
-                logger.error("업로드 이력 DB 저장 실패: %s", e)
+                logger.error("프로젝트 정보 DB 저장 실패: %s", e)
 
     logger.info("업로드 완료: %d개 파일 수집, %d개 프로젝트", len(targets), len(projects_created))
     return {"targets": [t.__dict__ for t in targets], "count": len(targets), "projects": len(projects_created)}
@@ -437,7 +441,6 @@ async def ask(
         logger.error("ask 처리 실패: %s", e)
         raise HTTPException(status_code=500, detail=f"질문 처리 중 오류: {e}") from e
 
-
 @app.post("/history")
 def add_history(
     payload: dict = Body(...),
@@ -461,14 +464,13 @@ def add_history(
 
 @app.get("/history")
 def list_history(
-    limit: int = 50,
+    limit: int,
     x_user_id: str | None = Header(default=None),
 ):
-    """해당 사용자의 채팅 히스토리 반환 (최신순)."""
-    user_id = _require_user(x_user_id)
-    limit = max(1, min(limit, 200))
+    """History 복원(최초 1회) 해당 사용자의 채팅 히스토리 반환 (최신순)."""
+    user_id = _require_user(x_user_id) # Header 에서 user_id 를 가져와 User 테이블 저장 후 리턴.
     rows = get_history(user_id, limit=limit)
-    return {"history": rows, "count": len(rows)}
+    return {"history": rows}
 
 
 @app.delete("/history")

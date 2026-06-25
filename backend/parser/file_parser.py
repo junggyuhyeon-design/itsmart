@@ -1,12 +1,7 @@
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from config import Settings # 경로 수정
-from utils.file_utils import ( # 경로 수정
-    AnalysisTargetFile, SavedFileInfo, collect_target_files,
-    extract_zip, is_allowed_extension,
-)
+
 
 def detect_language_by_extension(ext: str) -> str:
     mapping = {"py": "python", "sql": "sql", "java": "java", "md": "markdown", "yml": "yaml", "yaml": "yaml", "json": "json", "xml": "xml", "txt": "text"}
