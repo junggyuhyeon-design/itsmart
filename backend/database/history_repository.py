@@ -156,11 +156,11 @@ def get_all_projects() -> list[dict[str, Any]]:
 
 
 # ── file_index ───────────────────────────────────────────────────
-
+# 확인 완료
 def bulk_insert_file_index(files: list[dict[str, Any]]) -> int:
     """
     인덱싱된 파일 메타데이터를 file_index 테이블에 일괄 저장.
-    동일 project_id + relative_path 조합은 IGNORE(중복 재인덱싱 허용).
+    동일 project_name + relative_path 조합은 IGNORE(중복 재인덱싱 허용).
     반환값: 실제 삽입된 행 수.
     """
     if not files:
@@ -178,10 +178,10 @@ def bulk_insert_file_index(files: list[dict[str, Any]]) -> int:
     ]
     try:
         with get_connection() as conn:
-            # 재인덱싱 시 기존 데이터 교체: project_id 단위로 먼저 삭제 후 삽입
-            project_ids = list({r[0] for r in rows})
-            for pid in project_ids:
-                conn.execute("DELETE FROM file_index WHERE project_id = ?", (pid,))
+            # 재인덱싱 시 기존 데이터 교체: project_name 단위로 먼저 삭제 후 삽입
+            project_names = list({r[1] for r in rows})
+            for pname in project_names:
+                conn.execute("DELETE FROM file_index WHERE project_name = ?", (pname,))
             conn.executemany(
                 """
                 INSERT INTO file_index

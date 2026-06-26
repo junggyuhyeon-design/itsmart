@@ -6,7 +6,6 @@ import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 ANALYSIS_TARGET_EXTENSIONS = (
     # 주요 소스코드 확장자
@@ -33,22 +32,6 @@ ALLOWED_EXTENSIONS = ANALYSIS_TARGET_EXTENSIONS + (".zip",)
 MAX_ZIP_UNCOMPRESSED_SIZE = 1024 * 1024 * 1024 * 2  # 2GB
 _INVALID_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
 
-
-class UploadedFileLike(Protocol):
-    name: str
-    size: int
-
-    def getvalue(self) -> bytes: ...
-
-
-@dataclass(frozen=True)
-class SavedFileInfo:
-    original_name: str
-    saved_name: str
-    size: int
-    extension: str
-    saved_path: str
-    uploaded_at: str
 
 # 확인 완료.
 @dataclass(frozen=True)

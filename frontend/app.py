@@ -24,88 +24,117 @@ INDEX_TIMEOUT   = 1800.0
 
 st.set_page_config(page_title="IT-Smart Source Analyzer", layout="wide")
 
-# ── 쿠키 ─────────────────────────────────────────────────────────
 
-# 확인 완료.
+# ── 쿠키 ─────────────────────────────────────────────────────────
+# 확인 완료
 def _get_cookie_manager() -> stx.CookieManager:
     """Streamlit 앱에서 쿠키를 읽고 쓰는 역할을 담당하는 매니저 객체"""
     if "_cookie_mgr" not in st.session_state:
         st.session_state["_cookie_mgr"] = stx.CookieManager(key="codemind_cookie_mgr")
     return st.session_state["_cookie_mgr"]
 
-# 확인 완료.
+# 확인 완료
 def get_or_create_user_id() -> str:
     # 1. session_state
     uid = st.session_state.get("user_id")
     if uid:
         return uid
 
-    # 2. HTTP Cookie
+    # 2. HTTP Cookie (브라우저 네이티브)
     uid = (st.context.cookies.get(COOKIE_KEY) or "").strip()
-
     if uid:
         st.session_state["user_id"] = uid
         return uid
 
     # 3. CookieManager
     try:
-        mgr = _get_cookie_manager()
-
-        # CookieManager 에 저장된 cookie 읽기.
-        uid = (mgr.get(COOKIE_KEY) or "").strip()
-
+        uid = (_get_cookie_manager().get(COOKIE_KEY) or "").strip()
         if uid:
             st.session_state["user_id"] = uid
             return uid
-
     except Exception:
         logger.exception("CookieManager read failed")
 
     # 4. 신규 UUID 생성
     uid = str(uuid.uuid4())
-
     st.session_state["user_id"] = uid
-
     try:
-        mgr = _get_cookie_manager()
-
-        # CookieManager 에 cookie 쓰기.
-        mgr.set(
-            COOKIE_KEY,
-            uid,
-            key=COOKIE_KEY,
-            expires_at=datetime.now() + COOKIE_TTL,
-            same_site="Lax",
+        _get_cookie_manager().set(
+            COOKIE_KEY, uid, key=COOKIE_KEY,
+            expires_at=datetime.now() + COOKIE_TTL, same_site="Lax",
         )
-
     except Exception:
         logger.exception("Cookie save failed")
-
     return uid
 
-# ── session_state 초기화 ─────────────────────────────────────────
 
+# ── session_state 초기화 ─────────────────────────────────────────
+# 확인 완료
 def init_session() -> None:
-    """앱 진입 시 1회 실행. 모든 session_state 키를 안전하게 보장한다."""
+    """앱 진입 시 1회 실행."""
     defaults: dict[str, Any] = {
-        "user_id":           None,
+        # ── 인증 ──────────────────────────────────────────────────
+        "user_id":           None,   # 쿠키 파싱을 매 리렌더마다 반복하지 않기 위해 캐싱
+
+        # ── 채팅 ──────────────────────────────────────────────────
+        "messages":          [],     # {"role": "user"|"assistant", "content": str}
+        "history_loaded":    False,  # DB 히스토리 최초 1회 로드 완료 플래그
+        "selected_project":  None,   # selectbox 선택값 — 리렌더 시 초기화되면 안 됨
+
+        # ── UI 상태 ───────────────────────────────────────────────
+        "show_reset_dialog": False,  # 벡터 DB 초기화 확인 다이얼로그 열림 여부
+
+        # ── 업로드 워크플로 ────────────────────────────────────────
+        # 업로드 후 인덱싱 버튼이 눌릴 때까지 수집된 파일 목록을 유지해야 하므로 필수
         "analysis_targets":  [],
-        "db_analysis":       None,
-        "messages":          [],
-        "history_loaded":    False,  # DB 히스토리 최초 1회 로드 완료 여부
-        "system_status":     None,   # 상태 탭 캐시
-        "show_reset_dialog": False,  # 벡터 DB 초기화 확인 다이얼로그
-        "selected_project":  None,   # 현재 선택된 프로젝트 이름
-        "projects":          [],     # 프로젝트 목록 캐시
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 
-# ── API 헬퍼 ────────────────────────────────────────────────────
+# ── API 캐시 (@st.cache_data) ─────────────────────────────────────
+# 확인 완료
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_projects() -> list[dict]:
+    """프로젝트 목록 캐시 저장."""
+    try:
+        resp = httpx.get(f"{FASTAPI_URL}/projects", timeout=REQUEST_TIMEOUT)
+        if resp.is_success:
+            return resp.json().get("projects", [])
+    except Exception:
+        logger.exception("fetch_projects 예외")
+    return []
 
-# 확인 완료 : 요청 헤더에 user_id 를 입력함.
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_system_status() -> dict:
+    """시스템 상태. 30초 TTL — 상태 탭에서 새로고침 버튼 클릭 시 .clear() 로 무효화."""
+    try:
+        resp = httpx.get(f"{FASTAPI_URL}/status", timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.exception("fetch_system_status 예외")
+        return {}
+
+
+def fetch_projects(force: bool = False) -> list[dict]:
+    """프로젝트 목록 반환. force=True 시 캐시 무효화 후 재조회."""
+    if force:
+        _cached_projects.clear()
+    return _cached_projects()
+
+
+def fetch_system_status(force: bool = False) -> dict:
+    """시스템 상태 반환. force=True 시 캐시 무효화 후 재조회."""
+    if force:
+        _cached_system_status.clear()
+    return _cached_system_status()
+
+
+# ── API 헬퍼 ─────────────────────────────────────────────────────
+# 확인 완료
 def _headers(user_id: str) -> dict[str, str]:
     return {"X-User-Id": user_id}
 
@@ -128,19 +157,17 @@ def api_error_message(resp: httpx.Response) -> str:
 
 
 # ── 히스토리 API ─────────────────────────────────────────────────
-
-# 확인 완료 : 최초 1회 사용자 히스토리 조회해서 session_state.messages 에 저장.
+# 확인 완료
 def fetch_history(user_id: str) -> list[dict]:
-    """해당 사용자의 히스토리를 DB에서 로드. 오래된 순으로 반환."""
+    """사용자 히스토리 로드 (오래된 순)."""
     try:
         resp = httpx.get(
             f"{FASTAPI_URL}/history",
-            headers=_headers(user_id), # Request 의 Header에 user_id 를 담아서 요청.
+            headers=_headers(user_id),
             params={"limit": HISTORY_LIMIT},
             timeout=REQUEST_TIMEOUT,
         )
         if resp.is_success:
-            # 백엔드는 최신순(DESC) 반환 → reversed() 로 오래된 순 정렬
             return list(reversed(resp.json().get("history", [])))
         logger.warning("fetch_history 실패 [%s]: %s", resp.status_code, api_error_message(resp))
     except httpx.TimeoutException:
@@ -154,7 +181,7 @@ def fetch_history(user_id: str) -> list[dict]:
 
 
 def post_history(user_id: str, question: str, answer: str) -> None:
-    """스트리밍 완료 후 Q&A 쌍을 해당 사용자의 DB에 저장."""
+    """스트리밍 완료 후 Q&A 쌍 저장."""
     try:
         resp = httpx.post(
             f"{FASTAPI_URL}/history",
@@ -172,7 +199,7 @@ def post_history(user_id: str, question: str, answer: str) -> None:
 
 
 def clear_history_api(user_id: str) -> bool:
-    """해당 사용자의 히스토리 전체 삭제. 성공 여부 반환."""
+    """사용자 히스토리 전체 삭제."""
     try:
         resp = httpx.delete(
             f"{FASTAPI_URL}/history",
@@ -190,20 +217,7 @@ def clear_history_api(user_id: str) -> bool:
     return False
 
 
-# ── 프로젝트 API ─────────────────────────────────────────────────
-
-def fetch_projects() -> list[dict]:
-    """백엔드에서 프로젝트 목록 조회."""
-    try:
-        resp = httpx.get(f"{FASTAPI_URL}/projects", timeout=REQUEST_TIMEOUT)
-        if resp.is_success:
-            return resp.json().get("projects", [])
-    except Exception:
-        logger.exception("fetch_projects 예외")
-    return []
-
-
-# ── 스트리밍 응답 ────────────────────────────────────────────────
+# ── 스트리밍 응답 ─────────────────────────────────────────────────
 
 def get_streaming_response(
     user_id: str,
@@ -217,10 +231,8 @@ def get_streaming_response(
     try:
         with httpx.Client(timeout=STREAM_TIMEOUT) as client:
             with client.stream(
-                "GET",
-                f"{FASTAPI_URL}/ask",
-                params=params,
-                headers=_headers(user_id),
+                "GET", f"{FASTAPI_URL}/ask",
+                params=params, headers=_headers(user_id),
             ) as r:
                 if not r.is_success:
                     yield f"\n❌ 서버 오류 (HTTP {r.status_code})"
@@ -229,7 +241,7 @@ def get_streaming_response(
                     if chunk:
                         yield chunk
     except httpx.TimeoutException:
-        yield "\n❌ 응답 시간이 초과되었습니다. 모델이 너무 오래 걸리고 있습니다."
+        yield "\n❌ 응답 시간이 초과되었습니다."
     except httpx.ConnectError:
         yield "\n❌ 백엔드 서버에 연결할 수 없습니다."
     except Exception as e:
@@ -237,13 +249,7 @@ def get_streaming_response(
         yield f"\n❌ 오류: {e}"
 
 
-def fetch_system_status() -> dict:
-    resp = httpx.get(f"{FASTAPI_URL}/status", timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
-    return resp.json()
-
-
-# ── Mermaid 렌더링 ───────────────────────────────────────────────
+# ── Mermaid 렌더링 ────────────────────────────────────────────────
 
 def render_mermaid(mermaid_code: str, height: int = 900) -> None:
     import streamlit.components.v1 as components
@@ -292,7 +298,7 @@ def extract_mermaid_blocks(text: str) -> list[str]:
     return blocks
 
 
-# ── 상태 패널 렌더링 ─────────────────────────────────────────────
+# ── 상태 패널 렌더링 ──────────────────────────────────────────────
 
 _STATUS_LABELS: dict[str, str] = {
     "running":    "🟢 실행 중",
@@ -330,8 +336,8 @@ def render_status_panel(status: dict) -> None:
     if services:
         st.dataframe(
             [{"이름": s.get("name", ""), "컨테이너": s.get("container", "-"),
-            "상태": status_label(s.get("status", "")), "설명": s.get("message", ""),
-            "URL": s.get("url", "")} for s in services],
+              "상태": status_label(s.get("status", "")), "설명": s.get("message", ""),
+              "URL": s.get("url", "")} for s in services],
             use_container_width=True, hide_index=True,
         )
     else:
@@ -342,8 +348,8 @@ def render_status_panel(status: dict) -> None:
     if models:
         st.dataframe(
             [{"모델": m.get("name", ""), "유형": m.get("kind", ""),
-            "제공자": m.get("provider", "-"), "상태": status_label(m.get("status", "")),
-            "설명": m.get("message", "")} for m in models],
+              "제공자": m.get("provider", "-"), "상태": status_label(m.get("status", "")),
+              "설명": m.get("message", "")} for m in models],
             use_container_width=True, hide_index=True,
         )
         ollama_model = next((m for m in models if m.get("kind") == "llm"), None)
@@ -355,7 +361,7 @@ def render_status_panel(status: dict) -> None:
         st.info("모델 정보가 없습니다.")
 
 
-# ── 탭 렌더링 ────────────────────────────────────────────────────
+# ── 탭 렌더링 ─────────────────────────────────────────────────────
 
 def render_upload_tab(user_id: str) -> None:
     st.subheader("📁 소스 파일 업로드")
@@ -382,6 +388,8 @@ def render_upload_tab(user_id: str) -> None:
                     if resp.is_success:
                         data = resp.json()
                         st.session_state.analysis_targets = data.get("targets", [])
+                        # 업로드 완료 후 프로젝트 목록 캐시 무효화 후 다시 캐싱
+                        # fetch_projects(force=True) 여기서 이걸 수행하면, 현재시점에 업로드된게 아니라 sqlite에 저장된 모든 프로젝트를 담음.
                         st.success(f"✅ {data.get('count', 0)}개 소스 파일 수집 완료")
                     else:
                         st.error(
@@ -413,6 +421,7 @@ def render_upload_tab(user_id: str) -> None:
                         data = resp.json()
                         total = format_count(data.get("total_chunks") or 0)
                         st.success(f"✅ 인덱싱 완료! 생성된 청크: {total}")
+                        st.session_state.analysis_targets = []   # 인덱싱 후 초기화
                         if data.get("logs"):
                             with st.expander("인덱싱 로그 보기"):
                                 st.text("\n".join(data["logs"]))
@@ -431,17 +440,12 @@ def render_chat_tab(user_id: str) -> None:
     st.subheader("💬 AI 코드 분석")
 
     # ── 프로젝트 선택 ──────────────────────────────────────────
-    # 앱 시작 or 프로젝트 목록이 비어있으면 갱신
-    if not st.session_state.projects:
-        st.session_state.projects = fetch_projects()
-
-    projects = st.session_state.projects
+    projects = fetch_projects()   # @st.cache_data — 네트워크 호출 없음 (TTL 내)
     project_names = [p["project_name"] for p in projects]
 
     col_proj, col_refresh, col_clear = st.columns([4, 1, 1])
     with col_proj:
         if project_names:
-            # 이전 선택값이 목록에 없으면 첫 번째로 초기화
             prev = st.session_state.selected_project
             default_idx = project_names.index(prev) if prev in project_names else 0
             selected = st.selectbox(
@@ -457,7 +461,7 @@ def render_chat_tab(user_id: str) -> None:
 
     with col_refresh:
         if st.button("🔄", help="프로젝트 목록 새로고침", use_container_width=True):
-            st.session_state.projects = fetch_projects()
+            fetch_projects(force=True)
             st.rerun()
 
     with col_clear:
@@ -486,7 +490,7 @@ def render_chat_tab(user_id: str) -> None:
         return
 
     question = query.strip()
-    project_name = st.session_state.selected_project  # None 이면 전체 프로젝트 대상
+    project_name = st.session_state.selected_project
 
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
@@ -495,15 +499,7 @@ def render_chat_tab(user_id: str) -> None:
     collected: list[str] = []
     with st.chat_message("assistant"):
         def _gen():
-            extra = ""
-            if st.session_state.db_analysis:
-                extra = (
-                    f"\n\n[참고: DB 분석 데이터]\n"
-                    f"{st.session_state.db_analysis.get('db_data', '')}"
-                )
-            for chunk in get_streaming_response(
-                user_id, question, extra, project_name=project_name
-            ):
+            for chunk in get_streaming_response(user_id, question, project_name=project_name):
                 collected.append(chunk)
                 yield chunk
         st.write_stream(_gen())
@@ -525,26 +521,13 @@ def render_status_tab(user_id: str) -> None:
 
     refresh_col, _ = st.columns([1, 4])
     with refresh_col:
-        refresh_clicked = st.button(
-            "🔄 상태 새로고침", type="primary", use_container_width=True
-        )
+        refresh_clicked = st.button("🔄 상태 새로고침", type="primary", use_container_width=True)
 
-    if refresh_clicked or st.session_state.system_status is None:
-        with st.spinner("상태 확인 중..."):
-            try:
-                st.session_state.system_status = fetch_system_status()
-            except httpx.TimeoutException:
-                st.session_state.system_status = {}
-                st.error("상태 조회 시간이 초과되었습니다.")
-            except httpx.ConnectError:
-                st.session_state.system_status = {}
-                st.error("백엔드 서버에 연결할 수 없습니다.")
-            except Exception as e:
-                st.session_state.system_status = {}
-                st.error(f"상태 조회 실패: {e}")
+    # 새로고침 버튼 → 캐시 무효화 후 재조회, 아니면 캐시 그대로 반환
+    status = fetch_system_status(force=refresh_clicked)
 
-    if st.session_state.system_status:
-        render_status_panel(st.session_state.system_status)
+    if status:
+        render_status_panel(status)
     else:
         st.info("상태 정보가 없습니다. 새로고침 버튼을 눌러주세요.")
 
@@ -579,8 +562,9 @@ def render_status_tab(user_id: str) -> None:
                             if resp.is_success:
                                 st.success("✅ 벡터 DB 초기화 완료")
                                 st.session_state.show_reset_dialog = False
-                                st.session_state.system_status = None
                                 st.session_state.analysis_targets = []
+                                fetch_system_status(force=True)
+                                fetch_projects(force=True)
                                 st.rerun()
                             else:
                                 st.error(f"초기화 실패: {api_error_message(resp)}")
@@ -610,10 +594,14 @@ def main() -> None:
     if not st.session_state.history_loaded:
         with st.spinner("이전 대화를 불러오는 중..."):
             rows = fetch_history(user_id)
-        st.session_state.messages = []
-        for r in rows:
-            st.session_state.messages.append({"role": "user",      "content": r["question"]})
-            st.session_state.messages.append({"role": "assistant", "content": r["answer"]})
+        st.session_state.messages = [
+            msg
+            for r in rows
+                for msg in (
+                    {"role": "user",      "content": r["question"]},
+                    {"role": "assistant", "content": r["answer"]},
+                )
+        ]
         st.session_state.history_loaded = True
 
     tabs = st.tabs(["📁 업로드 & 인덱싱", "💬 AI 질문하기", "⚙️ 상태 관리"])

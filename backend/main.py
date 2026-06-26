@@ -102,7 +102,7 @@ app.add_middleware(
 
 
 # ── 공통 헬퍼 ────────────────────────────────────────────────────
-
+# 확인 완료.
 def get_rag_service(request: Request) -> RAGService:
     """app.state 에서 RAGService 를 꺼낸다."""
     svc = getattr(request.app.state, "rag_service", None)
@@ -233,7 +233,7 @@ async def index(
 
 
 # ── 프로젝트 관리 ──────────────────────────
-
+# 확인 완료
 @app.get("/projects")
 def list_projects():
     """전체 프로젝트 목록 반환."""

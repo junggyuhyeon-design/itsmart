@@ -1,3 +1,4 @@
+import hashlib
 import logging
 from typing import Any
 
@@ -21,15 +22,16 @@ class QdrantService:
         return self._client
 
     # ── 컬렉션 관리 ─────────────────────────────────────────────
-
+    # 확인 완료
     def _collection_exists(self) -> bool:
-        """컬렉션 존재 여부 확인 (404/예외 없이 bool 반환)."""
+        """컬렉션 존재 여부 확인."""
         try:
             collections = self.client.get_collections().collections
             return any(c.name == self.settings.qdrant_collection for c in collections)
         except Exception:
             return False
 
+    # 확인 완료
     def ensure_collection(self, vector_size: int) -> None:
         """컬렉션이 없으면 생성."""
         try:
@@ -43,15 +45,26 @@ class QdrantService:
             logger.exception("ensure_collection 실패")
             raise
 
+    # 확인 완료
     def upsert_chunks(self, chunks: list[dict[str, Any]], vectors: list[list[float]]) -> int:
         """청크와 벡터를 Qdrant에 저장. 저장된 포인트 수 반환."""
         if not chunks or not vectors:
             return 0
         try:
-            points = [
-                PointStruct(id=c["chunk_id"], vector=v, payload=c)
-                for c, v in zip(chunks, vectors)
-            ]
+            points = []
+
+            for idx, (chunk, vector) in enumerate(zip(chunks, vectors)):
+                point_id = hashlib.md5(
+                    f"{chunk['project_name']}:{chunk['relative_path']}:{idx}".encode("utf-8")
+                ).hexdigest()
+
+                points.append(
+                    PointStruct(
+                        id=point_id,
+                        vector=vector,
+                        payload=chunk,
+                    )
+                )
             self.client.upsert(
                 collection_name=self.settings.qdrant_collection,
                 points=points,

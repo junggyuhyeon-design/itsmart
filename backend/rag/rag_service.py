@@ -1,6 +1,5 @@
 import logging
 import re
-from collections import Counter, defaultdict
 from pathlib import Path
 
 from config import Settings
@@ -9,6 +8,8 @@ from parser.chunk_service import ChunkService
 from parser.file_parser import parse_text_file
 from rag.ollama_service import OllamaService
 from rag.qdrant_service import QdrantService
+
+from database.history_repository import bulk_insert_file_index
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +25,10 @@ class RAGService:
     # ── 인덱싱 ──────────────────────────────────────────────────
 
     def index_files(self, targets: list) -> dict:
-        from database.history_repository import bulk_insert_file_index
 
+        # Qdrant 내 컬렉션 존재 유무 확인 후 없다면 신규 생성.
         self.qdrant_service.ensure_collection(self.embedding_service.dimension)
+
         results: dict = {"success": 0, "failed": 0, "total_chunks": 0, "logs": []}
 
         # 성공적으로 파싱된 파일의 메타데이터를 모아 일괄 저장
@@ -36,37 +38,44 @@ class RAGService:
             rel_path = t.get("relative_path", "unknown")
             try:
                 parsed = parse_text_file(t)
-                if not parsed:
+                if not parsed: # 인코딩이 되지 않은 경우
                     results["logs"].append(f"⚠️ {rel_path}: 파싱 결과 없음")
                     continue
 
+                # 청킹
                 chunks = self.chunk_service.split_text(parsed["raw_text"], parsed)
                 if not chunks:
                     results["logs"].append(f"⚠️ {rel_path}: 생성된 청크 없음")
                     continue
 
-                vectors = self.embedding_service.embed_texts([c["text"] for c in chunks])
+                # 벡터화
+                vectors = self.embedding_service.embed_texts(
+                    [c["text"] for c in chunks]
+                )
+                # [Qdrant] 저장
                 count = self.qdrant_service.upsert_chunks(chunks, vectors)
 
                 results["success"] += 1
                 results["total_chunks"] += count
                 results["logs"].append(f"✅ {rel_path} ({count} chunks)")
 
-                # file_index 에 저장할 메타데이터 수집
-                indexed_meta.append({
-                    "project_id":    parsed["project_id"],
-                    "project_name":  parsed["project_name"],
-                    "file_name":     parsed["file_name"],
-                    "relative_path": parsed["relative_path"],
-                    "extension":     parsed["extension"],
-                    "file_size":     parsed.get("file_size", 0),
-                })
+                # [SQLite] file_index 에 저장할 메타데이터 수집
+                indexed_meta.append(
+                    {
+                        "project_id": parsed["project_id"],
+                        "project_name": parsed["project_name"],
+                        "file_name": parsed["file_name"],
+                        "relative_path": parsed["relative_path"],
+                        "extension": parsed["extension"],
+                        "file_size": parsed.get("file_size", 0),
+                    }
+                )
             except Exception as e:
                 results["failed"] += 1
                 results["logs"].append(f"❌ {rel_path}: {e}")
                 logger.exception("index_files 실패: %s", rel_path)
 
-        # file_index 일괄 저장 (Qdrant 성공분만)
+        # [SQLite] file_index 에 저장
         if indexed_meta:
             try:
                 saved = bulk_insert_file_index(indexed_meta)
@@ -94,10 +103,14 @@ class RAGService:
         if top_k is None:
             top_k = self.settings.top_k
 
-        llm_question = f"{question}\n{extra_context}".strip() if extra_context else question
+        llm_question = (
+            f"{question}\n{extra_context}".strip() if extra_context else question
+        )
 
         query_vector = self.embedding_service.embed_query(question)
-        hits = self.qdrant_service.search(query_vector, project_id=project_id, top_k=top_k)
+        hits = self.qdrant_service.search(
+            query_vector, project_id=project_id, top_k=top_k
+        )
 
         gen = self.ollama_service.generate_response_stream(
             llm_question, hits, chat_history=chat_history
@@ -117,7 +130,9 @@ class RAGService:
 
     # ── SQL 파싱 유틸 ────────────────────────────────────────────
 
-    def _find_mentioned_tables(self, text_upper: str, table_names: list[str]) -> list[str]:
+    def _find_mentioned_tables(
+        self, text_upper: str, table_names: list[str]
+    ) -> list[str]:
         return [t for t in table_names if re.search(rf"\b{re.escape(t)}\b", text_upper)]
 
     def _extract_table_definitions(self, parsed_files: list[dict]):
@@ -149,7 +164,7 @@ class RAGService:
                 close_paren = self._find_balanced_paren_end(text, open_paren)
                 if close_paren is None:
                     continue
-                body = text[open_paren + 1:close_paren]
+                body = text[open_paren + 1 : close_paren]
                 columns = self._parse_column_names(body)
                 table_names.add(table_upper)
                 table_definitions.setdefault(table_upper, source_file)
@@ -206,8 +221,13 @@ class RAGService:
     def _parse_column_names(self, table_body: str) -> list[str]:
         columns = []
         skip_prefixes = (
-            "PRIMARY KEY", "FOREIGN KEY", "UNIQUE", "CHECK",
-            "CONSTRAINT", "INDEX", "KEY ",
+            "PRIMARY KEY",
+            "FOREIGN KEY",
+            "UNIQUE",
+            "CHECK",
+            "CONSTRAINT",
+            "INDEX",
+            "KEY ",
         )
         for line in table_body.splitlines():
             line = line.strip().rstrip(",").strip()
@@ -261,13 +281,17 @@ class RAGService:
                 name = m.group(1).strip()
                 key = ("function", name)
                 if key not in added:
-                    entities.append({"type": "function", "name": name, "text": m.group(0)})
+                    entities.append(
+                        {"type": "function", "name": name, "text": m.group(0)}
+                    )
                     added.add(key)
 
         if extension == "xml":
             mapper_match = re.search(r'<mapper[^>]*namespace="([^"]+)"', text, re.I)
             if mapper_match:
-                entities.append({"type": "class", "name": mapper_match.group(1), "text": text})
+                entities.append(
+                    {"type": "class", "name": mapper_match.group(1), "text": text}
+                )
             for tag in ["select", "insert", "update", "delete"]:
                 for m in re.finditer(
                     rf'(?is)<{tag}\b[^>]*id="([^"]+)"[^>]*>(.*?)</{tag}>', text
@@ -275,7 +299,9 @@ class RAGService:
                     name = f"{tag}:{m.group(1)}"
                     key = ("function", name)
                     if key not in added:
-                        entities.append({"type": "function", "name": name, "text": m.group(0)})
+                        entities.append(
+                            {"type": "function", "name": name, "text": m.group(0)}
+                        )
                         added.add(key)
 
         return entities
