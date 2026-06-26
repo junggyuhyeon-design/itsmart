@@ -26,6 +26,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from health_service import build_system_status
+from rag.query_analyzer import QueryAnalyzer
 from rag.rag_service import RAGService
 from utils.file_utils import (
     is_allowed_upload_extension,
@@ -38,36 +39,32 @@ sys.path.append(str(ROOT_DIR))
 
 # ── 로깅 설정 ────────────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.WARNING,                          # 기본: WARNING 이상만 출력
+    level=logging.WARNING,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-
-# 앱 자체 로거는 INFO 유지 (startup·shutdown·오류 등 핵심 메시지)
 logging.getLogger("main").setLevel(logging.INFO)
 logging.getLogger("rag").setLevel(logging.INFO)
 logging.getLogger("database").setLevel(logging.INFO)
 
-# uvicorn access log: /health, /status, Qdrant count 요청 제외
+
 class _AccessLogFilter(logging.Filter):
     _SKIP = ("/health", "/status", "/collections/")
 
     def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        return not any(s in msg for s in self._SKIP)
+        return not any(s in record.getMessage() for s in self._SKIP)
+
 
 _access_logger = logging.getLogger("uvicorn.access")
 _access_logger.addFilter(_AccessLogFilter())
-_access_logger.setLevel(logging.WARNING)   # 나머지 access log 도 경고 이상만
-
-# httpx 내부 로그(Qdrant HTTP 통신 등) 억제
+_access_logger.setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-# ── 앱 로거 ──────────────────────────────────────────────────────
-logger = logging.getLogger("main")
-
-settings = get_settings()
+# ── 앱 전역 ──────────────────────────────────────────────────────
+logger    = logging.getLogger("main")
+settings  = get_settings()
 UPLOAD_DIR = settings.upload_dir
+_analyzer  = QueryAnalyzer(default_top_k=settings.top_k)
 
 
 # ── Lifespan ─────────────────────────────────────────────────────
@@ -78,26 +75,22 @@ async def lifespan(app: FastAPI):
     try:
         init_db()
         rag = RAGService(settings)
-        app.state.rag_service = rag
+        app.state.rag_service     = rag
         app.state.rag_initialized = True
-        app.state.init_error = None
+        app.state.init_error      = None
         logger.info("Startup complete")
     except Exception as e:
         logger.exception("Startup failed: %s", e)
         raise RuntimeError(f"Startup failed: {e}") from e
-
     yield
     logger.info("Shutdown complete")
 
 
 app = FastAPI(title="IT-Smart CodeMind API", lifespan=lifespan)
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-    allow_credentials=True,
+    allow_origins=["*"], allow_methods=["*"],
+    allow_headers=["*"], allow_credentials=True,
 )
 
 
@@ -107,7 +100,7 @@ def get_rag_service(request: Request) -> RAGService:
     """app.state 에서 RAGService 를 꺼낸다."""
     svc = getattr(request.app.state, "rag_service", None)
     if svc is None:
-        raise HTTPException(status_code=503, detail="RAGService 초기화 중입니다. 잠시 후 다시 시도하세요.")
+        raise HTTPException(status_code=503, detail="RAGService 초기화 중입니다.")
     return svc
 
 # 확인 완료.
@@ -123,9 +116,8 @@ def _require_user(x_user_id: str | None) -> str:
         raise HTTPException(status_code=500, detail="사용자 등록 중 오류가 발생했습니다.")
     return uid
 
-# 확인 완료.
-async def _save_upload_stream(upload: UploadFile, dest: Path) -> int:
-    """UploadFile 을 청크 단위로(1MB) 비동기 스트리밍하여 디스크에 저장."""
+
+async def _save_upload_stream(upload: UploadFile, dest: Path) -> None:
     total_written = 0
     try:
         async with aiofiles.open(dest, "wb") as out_file:
@@ -138,10 +130,7 @@ async def _save_upload_stream(upload: UploadFile, dest: Path) -> int:
                     dest.unlink(missing_ok=True) # 업로드 실패 시 중간에 생성된 불완전한 파일을 정리(삭제)
                     raise HTTPException(
                         status_code=413,
-                        detail=(
-                            f"'{upload.filename}' 파일이 허용 크기 "
-                            f"{settings.max_file_size} bytes 를 초과했습니다."
-                        ),
+                        detail=f"'{upload.filename}' 파일이 허용 크기를 초과했습니다.",
                     )
                 await out_file.write(chunk)
     except HTTPException:
@@ -150,8 +139,26 @@ async def _save_upload_stream(upload: UploadFile, dest: Path) -> int:
         dest.unlink(missing_ok=True)
         logger.error("파일 저장 실패: %s — %s", dest.name, e)
         raise HTTPException(status_code=500, detail=f"파일 저장 중 오류: {e}") from e
-    # 현재 return 값에 대해서 사용하지 않으므로 주석.
-    # return total_written
+
+
+def _build_listing_context(summary: dict, extension_filter: str | None) -> str:
+    """file_index_summary → 사람이 읽을 수 있는 텍스트."""
+    lines: list[str] = []
+    if extension_filter:
+        filtered = [f for f in summary["files"] if f["extension"] == extension_filter]
+        lines.append(f"[{extension_filter.upper()} 파일 목록 — 총 {len(filtered)}개]")
+        for f in filtered:
+            lines.append(f"  - {f['relative_path']}")
+    else:
+        lines.append(f"[프로젝트 전체 파일 목록 — 총 {summary['total']}개]")
+        by_ext: dict[str, list] = {}
+        for f in summary["files"]:
+            by_ext.setdefault(f["extension"], []).append(f["relative_path"])
+        for ext, paths in sorted(by_ext.items()):
+            lines.append(f"\n  [{ext.upper()}] {len(paths)}개")
+            for p in paths:
+                lines.append(f"    - {p}")
+    return "\n".join(lines)
 
 
 # ── 업로드 & 인덱싱 ──────────────────────────────────────────────
@@ -169,28 +176,23 @@ async def upload(
     if len(files) > settings.max_files_per_request:
         raise HTTPException(
             status_code=400,
-            detail=f"한 번에 업로드 가능한 파일 수는 최대 {settings.max_files_per_request}개입니다.",
+            detail=f"한 번에 최대 {settings.max_files_per_request}개까지 업로드 가능합니다.",
         )
 
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    saved_filenames: list[str] = []  # 이번 요청에서 실제 저장된 파일명만 추적
 
-    saved_filenames: list[str] = []   # 이번 요청에서 실제 저장된 파일명만 추적
     for f in files:
         if not f.filename or not f.filename.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="파일명이 없습니다."
-            )
-
+            raise HTTPException(status_code=400, detail="파일명이 없습니다.")
         if not is_allowed_upload_extension(f.filename):
             raise HTTPException(
                 status_code=400,
                 detail=f"허용되지 않는 파일 형식입니다: {f.filename}",
             )
         safe_name = safe_filename(f.filename)
-        dest = Path(UPLOAD_DIR) / safe_name
-        await _save_upload_stream(f, dest)
-        saved_filenames.append(safe_name)   # 저장 성공한 파일명 기록
+        await _save_upload_stream(f, Path(UPLOAD_DIR) / safe_name)
+        saved_filenames.append(safe_name)  # 저장 성공한 파일명 기록
 
     # 이번에 저장된 파일만 수집 (기존 파일 재수집 방지)
     targets = await run_in_threadpool(
@@ -201,23 +203,24 @@ async def upload(
     projects_created = {}
     for target in targets:
         if target.project_id not in projects_created:
-            projects_created[target.project_id] = target.project_id
+            projects_created[target.project_id] = target.project_name
             try:
                 zip_file_path = Path(UPLOAD_DIR) / f"{target.project_name}.zip"
                 # SQLite 에 프로젝트 정보 저장.
                 save_uploaded_file(target.project_id, target.project_name, str(zip_file_path))
             except Exception as e:
-                logger.error("프로젝트 정보 DB 저장 실패: %s", e)
+                logger.error("프로젝트 DB 저장 실패: %s", e)
 
-    logger.info("업로드 완료: %d개 파일 수집, %d개 프로젝트", len(targets), len(projects_created))
-    return {"targets": [t.__dict__ for t in targets], "count": len(targets), "projects": len(projects_created)}
+    logger.info("업로드 완료: %d개 파일, %d개 프로젝트", len(targets), len(projects_created))
+    return {
+        "targets":  [t.__dict__ for t in targets],
+        "count":    len(targets),
+        "projects": len(projects_created),
+    }
 
 
 @app.post("/index")
-async def index(
-    request: Request,
-    targets: List = Body(...),
-):
+async def index(request: Request, targets: List = Body(...)):
     """수집된 파일 목록을 Qdrant 에 인덱싱."""
     if not targets:
         raise HTTPException(status_code=400, detail="인덱싱할 파일 목록이 없습니다.")
@@ -232,7 +235,7 @@ async def index(
         raise HTTPException(status_code=500, detail=f"인덱싱 중 오류: {e}") from e
 
 
-# ── 프로젝트 관리 ──────────────────────────
+# ── 프로젝트 관리 ─────────────────────────────────────────────────
 # 확인 완료
 @app.get("/projects")
 def list_projects():
@@ -252,26 +255,21 @@ def list_project_files(project_name: str, extension: str | None = None):
     extension 파라미터로 필터 가능 (예: ?extension=xml).
     """
     try:
-        all_projects = get_all_projects()
         project_info = next(
-            (p for p in all_projects if p["project_name"] == project_name.strip()),
+            (p for p in get_all_projects() if p["project_name"] == project_name.strip()),
             None,
         )
         if not project_info:
-            raise HTTPException(
-                status_code=404,
-                detail=f"프로젝트 '{project_name}'을(를) 찾을 수 없습니다."
-            )
-
-        pid = project_info["project_id"]
+            raise HTTPException(status_code=404, detail=f"프로젝트 '{project_name}'을(를) 찾을 수 없습니다.")
+        pid   = project_info["project_id"]
         files = get_file_index(pid, extension)
         return {
-            "project_id":   pid,
-            "project_name": project_info["project_name"],
-            "uploaded_at":  project_info["uploaded_at"],
+            "project_id":       pid,
+            "project_name":     project_info["project_name"],
+            "uploaded_at":      project_info["uploaded_at"],
             "extension_filter": extension,
-            "files": files,
-            "count": len(files),
+            "files":            files,
+            "count":            len(files),
         }
     except HTTPException:
         raise
@@ -280,71 +278,18 @@ def list_project_files(project_name: str, extension: str | None = None):
         raise HTTPException(status_code=500, detail=f"조회 중 오류: {e}") from e
 
 
-# ── 질문 유형 감지 ───────────────────────────────────────────────
-
-_LISTING_KEYWORDS = (
-    "목록", "전체", "모든", "몇 개", "몇개", "어떤 파일",
-    "list", "all files", "show all", "enumerate",
-)
-_DIAGRAM_KEYWORDS = (
-    "관계도", "다이어그램", "mermaid", "diagram", "flowchart",
-    "그려", "그려줘", "표현해", "시각화",
-)
-
-def _detect_query_type(question: str) -> str:
-    """
-    질문 문자열을 보고 처리 전략을 결정한다.
-    - 'listing' : 파일 목록/열거 요청 → SQLite file_index 로 응답
-    - 'diagram' : 관계도/다이어그램 요청 → file_index 컨텍스트 + Qdrant 병행
-    - 'qa'      : 일반 코드 질문 → Qdrant RAG
-    """
-    q = question.lower()
-    if any(k in q for k in _LISTING_KEYWORDS):
-        return "listing"
-    if any(k in q for k in _DIAGRAM_KEYWORDS):
-        return "diagram"
-    return "qa"
-
-
-def _build_listing_context(summary: dict, extension_filter: str | None) -> str:
-    """file_index_summary 를 LLM 에 주입할 텍스트로 변환."""
-    lines: list[str] = []
-    if extension_filter:
-        filtered = [f for f in summary["files"] if f["extension"] == extension_filter]
-        lines.append(f"[{extension_filter.upper()} 파일 목록 — 총 {len(filtered)}개]")
-        for f in filtered:
-            lines.append(f"  - {f['relative_path']}")
-    else:
-        lines.append(f"[프로젝트 전체 파일 목록 — 총 {summary['total']}개]")
-        by_ext: dict[str, list] = {}
-        for f in summary["files"]:
-            by_ext.setdefault(f["extension"], []).append(f["relative_path"])
-        for ext, paths in sorted(by_ext.items()):
-            lines.append(f"\n  [{ext.upper()}] {len(paths)}개")
-            for p in paths:
-                lines.append(f"    - {p}")
-    return "\n".join(lines)
-
-
-def _extract_extension_filter(question: str) -> str | None:
-    """질문에서 확장자 필터를 추출. 예: 'xml 파일 목록' → 'xml'"""
-    import re
-    m = re.search(r"\b(xml|java|sql|py|json|yml|yaml|md|txt)\b", question.lower())
-    return m.group(1) if m else None
-
-
-# ── 질문 / 히스토리 ──────────────────────────────────────────────
+# ── 질문 ─────────────────────────────────────────────────────────
 
 @app.get("/ask")
 async def ask(
-    request: Request,
-    question: str,
-    project_name: str | None = None,
-    top_k: int = 5,
-    extra_context: str = "",
-    x_user_id: str | None = Header(default=None),
+    request:       Request,
+    question:      str,
+    project_name:  str | None = None,
+    top_k:         int        = 5,
+    extra_context: str        = "",
+    x_user_id:     str | None = Header(default=None),
 ):
-    """질문에 대한 RAG 스트리밍 응답. project_name이 없으면 모든 프로젝트 대상."""
+    """질문에 대한 RAG 스트리밍 응답. project_name 이 없으면 전체 프로젝트 대상."""
     user_id = _require_user(x_user_id)
     if not question or not question.strip():
         raise HTTPException(status_code=400, detail="질문이 비어 있습니다.")
@@ -354,100 +299,78 @@ async def ask(
     # 전체 프로젝트 목록 조회
     all_projects = get_all_projects()
 
-    # project_name 검증 (지정된 경우)
-    project_id = None
+    # project_name → project_id 변환
+    project_id            = None
     selected_project_name = project_name
     if project_name:
         for proj in all_projects:
             if proj["project_name"] == project_name.strip():
-                project_id = proj["project_id"]
+                project_id            = proj["project_id"]
                 selected_project_name = proj["project_name"]
                 break
         if not project_id:
             raise HTTPException(
                 status_code=400,
-                detail=f"프로젝트 '{project_name}'을(를) 찾을 수 없습니다. 사용 가능한 프로젝트: {[p['project_name'] for p in all_projects]}"
+                detail=(
+                    f"프로젝트 '{project_name}'을(를) 찾을 수 없습니다. "
+                    f"사용 가능: {[p['project_name'] for p in all_projects]}"
+                ),
             )
 
     history_limit = max(1, min(settings.chat_history_turns, 20))
-    recent_rows = get_history(user_id, limit=history_limit)
-    chat_history = list(reversed(recent_rows))
+    chat_history  = list(reversed(get_history(user_id, limit=history_limit)))
 
+    intent  = _analyzer.analyze(question)
     service = get_rag_service(request)
-    try:
-        projects_info = "\n".join([f"- {p['project_name']}" for p in all_projects])
-        query_type = _detect_query_type(question)
 
-        # ── listing: Qdrant 전혀 사용 안 함, SQLite → 직접 스트리밍 ─────
-        if query_type == "listing" and project_id:
-            ext_filter = _extract_extension_filter(question)
+    try:
+        # ── listing: Qdrant 없이 SQLite 직접 스트리밍 ────────────
+        if intent.query_type == "listing" and project_id:
             summary = get_file_index_summary(project_id)
             if summary["total"] > 0:
-                listing_text = _build_listing_context(summary, ext_filter)
+                listing_text = _build_listing_context(summary, intent.extension_filter)
 
                 async def _listing_stream():
-                    # LLM 없이 file_index 결과를 그대로 스트리밍
-                    prompt = (
-                        f"아래는 프로젝트 '{selected_project_name}'의 "
-                        f"{'전체' if not ext_filter else ext_filter.upper()} 파일 목록입니다.\n\n"
-                        f"{listing_text}"
-                    )
-                    yield prompt
+                    ext_label = intent.extension_filter.upper() if intent.extension_filter else "전체"
+                    yield f"프로젝트 '{selected_project_name}'의 {ext_label} 파일 목록입니다.\n\n{listing_text}"
 
                 return StreamingResponse(_listing_stream(), media_type="text/plain")
-            # file_index 없음 → RAG fallback (아래 qa 분기로 계속)
-            logger.info("file_index 없음 — RAG fallback (project_id=%s)", project_id)
+            logger.info("file_index 없음 — qa fallback (project_id=%s)", project_id)
 
-        # ── diagram: file_index 전체 구조 + Qdrant 청크 병행 주입 ─────────
-        if query_type == "diagram" and project_id:
+        # ── diagram: file_index 전체 구조 컨텍스트 추가 ──────────
+        struct_ctx = ""
+        if intent.query_type == "diagram" and project_id:
             summary = get_file_index_summary(project_id)
-            struct_ctx = _build_listing_context(summary, None) if summary["total"] > 0 else ""
-            dynamic_top_k = min(settings.top_k * 10, 80)
-            merged_context = "\n\n".join(filter(None, [
-                f"사용 가능한 프로젝트:\n{projects_info}",
-                f"현재 프로젝트: {selected_project_name}",
-                struct_ctx,
-                extra_context,
-            ]))
-            gen, _ = await service.ask_with_context_stream(
-                question=question.strip(),
-                project_id=project_id,
-                extra_context=merged_context,
-                top_k=dynamic_top_k,
-                chat_history=chat_history,
-            )
-            return StreamingResponse(gen, media_type="text/plain")
+            if summary["total"] > 0:
+                struct_ctx = _build_listing_context(summary, None)
 
-        # ── qa (기본): 순수 Qdrant RAG ───────────────────────────────────
-        if project_id:
-            base_ctx = f"사용 가능한 프로젝트:\n{projects_info}\n\n현재 프로젝트: {selected_project_name}"
-        else:
-            base_ctx = (
-                f"사용 가능한 프로젝트:\n{projects_info}\n\n"
-                "질문을 분석하여 관련 프로젝트를 판단하고 답변하세요. "
-                "답변할 때는 어느 프로젝트의 정보를 사용했는지 명시하세요."
-            )
-        context_with_projects = "\n\n".join(filter(None, [base_ctx, extra_context]))
-
+        # ── Qdrant + Ollama 스트리밍 ──────────────────────────────
         gen, _ = await service.ask_with_context_stream(
             question=question.strip(),
             project_id=project_id,
-            extra_context=context_with_projects,
-            top_k=top_k,
+            project_name=selected_project_name,
+            extra_context=struct_ctx or extra_context,
+            top_k=intent.top_k,
+            layer_filter=intent.layer_filter,
+            extension_filter=intent.extension_filter,
+            query_type=intent.query_type,
             chat_history=chat_history,
         )
         return StreamingResponse(gen, media_type="text/plain")
+
     except Exception as e:
         logger.error("ask 처리 실패: %s", e)
         raise HTTPException(status_code=500, detail=f"질문 처리 중 오류: {e}") from e
 
+
+# ── 히스토리 ─────────────────────────────────────────────────────
+
 @app.post("/history")
 def add_history(
-    payload: dict = Body(...),
+    payload:   dict      = Body(...),
     x_user_id: str | None = Header(default=None),
 ):
-    """스트리밍 완료 후 프론트에서 question + answer 를 저장."""
-    user_id = _require_user(x_user_id)
+    user_id  = _require_user(x_user_id)
     question = (payload.get("question") or "").strip()
     answer   = (payload.get("answer")   or "").strip()
     if not question:
@@ -463,20 +386,14 @@ def add_history(
 
 
 @app.get("/history")
-def list_history(
-    limit: int,
-    x_user_id: str | None = Header(default=None),
-):
+def list_history(limit: int, x_user_id: str | None = Header(default=None)):
     """History 복원(최초 1회) 해당 사용자의 채팅 히스토리 반환 (최신순)."""
-    user_id = _require_user(x_user_id) # Header 에서 user_id 를 가져와 User 테이블 저장 후 리턴.
-    rows = get_history(user_id, limit=limit)
-    return {"history": rows}
+    user_id = _require_user(x_user_id)
+    return {"history": get_history(user_id, limit=limit)}
 
 
 @app.delete("/history")
-def clear_history(
-    x_user_id: str | None = Header(default=None),
-):
+def clear_history(x_user_id: str | None = Header(default=None)):
     """해당 사용자의 채팅 히스토리 전체 삭제."""
     user_id = _require_user(x_user_id)
     try:
@@ -498,18 +415,16 @@ def status(request: Request):
 
     # 청크 수를 직접 조회해 추가
     try:
-        svc = get_rag_service(request)
-        base["chunk_count"] = svc.qdrant_service.count_points()
+        base["chunk_count"] = get_rag_service(request).qdrant_service.count_points()
     except Exception:
         base["chunk_count"] = 0
 
-    # 프로젝트 정보 추가
     try:
-        projects = get_all_projects()
-        base["projects"] = projects
+        projects            = get_all_projects()
+        base["projects"]    = projects
         base["project_count"] = len(projects)
     except Exception:
-        base["projects"] = []
+        base["projects"]      = []
         base["project_count"] = 0
 
     return base
@@ -535,10 +450,8 @@ def health(request: Request):
     rag_ok = getattr(request.app.state, "rag_initialized", False)
     if not rag_ok:
         raise HTTPException(status_code=503, detail="RAGService 초기화 중")
-
     try:
-        svc = get_rag_service(request)
-        chunk_count = svc.qdrant_service.count_points()
+        chunk_count = get_rag_service(request).qdrant_service.count_points()
         return {"status": "ok", "qdrant": "connected", "chunk_count": chunk_count}
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e)) from e

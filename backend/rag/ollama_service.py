@@ -1,150 +1,49 @@
-import httpx
 import json
+import httpx
 from config import Settings
+from rag.prompt_builder import PromptBuilder
 
 
 class OllamaService:
-    def __init__(self, settings: Settings):
-        self.settings = settings
-
-    def _build_system_prompt(self, question: str) -> str:
-        question_lower = (question or "").lower()
-
-        mermaid_keywords = [
-            "mermaid",
-            "diagram",
-            "flowchart",
-            "graph td",
-            "graph lr",
-            "관계도",
-            "다이어그램",
-            "그려",
-            "그려줘",
-            "표현해",
-        ]
-
-        wants_mermaid = any(keyword in question_lower for keyword in mermaid_keywords)
-
-        if wants_mermaid:
-            return """
-당신은 소스 코드와 DB 구조를 분석하는 도우미입니다.
-
-사용자가 Mermaid 다이어그램을 요청한 경우 반드시 아래 규칙을 따른다.
-
-[DDL 해석 규칙]
-1. 업로드된 SQL 파일들 중 CREATE TABLE 등 DDL 문이 포함된 파일을 테이블 정의 기준으로 사용한다.
-2. 특정 파일명(init.sql 등)을 가정하지 않는다.
-3. 테이블 정의용 SQL 파일은 참고 자료일 뿐이며, 다이어그램 노드로 포함하지 않는다.
-4. DDL 파일, schema 파일, SQL 정의 파일 자체는 Mermaid에 그리지 않는다.
-5. 실제 다이어그램에는 소스 파일, 클래스, 함수(메서드), 그리고 실제 사용되는 테이블만 포함한다.
-6. DDL에 정의된 테이블 중에서도 소스 코드에서 실제 참조/사용되는 테이블만 포함한다.
-7. 단순히 정의만 있고 사용되지 않는 테이블은 제외한다.
-
-[관계 해석 규칙]
-- SELECT 는 READS
-- INSERT, UPDATE, DELETE 는 WRITES
-- JOIN 은 JOINS
-- 명확하지 않으면 REF
-
-[출력 규칙]
-1. 응답은 오직 하나의 ```mermaid 코드블록만 출력한다.
-2. 코드블록 밖의 설명, 제목, 해설, 리스트는 절대 출력하지 않는다.
-3. 첫 줄은 반드시 flowchart LR 로 시작한다.
-4. Mermaid 10.9.6에서 문법 오류 없이 동작해야 한다.
-5. classDef, style, subgraph, click, %% 주석은 사용하지 않는다.
-6. 노드명은 단순하게 만든다.
-7. 파일/클래스/함수 이름에 공백이 있으면 언더스코어(_)로 바꾼다.
-8. edge 라벨은 READS, WRITES, JOINS, REF 만 사용한다.
-9. SQL 파일명 자체(init.sql, schema.sql, ddl.sql 등)은 노드로 만들지 않는다.
-
-[출력 예시]
-```mermaid
-flowchart LR
-F1[UserService_java] -->|READS| T1[TB_USER]
-M1[UserMapper_xml] -->|WRITES| T2[TB_LOGIN_LOG]
-```
-""".strip()
-
-        return (
-            "당신은 소스 코드 분석 도우미입니다. 한국어로 답변하세요.\n"
-            "이전 대화 기록이 제공되면 후속 질문(직전 질문, 아까 답변 등)은 "
-            "대화 기록을 우선 참고하세요.\n"
-            "소스코드 관련 질문은 마지막 메시지의 Context(검색된 코드)를 "
-            "우선 근거로 사용하세요.\n"
-            "근거가 없으면 추측하지 말고 모른다고 답하세요."
-        )
-
-    def _trim_chat_history(self, chat_history: list[dict]) -> list[dict]:
-        """오래된 턴부터 제거해 문자 상한 이내로 유지 (시간순 입력 가정)."""
-        max_chars = self.settings.chat_history_max_chars
-        if max_chars <= 0 or not chat_history:
-            return []
-
-        trimmed: list[dict] = []
-        total = 0
-        for row in reversed(chat_history):
-            question = (row.get("question") or "").strip()
-            answer = (row.get("answer") or "").strip()
-            if not question or not answer:
-                continue
-            pair_len = len(question) + len(answer)
-            if trimmed and total + pair_len > max_chars:
-                break
-            trimmed.append({"question": question, "answer": answer})
-            total += pair_len
-        trimmed.reverse()
-        return trimmed
-
-    def _build_messages(
-        self,
-        question: str,
-        hits: list[dict],
-        chat_history: list[dict] | None,
-    ) -> list[dict]:
-        system_prompt = self._build_system_prompt(question)
-        messages: list[dict] = [{"role": "system", "content": system_prompt}]
-
-        for row in self._trim_chat_history(chat_history or []):
-            messages.append({"role": "user", "content": row["question"]})
-            messages.append({"role": "assistant", "content": row["answer"]})
-
-        # 검색된 청크를 파일/프로젝트별로 구성
-        context_parts = []
-        for h in hits:
-            project_info = ""
-            if h.get("project_name"):
-                project_info = f" [프로젝트: {h['project_name']}]"
-            context_parts.append(f"File: {h['file_name']}{project_info}\nContent: {h['text']}")
-
-        if context_parts:
-            user_content = f"Context:\n{chr(10).join(context_parts)}\n\nQuestion: {question}"
-        else:
-            user_content = f"Question: {question}"
-        messages.append({"role": "user", "content": user_content})
-        return messages
+    def __init__(self, settings: Settings) -> None:
+        self.settings       = settings
+        self._prompt_builder = PromptBuilder()
 
     async def generate_response_stream(
         self,
-        question: str,
-        hits: list[dict],
-        chat_history: list[dict] | None = None,
+        question:       str,
+        hits:           list[dict],
+        query_type:     str         = "qa",
+        project_name:   str | None  = None,
+        struct_context: str         = "",
+        chat_history:   list[dict] | None = None,
     ):
-        url = f"{self.settings.ollama_base_url}/api/chat"
-        messages = self._build_messages(question, hits, chat_history)
+        """PromptBuilder로 메시지를 조립하고 Ollama 스트리밍 응답을 yield한다."""
+        messages = self._prompt_builder.build_messages(
+            question=question,
+            hits=hits,
+            query_type=query_type,
+            project_name=project_name,
+            struct_context=struct_context,
+            chat_history=chat_history,
+            max_history_chars=self.settings.chat_history_max_chars,
+        )
 
+        url     = f"{self.settings.ollama_base_url}/api/chat"
         payload = {
-            "model": self.settings.ollama_model,
+            "model":    self.settings.ollama_model,
             "messages": messages,
-            "stream": True
+            "stream":   True,
         }
 
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream("POST", url, json=payload) as response:
                 async for line in response.aiter_lines():
-                    if line:
-                        chunk = json.loads(line)
-                        content = chunk.get("message", {}).get("content", "")
-                        if content:
-                            yield content
-                        if chunk.get("done"):
-                            break
+                    if not line:
+                        continue
+                    chunk   = json.loads(line)
+                    content = chunk.get("message", {}).get("content", "")
+                    if content:
+                        yield content
+                    if chunk.get("done"):
+                        break

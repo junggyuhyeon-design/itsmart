@@ -20,7 +20,7 @@ HISTORY_LIMIT   = 50
 REQUEST_TIMEOUT = 30.0
 STREAM_TIMEOUT  = 300.0
 UPLOAD_TIMEOUT  = 300.0
-INDEX_TIMEOUT   = 1800.0
+INDEX_TIMEOUT   = 3600.0
 
 st.set_page_config(page_title="IT-Smart Source Analyzer", layout="wide")
 
