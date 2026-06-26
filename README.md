@@ -1,3 +1,4 @@
+```text
 itsmart_codeMind/
 ├─ .env
 ├─ .env.example
@@ -36,3 +37,4 @@ itsmart_codeMind/
 │  ├─ Dockerfile
 │  └─ requirements.txt
 └─ README.md
+```
