@@ -1,29 +1,38 @@
-## 프로젝트 구조
-
-```text
 itsmart_codeMind/
 ├─ .env
+├─ .env.example
 ├─ .gitignore
-├─ docker-compose.yml
-├─ backend/
+├─ backend
+│  ├─ __init__.py
 │  ├─ config.py
 │  ├─ Dockerfile
-│  ├─ main.py
 │  ├─ health_service.py
+│  ├─ main.py
 │  ├─ requirements.txt
-│  ├─ embedder/
+│  ├─ database
+│  │  ├─ database.py
+│  │  ├─ history_repository.py
+│  │  └─ init_db.py
+│  ├─ embedder
+│  │  ├─ __init__.py
 │  │  └─ embedder.py
-│  ├─ parser/
+│  ├─ parser
+│  │  ├─ __init__.py
 │  │  ├─ chunk_service.py
 │  │  └─ file_parser.py
-│  ├─ rag/
+│  ├─ rag
+│  │  ├─ __init__.py
 │  │  ├─ ollama_service.py
+│  │  ├─ prompt_builder.py
 │  │  ├─ qdrant_service.py
+│  │  ├─ query_analyzer.py
 │  │  └─ rag_service.py
-│  └─ utils/
+│  └─ utils
+│     ├─ __init__.py
 │     └─ file_utils.py
-└─ frontend/
-   ├─ app.py
-   ├─ Dockerfile
-   └─ requirements.txt
-```
+├─ docker-compose.yml
+├─ frontend
+│  ├─ app.py
+│  ├─ Dockerfile
+│  └─ requirements.txt
+└─ README.md
