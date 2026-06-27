@@ -34,6 +34,17 @@ class OllamaService:
             "model":    self.settings.ollama_model,
             "messages": messages,
             "stream":   True,
+            "options": {
+                "temperature": 0.1,   # 낮을수록 사실 기반 답변, 환각 감소
+                "repeat_penalty": 1.1, # 반복 억제 (예상질문 반복 패턴 차단)
+                # "stop": [             # 예상질문 섹션이 시작되면 즉시 중단
+                #     "예상 질문",
+                #     "추가 질문",
+                #     "관련 질문",
+                #     "더 알아보",
+                #     "궁금한 점",
+                # ],
+            },
         }
 
         async with httpx.AsyncClient(timeout=300.0) as client:

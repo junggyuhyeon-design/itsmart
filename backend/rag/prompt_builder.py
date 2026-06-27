@@ -1,66 +1,73 @@
 """
-PromptBuilder: 질문 유형에 따라 LLM 메시지 배열을 조립한다.
+PromptBuilder: 질문 유형·컨텍스트·히스토리를 받아 Ollama messages 배열을 반환한다.
 
-조립 순서 (LLM이 최신·마지막 정보를 우선하므로 중요도 역순 배치):
-  1. System Prompt  — 역할, 언어, 출력 형식 규칙
+메시지 조립 순서:
+  1. System Prompt  — 역할 및 출력 규칙
   2. History        — 이전 대화 (오래된 → 최신)
-  3. [User 메시지]
-     A. 현재 프로젝트명
-     B. 파일 구조 요약 (listing/diagram 시 주입)
-     C. 검색된 파일의 Metadata 요약 (layer/class/package)
-     D. 소스코드 청크 (실제 코드)
-     E. 질문
+  3. User 메시지
+     - [프로젝트] 프로젝트명
+     - [파일구조] extra_context (diagram 시 구조 파악용, 200줄 제한)
+     - [소스코드] Qdrant 검색 청크 (파일경로 헤더 + 코드)
+     - [질문]
+
+hits 구조 (qdrant_service.search() 반환값):
+  {"score": float, ...chunk_payload}
+  chunk_payload 필드 (chunk_service._make_chunk 기준):
+    project_id, project_name, text, file_name, extension,
+    relative_path, chunk_index,
+    layer_type, class_name, package, content_type
 """
 from __future__ import annotations
 
+_EXT_LANG: dict[str, str] = {
+    "java": "java", "py": "python", "xml": "xml", "sql": "sql",
+    "js": "javascript", "ts": "typescript",
+    "md": "markdown", "json": "json", "yml": "yaml", "yaml": "yaml",
+}
 
-# ── System Prompt 사전 ─────────────────────────────────────────────
+# ── System Prompts ─────────────────────────────────────────────────
 
-_SYSTEM_BASE = """\
+_SYS_BASE = """\
 당신은 소스코드 분석 전문 AI입니다.
 - 항상 한국어로 답변합니다.
-- 코드 블록은 언어를 명시합니다 (```java, ```xml, ```sql 등).
-- 근거가 없으면 추측하지 않고 "정보가 부족합니다"라고 답합니다.
-- 이전 대화가 있으면 후속 질문(그 파일, 그 서비스, 아까 등)은 대화 맥락을 우선합니다.
-- 소스코드 관련 질문은 제공된 [소스코드 컨텍스트]를 근거로 사용합니다."""
+- 코드 블록에는 언어를 명시합니다 (```java, ```xml 등).
+- 제공된 [소스코드]를 근거로만 답변하고, 근거가 없으면 "정보가 부족합니다"라고 말합니다.
+- 이전 대화의 "그 파일", "아까" 같은 지시어는 대화 맥락을 우선합니다.
+- 답변 후 예상 질문, 추가 질문, 관련 질문을 절대 제안하지 않습니다."""
 
-_SYSTEM_DIAGRAM = """\
+_SYS_DIAGRAM = """\
 당신은 소스코드를 분석하여 Mermaid 다이어그램을 생성하는 전문 AI입니다.
 
-[출력 규칙]
+[출력 규칙 — 반드시 준수]
 1. 반드시 단 하나의 ```mermaid 코드블록만 출력합니다. 설명·제목·해설 텍스트 금지.
 2. 첫 줄은 반드시 flowchart LR 로 시작합니다.
 3. classDef, style, subgraph, click, %% 주석은 사용하지 않습니다.
 4. 노드명에 공백 대신 언더스코어(_)를 사용합니다.
-5. 엣지 라벨: READS / WRITES / JOINS / CALLS / EXTENDS / IMPLEMENTS 만 허용합니다.
+5. 엣지 라벨은 CALLS / READS / WRITES / JOINS / EXTENDS / IMPLEMENTS 만 허용합니다.
 6. DDL/SQL 파일 자체는 노드로 만들지 않습니다. 테이블명만 노드로 사용합니다.
-7. 제공된 파일 목록과 소스코드 청크를 기반으로 실제 존재하는 관계만 그립니다."""
+7. 제공된 [파일구조]와 [소스코드]를 기반으로 실제 존재하는 관계만 그립니다.
+8. 답변 후 예상 질문, 추가 질문, 관련 질문을 절대 제안하지 않습니다."""
 
-_SYSTEM_API_DOC = """\
+_SYS_API = """\
 당신은 REST API 명세서를 작성하는 전문 AI입니다.
-
-[출력 형식 — Markdown 표]
-| Method | URL | 설명 | Request Body | Response |
-|--------|-----|------|-------------|----------|
-
-- @GetMapping, @PostMapping, @PutMapping, @DeleteMapping, @RequestMapping 을 파싱합니다.
-- URL은 클래스 레벨 @RequestMapping + 메서드 레벨 Mapping을 합산합니다.
+- 항상 한국어로 답변합니다.
+- 제공된 [소스코드]의 @GetMapping/@PostMapping/@PutMapping/@DeleteMapping을 파싱합니다.
+- 출력 형식: Markdown 표 (Method | URL | 설명 | Request | Response).
+- URL은 클래스 레벨 @RequestMapping + 메서드 레벨을 합산합니다.
 - 정보가 없는 항목은 "-"로 표기합니다.
-- 메서드별로 한 행씩 작성합니다."""
+- 답변 후 예상 질문, 추가 질문, 관련 질문을 절대 제안하지 않습니다."""
 
-_SYSTEM_LAYER = """\
+_SYS_LAYER = """\
 당신은 소스코드 레이어 분석 전문 AI입니다.
-- 제공된 소스코드 컨텍스트에서 클래스명, 메서드명, 의존관계를 추출합니다.
-- 한국어로 구조적으로 답변합니다.
-- 근거 코드를 인용할 때는 파일 경로와 함께 표시합니다."""
+- 항상 한국어로 답변합니다.
+- 제공된 [소스코드]에서 클래스명, 메서드명, 의존관계를 추출해 구조적으로 설명합니다.
+- 근거 코드를 인용할 때는 파일 경로를 함께 표시합니다.
+- 답변 후 예상 질문, 추가 질문, 관련 질문을 절대 제안하지 않습니다."""
 
-_SYSTEM_PROMPTS: dict[str, str] = {
-    "diagram":      _SYSTEM_DIAGRAM,
-    "api_doc":      _SYSTEM_API_DOC,
-    "layer_search": _SYSTEM_LAYER,
-    "listing":      _SYSTEM_BASE,
-    "file_search":  _SYSTEM_BASE,
-    "qa":           _SYSTEM_BASE,
+_SYS_MAP: dict[str, str] = {
+    "diagram":      _SYS_DIAGRAM,
+    "api_doc":      _SYS_API,
+    "layer_search": _SYS_LAYER,
 }
 
 
@@ -72,42 +79,40 @@ class PromptBuilder:
         question:          str,
         hits:              list[dict],
         query_type:        str,
-        project_name:      str | None  = None,
-        struct_context:    str         = "",   # file_index_summary 텍스트 (listing/diagram)
+        project_name:      str | None        = None,
+        struct_context:    str               = "",
         chat_history:      list[dict] | None = None,
-        max_history_chars: int         = 4000,
+        max_history_chars: int               = 4000,
     ) -> list[dict]:
 
-        system_prompt = _SYSTEM_PROMPTS.get(query_type, _SYSTEM_BASE)
-        messages: list[dict] = [{"role": "system", "content": system_prompt}]
+        messages: list[dict] = [
+            {"role": "system", "content": _SYS_MAP.get(query_type, _SYS_BASE)}
+        ]
 
-        # ── History (오래된 → 최신) ───────────────────────────────
+        # History (오래된 → 최신)
         for row in self._trim_history(chat_history or [], max_history_chars):
             messages.append({"role": "user",      "content": row["question"]})
             messages.append({"role": "assistant",  "content": row["answer"]})
 
-        # ── User 메시지 조립 ──────────────────────────────────────
+        # User 메시지 조립
         parts: list[str] = []
 
-        # (A) 현재 프로젝트명
         if project_name:
-            parts.append(f"[현재 프로젝트: {project_name}]")
+            parts.append(f"[프로젝트: {project_name}]")
 
-        # (B) 파일 구조 요약 (diagram, listing 질문 시 주입)
+        # 파일구조: diagram 시 관계 파악에 핵심, 200줄 제한으로 토큰 절약
         if struct_context:
-            parts.append(f"[프로젝트 파일 구조]\n{struct_context}")
+            lines   = struct_context.splitlines()
+            trimmed = "\n".join(lines[:200])
+            if len(lines) > 200:
+                trimmed += f"\n... (총 {len(lines)}줄 중 200줄 표시)"
+            parts.append(f"[파일구조]\n{trimmed}")
 
-        # (C) 검색된 파일의 Metadata 요약
-        meta_summary = self._build_metadata_summary(hits)
-        if meta_summary:
-            parts.append(f"[검색된 소스 메타데이터]\n{meta_summary}")
+        # 소스코드 청크
+        code_ctx = self._build_code_context(hits)
+        if code_ctx:
+            parts.append(f"[소스코드]\n{code_ctx}")
 
-        # (D) 소스코드 청크
-        chunk_context = self._build_chunk_context(hits)
-        if chunk_context:
-            parts.append(f"[소스코드 컨텍스트]\n{chunk_context}")
-
-        # (E) 질문
         parts.append(f"[질문]\n{question}")
 
         messages.append({"role": "user", "content": "\n\n".join(parts)})
@@ -115,52 +120,54 @@ class PromptBuilder:
 
     # ── 내부 헬퍼 ─────────────────────────────────────────────────
 
-    def _build_metadata_summary(self, hits: list[dict]) -> str:
-        """검색된 파일별 메타데이터를 한 줄 요약으로 반환 (중복 파일 제거)."""
-        if not hits:
-            return ""
-        seen: set[str] = set()
-        lines: list[str] = []
-        for h in hits:
-            key = h.get("relative_path", h.get("file_name", ""))
-            if key in seen:
-                continue
-            seen.add(key)
-            meta_parts = []
-            if h.get("layer_type"):   meta_parts.append(f"layer={h['layer_type']}")
-            if h.get("class_name"):   meta_parts.append(f"class={h['class_name']}")
-            if h.get("package"):      meta_parts.append(f"package={h['package']}")
-            if h.get("content_type"): meta_parts.append(f"type={h['content_type']}")
-            meta_str = f"  [{', '.join(meta_parts)}]" if meta_parts else ""
-            lines.append(f"  - {key}{meta_str}")
-        return "\n".join(lines)
+    def _build_code_context(self, hits: list[dict]) -> str:
+        """
+        Qdrant 청크를 헤더 + 코드블록으로 조립.
 
-    def _build_chunk_context(self, hits: list[dict]) -> str:
-        """청크 목록을 파일 경로·클래스·레이어 헤더와 함께 코드블록으로 조립."""
+        hits[i] 구조:
+          - score        : Qdrant 유사도 점수 (float) — 프롬프트에 불필요, 미사용
+          - relative_path: 파일 상대경로            ← 헤더 필수
+          - file_name    : 원본 파일명              ← relative_path 없을 때 fallback
+          - extension    : 확장자                  ← 코드블록 언어 결정
+          - chunk_index  : 청크 순번               ← 중복 제거 키
+          - text         : 실제 소스코드            ← 코드블록 본문
+          - class_name   : 클래스명 or XML namespace ← 헤더 보조
+          - layer_type   : controller/service/...  ← 헤더 보조
+          - content_type : api_endpoint/sql_select/... ← 헤더 보조 (LLM 역할 파악)
+          - package      : Java package            ← 헤더 노이즈, 미사용
+          - project_id   : 프로젝트 식별자          ← 불필요, 미사용
+          - project_name : 프로젝트명              ← 상위에서 별도 표기, 미사용
+        """
         if not hits:
             return ""
-        ext_lang_map = {
-            "java": "java", "py": "python", "xml": "xml",
-            "sql": "sql",   "js": "javascript", "ts": "typescript",
-            "md": "markdown", "json": "json", "yml": "yaml", "yaml": "yaml",
-        }
+
+        seen:  set[str]  = set()
         parts: list[str] = []
+
         for h in hits:
-            header_parts = [h.get("relative_path") or h.get("file_name", "")]
-            if h.get("class_name"):   header_parts.append(f"class={h['class_name']}")
-            if h.get("layer_type"):   header_parts.append(f"layer={h['layer_type']}")
-            if h.get("chunk_index") is not None:
-                header_parts.append(f"chunk#{h['chunk_index']}")
-            lang = ext_lang_map.get(h.get("extension", ""), "")
+            # relative_path + chunk_index 기준 중복 제거
+            chunk_key = f"{h.get('relative_path', '')}:{h.get('chunk_index', '')}"
+            if chunk_key in seen:
+                continue
+            seen.add(chunk_key)
+
+            # 헤더: 경로 | class | layer | content_type (값 있는 것만)
+            header_tokens: list[str] = [h.get("relative_path") or h.get("file_name", "unknown")]
+            if h.get("class_name"):   header_tokens.append(f"class={h['class_name']}")
+            if h.get("layer_type"):   header_tokens.append(f"layer={h['layer_type']}")
+            if h.get("content_type"): header_tokens.append(f"type={h['content_type']}")
+
+            lang = _EXT_LANG.get(h.get("extension", ""), "")
             parts.append(
-                f"--- {' | '.join(header_parts)} ---\n"
-                f"```{lang}\n{h.get('text', '')}\n```"
+                f"--- {' | '.join(header_tokens)} ---\n"
+                f"```{lang}\n{h.get('text', '').strip()}\n```"
             )
+
         return "\n\n".join(parts)
 
     def _trim_history(self, history: list[dict], max_chars: int) -> list[dict]:
-        """오래된 턴부터 제거하여 max_chars 이내로 유지 (최신 턴 우선 보존)."""
-        if max_chars <= 0 or not history:
+        """최신 턴을 우선 보존하면서 max_chars 이내로 자른다."""
+        if not history or max_chars <= 0:
             return []
         trimmed: list[dict] = []
         total = 0

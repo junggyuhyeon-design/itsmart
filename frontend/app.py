@@ -20,7 +20,7 @@ HISTORY_LIMIT   = 50
 REQUEST_TIMEOUT = 30.0
 STREAM_TIMEOUT  = 300.0
 UPLOAD_TIMEOUT  = 300.0
-INDEX_TIMEOUT   = 3600.0
+INDEX_TIMEOUT   = 5600.0
 
 st.set_page_config(page_title="IT-Smart Source Analyzer", layout="wide")
 
@@ -222,11 +222,12 @@ def clear_history_api(user_id: str) -> bool:
 def get_streaming_response(
     user_id: str,
     question: str,
-    extra: str = "",
+    project_id: str | None = None,
     project_name: str | None = None,
 ) -> Generator[str, None, None]:
-    params: dict = {"question": question, "extra_context": extra}
-    if project_name:
+    params: dict = {"question": question,}
+    if project_id:
+        params["project_id"] = project_id
         params["project_name"] = project_name
     try:
         with httpx.Client(timeout=STREAM_TIMEOUT) as client:
@@ -421,7 +422,7 @@ def render_upload_tab(user_id: str) -> None:
                         data = resp.json()
                         total = format_count(data.get("total_chunks") or 0)
                         st.success(f"✅ 인덱싱 완료! 생성된 청크: {total}")
-                        st.session_state.analysis_targets = []   # 인덱싱 후 초기화
+                        # st.session_state.analysis_targets = []   # 인덱싱 후 초기화
                         if data.get("logs"):
                             with st.expander("인덱싱 로그 보기"):
                                 st.text("\n".join(data["logs"]))
@@ -440,8 +441,9 @@ def render_chat_tab(user_id: str) -> None:
     st.subheader("💬 AI 코드 분석")
 
     # ── 프로젝트 선택 ──────────────────────────────────────────
-    projects = fetch_projects()   # @st.cache_data — 네트워크 호출 없음 (TTL 내)
-    project_names = [p["project_name"] for p in projects]
+    projects = fetch_projects()
+    project_map = {p["project_name"]: p["project_id"] for p in projects}
+    project_names = list(project_map.keys())
 
     col_proj, col_refresh, col_clear = st.columns([4, 1, 1])
     with col_proj:
@@ -455,12 +457,15 @@ def render_chat_tab(user_id: str) -> None:
                 key="project_selectbox",
             )
             st.session_state.selected_project = selected
+            st.session_state.selected_project_id = project_map[selected]
+
         else:
             st.info("업로드된 프로젝트가 없습니다. 먼저 ZIP 파일을 업로드하고 인덱싱하세요.")
             st.session_state.selected_project = None
+            st.session_state.selected_project_id = None
 
     with col_refresh:
-        if st.button("🔄", help="프로젝트 목록 새로고침", use_container_width=True):
+        if st.button("🔄 새로고침", help="프로젝트 목록 새로고침", use_container_width=True):
             fetch_projects(force=True)
             st.rerun()
 
@@ -490,6 +495,7 @@ def render_chat_tab(user_id: str) -> None:
         return
 
     question = query.strip()
+    project_id = st.session_state.selected_project_id
     project_name = st.session_state.selected_project
 
     st.session_state.messages.append({"role": "user", "content": question})
@@ -497,12 +503,20 @@ def render_chat_tab(user_id: str) -> None:
         st.markdown(question)
 
     collected: list[str] = []
+
     with st.chat_message("assistant"):
-        def _gen():
-            for chunk in get_streaming_response(user_id, question, project_name=project_name):
+
+        def gen():
+            for chunk in get_streaming_response(
+                user_id=user_id,
+                question=question,
+                project_id=project_id,
+                project_name=project_name,
+            ):
                 collected.append(chunk)
                 yield chunk
-        st.write_stream(_gen())
+
+        st.write_stream(gen)
 
     answer = "".join(collected)
     if answer:

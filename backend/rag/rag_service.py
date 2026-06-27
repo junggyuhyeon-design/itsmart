@@ -31,17 +31,22 @@ class RAGService:
         for t in targets:
             rel_path = t.get("relative_path", "unknown")
             try:
+                # 파일 파싱
                 parsed = parse_text_file(t)
                 if not parsed:
                     results["logs"].append(f"⚠️ {rel_path}: 파싱 결과 없음")
                     continue
 
+                # 파일 청킹
                 chunks = self.chunk_service.split_text(parsed["raw_text"], parsed)
                 if not chunks:
                     results["logs"].append(f"⚠️ {rel_path}: 생성된 청크 없음")
                     continue
 
+                # 파일 벡터화
                 vectors = self.embedding_service.embed_texts([c["text"] for c in chunks])
+
+                # Qdrant 저장
                 count   = self.qdrant_service.upsert_chunks(chunks, vectors)
 
                 results["success"]      += 1
@@ -76,23 +81,17 @@ class RAGService:
     async def ask_with_context_stream(
         self,
         question:         str,
-        project_id:       str | None       = None,
-        project_name:     str | None       = None,
-        extra_context:    str              = "",
-        top_k:            int | None       = None,
-        layer_filter:     str | None       = None,
-        extension_filter: str | None       = None,
-        query_type:       str              = "qa",
+        project_id:       str | None,
+        project_name:     str | None,
+        extra_context:    str               = "",
         chat_history:     list[dict] | None = None,
+        top_k:            int | None        = None,
+        layer_filter:     str | None        = None,
+        extension_filter: str | None        = None,
+        query_type:       str               = "qa",
     ):
-        """
-        Qdrant 검색 → OllamaService 스트리밍 순으로 처리.
-        - top_k=0 이면 Qdrant 검색 스킵 (listing 분기)
-        - layer_filter / extension_filter 로 Qdrant payload 필터
-        - query_type 은 PromptBuilder의 System Prompt 선택에 사용
-        """
-        if top_k is None:
-            top_k = self.settings.top_k
+        """Qdrant 검색 → OllamaService 스트리밍."""
+        top_k = top_k or self.settings.top_k
 
         query_vector = self.embedding_service.embed_query(question)
         hits = self.qdrant_service.search(

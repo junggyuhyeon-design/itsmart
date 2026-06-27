@@ -70,7 +70,7 @@ def get_settings() -> Settings:
             os.environ.get("UPLOAD_DIR", "/data/uploads")
         ),
         chat_history_turns=int(
-            os.environ.get("CHAT_HISTORY_TURNS", 6)
+            os.environ.get("CHAT_HISTORY_TURNS", 3)
         ),
         chat_history_max_chars=int(
             os.environ.get("CHAT_HISTORY_MAX_CHARS", 4000)

@@ -81,17 +81,14 @@ class QdrantService:
         self,
         query_vector:     list[float],
         project_id:       str | None = None,
-        top_k:            int        = 5,
+        top_k:            int | None = None,
         layer_filter:     str | None = None,    # "controller" | "service" | "mapper" | "ddl" …
         extension_filter: str | None = None,    # "java" | "xml" | "sql" …
     ) -> list[dict[str, Any]]:
         """
         유사 벡터 검색.
-        - top_k=0 이면 즉시 빈 리스트 반환 (listing 분기용)
         - layer_filter / extension_filter 로 Qdrant payload 필터링
         """
-        if top_k <= 0:
-            return []
         if not self._collection_exists():
             logger.warning("search 호출 시 컬렉션 없음 — 인덱싱 전 상태")
             return []
@@ -112,7 +109,7 @@ class QdrantService:
                 query=query_vector,
                 query_filter=query_filter,
                 limit=top_k,
-                with_payload=True,
+                with_payload=True, # 메타데이터 반환여부
             ).points
             return [{"score": r.score, **r.payload} for r in results]
         except Exception:

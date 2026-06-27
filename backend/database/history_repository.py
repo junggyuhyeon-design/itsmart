@@ -55,7 +55,7 @@ def save_history(user_id: str, question: str, answer: str) -> int:
         logger.exception("save_history 실패: user_id=%s", user_id)
         raise
 
-# 확인 : 앱실행시 최초로 사용자의 이력을 조회하는 query.
+# 확인 : 앱 실행시 최초로 사용자의 이력을 조회하는 query.
 def get_history(user_id: str, limit: int) -> list[dict[str, Any]]:
     """특정 사용자의 최근 히스토리 반환 (최신순)."""
     try:

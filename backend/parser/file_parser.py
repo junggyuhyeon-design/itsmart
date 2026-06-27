@@ -82,7 +82,7 @@ def _extract_package(text: str, ext: str) -> str:
     return ""
 
 
-# ── 공개 API ─────────────────────────────────────────────────────
+# ── file parsing API ─────────────────────────────────────────────────────
 
 def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
     """

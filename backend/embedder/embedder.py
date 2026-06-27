@@ -15,4 +15,4 @@ class EmbeddingService:
         return self.model.encode(texts).tolist()
 
     def embed_query(self, query: str):
-        return self.embed_texts([query])[0]
+        return self.embed_texts([query])[0]  # 단일 문자열(질의)을 임베딩 벡터로 변환

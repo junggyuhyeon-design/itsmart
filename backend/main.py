@@ -14,11 +14,11 @@ from database.history_repository import (
     delete_history,
     get_all_projects,
     get_file_index,
-    get_file_index_summary,
     get_history,
     save_history,
     save_uploaded_file,
     upsert_user,
+    get_file_index_summary,
 )
 from database.init_db import init_db
 from fastapi import Body, FastAPI, File, Header, HTTPException, Request, UploadFile
@@ -140,26 +140,38 @@ async def _save_upload_stream(upload: UploadFile, dest: Path) -> None:
         logger.error("파일 저장 실패: %s — %s", dest.name, e)
         raise HTTPException(status_code=500, detail=f"파일 저장 중 오류: {e}") from e
 
+def build_project_structure_context(project_id: str, project_name: str | None = None) -> str:
+    """프로젝트 파일 구조를 조회하여 프롬프트 작성"""
+    summary = get_file_index_summary(project_id)
+    total = summary.get("total", 0)
+    by_extension = summary.get("by_extension", {})
+    files = summary.get("files", [])
 
-def _build_listing_context(summary: dict, extension_filter: str | None) -> str:
-    """file_index_summary → 사람이 읽을 수 있는 텍스트."""
     lines: list[str] = []
-    if extension_filter:
-        filtered = [f for f in summary["files"] if f["extension"] == extension_filter]
-        lines.append(f"[{extension_filter.upper()} 파일 목록 — 총 {len(filtered)}개]")
-        for f in filtered:
-            lines.append(f"  - {f['relative_path']}")
-    else:
-        lines.append(f"[프로젝트 전체 파일 목록 — 총 {summary['total']}개]")
-        by_ext: dict[str, list] = {}
-        for f in summary["files"]:
-            by_ext.setdefault(f["extension"], []).append(f["relative_path"])
-        for ext, paths in sorted(by_ext.items()):
-            lines.append(f"\n  [{ext.upper()}] {len(paths)}개")
-            for p in paths:
-                lines.append(f"    - {p}")
-    return "\n".join(lines)
+    lines.append("### 프로젝트 파일 구조 정보")
+    if project_name:
+        lines.append(f"- 프로젝트명: {project_name}")
+    lines.append(f"- 전체 파일 수: {total}")
 
+    if by_extension:
+        lines.append("- 확장자별 파일 수:")
+        for ext, cnt in by_extension.items():
+            lines.append(f"  - .{ext}: {cnt}")
+
+    if files:
+        lines.append("- 파일 목록:") # 최대 300개로 제한.
+        for f in files[:300]:
+            rel = f.get("relative_path", "")
+            ext = f.get("extension", "")
+            lines.append(f"  - [{ext}] {rel}")
+
+        if len(files) > 300:
+            lines.append(f"  - ... 생략 {len(files) - 300}건")
+
+    lines.append("")
+    lines.append("위 구조 정보를 참고하여 프로젝트 구조, 파일 분포, 포함 여부, 위치 관련 질문에 우선 답변하라.")
+    lines.append("구현 상세 분석이 필요하면 구조 정보와 함께 검색된 코드 문맥을 조합해서 답변하라.")
+    return "\n".join(lines)
 
 # ── 업로드 & 인덱싱 ──────────────────────────────────────────────
 # 확인 완료
@@ -248,26 +260,22 @@ def list_projects():
         raise HTTPException(status_code=500, detail=f"프로젝트 조회 중 오류: {e}") from e
 
 
-@app.get("/projects/{project_name}/files")
-def list_project_files(project_name: str, extension: str | None = None):
+@app.get("/projects/{project_id}/files")
+def list_project_files(project_id: str, project_name: str, extension: str | None = None):
     """
     특정 프로젝트의 인덱싱된 파일 목록 반환.
     extension 파라미터로 필터 가능 (예: ?extension=xml).
     """
     try:
-        project_info = next(
-            (p for p in get_all_projects() if p["project_name"] == project_name.strip()),
-            None,
-        )
-        if not project_info:
-            raise HTTPException(status_code=404, detail=f"프로젝트 '{project_name}'을(를) 찾을 수 없습니다.")
-        pid   = project_info["project_id"]
+        pid   = project_id
+        pnm   = project_name
         files = get_file_index(pid, extension)
         return {
             "project_id":       pid,
-            "project_name":     project_info["project_name"],
-            "uploaded_at":      project_info["uploaded_at"],
-            "extension_filter": extension,
+            "project_name":     pnm,
+            "file_name":        files.file_name,
+            "relative_path":    files.relative_path,
+            "extension":        files.extension,
             "files":            files,
             "count":            len(files),
         }
@@ -284,77 +292,39 @@ def list_project_files(project_name: str, extension: str | None = None):
 async def ask(
     request:       Request,
     question:      str,
+    project_id:    str | None = None,
     project_name:  str | None = None,
-    top_k:         int        = 5,
-    extra_context: str        = "",
     x_user_id:     str | None = Header(default=None),
 ):
-    """질문에 대한 RAG 스트리밍 응답. project_name 이 없으면 전체 프로젝트 대상."""
+    """질문에 대한 RAG 스트리밍 응답."""
     user_id = _require_user(x_user_id)
     if not question or not question.strip():
         raise HTTPException(status_code=400, detail="질문이 비어 있습니다.")
-    if top_k < 1 or top_k > 20:
-        top_k = settings.top_k
 
-    # 전체 프로젝트 목록 조회
-    all_projects = get_all_projects()
+    chat_history = list(reversed(get_history(user_id, limit=settings.chat_history_turns)))
+    intent       = _analyzer.analyze(question)
+    service      = get_rag_service(request)
+    extra_context_parts: list[str] = []
 
-    # project_name → project_id 변환
-    project_id            = None
-    selected_project_name = project_name
-    if project_name:
-        for proj in all_projects:
-            if proj["project_name"] == project_name.strip():
-                project_id            = proj["project_id"]
-                selected_project_name = proj["project_name"]
-                break
-        if not project_id:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"프로젝트 '{project_name}'을(를) 찾을 수 없습니다. "
-                    f"사용 가능: {[p['project_name'] for p in all_projects]}"
-                ),
-            )
+    if project_id:
+        structure_context = build_project_structure_context(project_id, project_name)
 
-    history_limit = max(1, min(settings.chat_history_turns, 20))
-    chat_history  = list(reversed(get_history(user_id, limit=history_limit)))
+        if structure_context.strip():
+            extra_context_parts.append(structure_context)
 
-    intent  = _analyzer.analyze(question)
-    service = get_rag_service(request)
+    extra_context = "\n\n".join(extra_context_parts)
 
     try:
-        # ── listing: Qdrant 없이 SQLite 직접 스트리밍 ────────────
-        if intent.query_type == "listing" and project_id:
-            summary = get_file_index_summary(project_id)
-            if summary["total"] > 0:
-                listing_text = _build_listing_context(summary, intent.extension_filter)
-
-                async def _listing_stream():
-                    ext_label = intent.extension_filter.upper() if intent.extension_filter else "전체"
-                    yield f"프로젝트 '{selected_project_name}'의 {ext_label} 파일 목록입니다.\n\n{listing_text}"
-
-                return StreamingResponse(_listing_stream(), media_type="text/plain")
-            logger.info("file_index 없음 — qa fallback (project_id=%s)", project_id)
-
-        # ── diagram: file_index 전체 구조 컨텍스트 추가 ──────────
-        struct_ctx = ""
-        if intent.query_type == "diagram" and project_id:
-            summary = get_file_index_summary(project_id)
-            if summary["total"] > 0:
-                struct_ctx = _build_listing_context(summary, None)
-
-        # ── Qdrant + Ollama 스트리밍 ──────────────────────────────
         gen, _ = await service.ask_with_context_stream(
             question=question.strip(),
             project_id=project_id,
-            project_name=selected_project_name,
-            extra_context=struct_ctx or extra_context,
+            project_name=project_name,
+            extra_context=extra_context,
+            chat_history=chat_history,
             top_k=intent.top_k,
             layer_filter=intent.layer_filter,
             extension_filter=intent.extension_filter,
             query_type=intent.query_type,
-            chat_history=chat_history,
         )
         return StreamingResponse(gen, media_type="text/plain")
 

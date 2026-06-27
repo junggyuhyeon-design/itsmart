@@ -1,48 +1,50 @@
 """
-QueryAnalyzer: 질문 문자열을 분석해 Retrieval 전략과 top_k를 결정한다.
+QueryAnalyzer: 질문을 분석해 Retrieval 전략(query_type, top_k, layer_filter, extension_filter)을 결정한다.
 
-질문 유형:
-  listing       → SQLite file_index 직접 반환 (Qdrant 0건)
-  diagram       → SQLite 전체구조 + Qdrant top_k×8
-  api_doc       → Qdrant filter(layer=controller) top_k×6
-  layer_search  → Qdrant filter(layer_type) top_k×4
-  qa            → Qdrant top_k (기본값)
+query_type:
+  qa            — 일반 코드 질의응답 (기본)
+  diagram       — Mermaid 관계도/흐름도/아키텍처
+  api_doc       — API 엔드포인트/컨트롤러 중심
+  layer_search  — 특정 레이어(controller/service/mapper/repository/ddl) 검색
 """
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
 class QueryIntent:
-    query_type:       str               # listing / diagram / api_doc / layer_search / qa
+    query_type:       str
     top_k:            int
-    layer_filter:     str | None        # "controller" | "service" | "mapper" | "ddl" | None
-    extension_filter: str | None        # "xml" | "java" | "sql" | None
-    entity_hint:      str               # 질문에서 추출한 PascalCase 엔티티 (힌트)
-    keywords:         list[str] = field(default_factory=list)
+    layer_filter:     str | None
+    extension_filter: str | None
+    entity_hint:      str = ""
 
 
-# ── 키워드 사전 ───────────────────────────────────────────────────
+# ── 키워드 테이블 ──────────────────────────────────────────────────
 
-_LISTING_KW  = ("목록", "전체", "모든", "몇 개", "몇개", "어떤 파일",
-                 "list", "all files", "enumerate", "나열")
-_DIAGRAM_KW  = ("관계도", "다이어그램", "mermaid", "diagram", "flowchart",
-                 "그려", "그려줘", "시각화", "sequence", "아키텍처", "architecture")
-_API_DOC_KW  = ("api 목록", "api목록", "api 정의", "api정의", "api list",
-                 "엔드포인트", "endpoint", "rest api", "swagger", "명세")
-_CTRL_KW     = ("controller", "컨트롤러")
-_SVC_KW      = ("service", "서비스")
-_MAPPER_KW   = ("mapper", "마이바티스", "mybatis", "xml", "쿼리", "query")
-_REPO_KW     = ("repository", "dao", "레포지토리")
-_TABLE_KW    = ("테이블", "table", "schema", "스키마", "칼럼", "column", "ddl")
+_DIAGRAM_KW = (
+    "관계도", "다이어그램", "mermaid", "머메이드", "diagram",
+    "flowchart", "플로우차트", "sequence", "시퀀스",
+    "아키텍처", "architecture", "구조도", "흐름도",  "의존 관계", "의존관계",
+    "그려", "그려줘", "시각화",
+)
+_API_KW    = ("api", "엔드포인트", "endpoint", "rest", "swagger", "uri", "명세", "요청값", "응답값")
+_CTRL_KW   = ("controller", "컨트롤러", "@restcontroller", "@controller")
+_SVC_KW    = ("service", "서비스", "@service")
+_MAPPER_KW = ("mapper", "마이바티스", "mybatis")
+_REPO_KW   = ("repository", "repo", "dao", "레포지토리")
+_DDL_KW    = ("테이블", "table", "schema", "스키마", "column", "칼럼", "컬럼", "ddl")
+_SQL_KW    = ("sql", "쿼리", "query", "select", "insert", "update", "delete")
 
 _EXT_MAP: dict[str, tuple[str, ...]] = {
-    "xml":  ("xml", "mapper", "마이바티스", "mybatis"),
-    "java": ("java", "클래스", "class"),
-    "sql":  ("sql", "쿼리", "query", "ddl", "dml"),
-    "py":   ("python", ".py"),
+    "java": (".java", "controller", "service", "repository", "dto", "vo", "entity"),
+    "xml":  (".xml",  "mapper", "마이바티스", "mybatis"),
+    "sql":  (".sql",  "ddl", "dml", "schema"),
+    "py":   (".py",   "python"),
+    "js":   (".js",   "javascript"),
+    "ts":   (".ts",   "typescript"),
 }
 
 
@@ -51,86 +53,87 @@ class QueryAnalyzer:
         self.default_top_k = default_top_k
 
     def analyze(self, question: str) -> QueryIntent:
-        q = question.lower()
+        q           = question.lower().strip()
+        entity_hint = self._extract_entity_hint(question)
+        is_diagram  = self._has(q, _DIAGRAM_KW)
 
-        # 1. 파일 목록 열거 (diagram 키워드가 없을 때만)
-        if any(k in q for k in _LISTING_KW) and not any(k in q for k in _DIAGRAM_KW):
-            return QueryIntent(
-                query_type="listing",
-                top_k=0,
-                layer_filter=None,
-                extension_filter=self._ext_filter(q),
-                entity_hint="",
-            )
-
-        # 2. 다이어그램 / 아키텍처
-        if any(k in q for k in _DIAGRAM_KW):
+        # diagram: layer/ext 필터 없이 전체 청크를 넓게 검색
+        if is_diagram:
             return QueryIntent(
                 query_type="diagram",
                 top_k=self.default_top_k * 8,
                 layer_filter=None,
                 extension_filter=None,
-                entity_hint=self._extract_entity(question),
+                entity_hint=entity_hint,
             )
 
-        # 3. API 정의서
-        if any(k in q for k in _API_DOC_KW):
-            return QueryIntent(
-                query_type="api_doc",
-                top_k=self.default_top_k * 6,
-                layer_filter="controller",
-                extension_filter="java",
-                entity_hint="",
-            )
+        layer_filter = self._detect_layer(q, entity_hint)
+        ext_filter   = self._detect_extension(q, layer_filter, entity_hint)
+        query_type   = self._detect_type(q, layer_filter)
+        top_k        = self._decide_top_k(query_type)
 
-        # 4. 레이어 기반 검색
-        layer, multiplier = self._detect_layer(q)
-        if layer:
-            ext = "xml" if layer == "mapper" else ("sql" if layer == "ddl" else "java")
-            return QueryIntent(
-                query_type="layer_search",
-                top_k=self.default_top_k * multiplier,
-                layer_filter=layer,
-                extension_filter=ext,
-                entity_hint=self._extract_entity(question),
-            )
+        # api_doc 는 controller + java 고정
+        if query_type == "api_doc":
+            layer_filter = "controller"
+            ext_filter   = "java"
 
-        # 5. 테이블 / 스키마
-        if any(k in q for k in _TABLE_KW):
-            return QueryIntent(
-                query_type="layer_search",
-                top_k=self.default_top_k * 4,
-                layer_filter="ddl",
-                extension_filter="sql",
-                entity_hint=self._extract_entity(question),
-            )
-
-        # 6. 기본 QA
         return QueryIntent(
-            query_type="qa",
-            top_k=self.default_top_k,
-            layer_filter=None,
-            extension_filter=None,
-            entity_hint=self._extract_entity(question),
+            query_type=query_type,
+            top_k=top_k,
+            layer_filter=layer_filter,
+            extension_filter=ext_filter,
+            entity_hint=entity_hint,
         )
 
-    # ── 내부 헬퍼 ────────────────────────────────────────────────
+    # ── 내부 헬퍼 ─────────────────────────────────────────────────
 
-    def _detect_layer(self, q: str) -> tuple[str | None, int]:
-        """레이어 감지 → (layer_type, top_k 배수)"""
-        if any(k in q for k in _CTRL_KW):   return "controller", 4
-        if any(k in q for k in _SVC_KW):    return "service",    4
-        if any(k in q for k in _MAPPER_KW): return "mapper",     4
-        if any(k in q for k in _REPO_KW):   return "repository", 4
-        return None, 1
+    def _has(self, q: str, kws: tuple[str, ...]) -> bool:
+        return any(k in q for k in kws)
 
-    def _ext_filter(self, q: str) -> str | None:
-        for ext, keywords in _EXT_MAP.items():
-            if any(k in q for k in keywords):
-                return ext
+    def _extract_entity_hint(self, question: str) -> str:
+        """CamelCase 클래스명, snake_case 식별자, URL 경로를 순서대로 탐색."""
+        patterns = [
+            r"\b([A-Z][A-Za-z0-9]+(?:Controller|Service|Repository|Mapper|DTO|DAO|VO|Entity))\b",
+            r"\b([A-Z][A-Za-z0-9]{3,})\b",
+            r"\b([a-z][a-z0-9]+(?:_[a-z0-9]+){1,})\b",
+            r"(/[a-zA-Z0-9_\-/{}/]+)",
+        ]
+        for pat in patterns:
+            m = re.search(pat, question)
+            if m:
+                return m.group(1)
+        return ""
+
+    def _detect_layer(self, q: str, entity_hint: str) -> str | None:
+        eh = entity_hint.lower()
+        if self._has(q, _CTRL_KW)   or eh.endswith("controller"):  return "controller"
+        if self._has(q, _SVC_KW)    or eh.endswith("service"):     return "service"
+        if self._has(q, _MAPPER_KW) or eh.endswith("mapper"):      return "mapper"
+        if self._has(q, _REPO_KW)   or eh.endswith("repository"):  return "repository"
+        if self._has(q, _DDL_KW)    or self._has(q, _SQL_KW):      return "ddl"
         return None
 
-    def _extract_entity(self, question: str) -> str:
-        """질문에서 PascalCase 토큰 추출 (클래스명·파일명 힌트)."""
-        tokens = re.findall(r"[A-Z][a-zA-Z0-9]+", question)
-        return tokens[0] if tokens else ""
+    def _detect_extension(self, q: str, layer_filter: str | None, entity_hint: str) -> str | None:
+        for ext, kws in _EXT_MAP.items():
+            if any(k in q for k in kws):
+                return ext
+        eh = entity_hint.lower()
+        if eh.endswith(("controller", "service", "repository", "dto", "dao", "vo", "entity")): return "java"
+        if eh.endswith("mapper"):                                   return "xml"
+        if layer_filter == "mapper":                                return "xml"
+        if layer_filter in ("controller", "service", "repository"): return "java"
+        if layer_filter == "ddl":                                   return "sql"
+        return None
+
+    def _detect_type(self, q: str, layer_filter: str | None) -> str:
+        if self._has(q, _API_KW):
+            return "api_doc"
+        if layer_filter:
+            return "layer_search"
+        return "qa"
+
+    def _decide_top_k(self, query_type: str) -> int:
+        k = self.default_top_k
+        if query_type == "api_doc":      return k * 6
+        if query_type == "layer_search": return k * 4
+        return k
