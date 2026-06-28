@@ -28,25 +28,19 @@ st.set_page_config(page_title="IT-Smart Source Analyzer", layout="wide")
 # ── 쿠키 ─────────────────────────────────────────────────────────
 # 확인 완료
 def _get_cookie_manager() -> stx.CookieManager:
-    """Streamlit 앱에서 쿠키를 읽고 쓰는 역할을 담당하는 매니저 객체"""
     if "_cookie_mgr" not in st.session_state:
         st.session_state["_cookie_mgr"] = stx.CookieManager(key="codemind_cookie_mgr")
     return st.session_state["_cookie_mgr"]
 
 # 확인 완료
 def get_or_create_user_id() -> str:
-    # 1. session_state
     uid = st.session_state.get("user_id")
     if uid:
         return uid
-
-    # 2. HTTP Cookie (브라우저 네이티브)
     uid = (st.context.cookies.get(COOKIE_KEY) or "").strip()
     if uid:
         st.session_state["user_id"] = uid
         return uid
-
-    # 3. CookieManager
     try:
         uid = (_get_cookie_manager().get(COOKIE_KEY) or "").strip()
         if uid:
@@ -54,8 +48,6 @@ def get_or_create_user_id() -> str:
             return uid
     except Exception:
         logger.exception("CookieManager read failed")
-
-    # 4. 신규 UUID 생성
     uid = str(uuid.uuid4())
     st.session_state["user_id"] = uid
     try:
@@ -71,21 +63,12 @@ def get_or_create_user_id() -> str:
 # ── session_state 초기화 ─────────────────────────────────────────
 # 확인 완료
 def init_session() -> None:
-    """앱 진입 시 1회 실행."""
     defaults: dict[str, Any] = {
-        # ── 인증 ──────────────────────────────────────────────────
-        "user_id":           None,   # 쿠키 파싱을 매 리렌더마다 반복하지 않기 위해 캐싱
-
-        # ── 채팅 ──────────────────────────────────────────────────
-        "messages":          [],     # {"role": "user"|"assistant", "content": str}
-        "history_loaded":    False,  # DB 히스토리 최초 1회 로드 완료 플래그
-        "selected_project":  None,   # selectbox 선택값 — 리렌더 시 초기화되면 안 됨
-
-        # ── UI 상태 ───────────────────────────────────────────────
-        "show_reset_dialog": False,  # 벡터 DB 초기화 확인 다이얼로그 열림 여부
-
-        # ── 업로드 워크플로 ────────────────────────────────────────
-        # 업로드 후 인덱싱 버튼이 눌릴 때까지 수집된 파일 목록을 유지해야 하므로 필수
+        "user_id":           None,
+        "messages":          [],
+        "history_loaded":    False,
+        "selected_project":  None,
+        "show_reset_dialog": False,
         "analysis_targets":  [],
     }
     for k, v in defaults.items():
@@ -93,11 +76,9 @@ def init_session() -> None:
             st.session_state[k] = v
 
 
-# ── API 캐시 (@st.cache_data) ─────────────────────────────────────
-# 확인 완료
+# ── API 캐시 ─────────────────────────────────────────────────────
 @st.cache_data(ttl=60, show_spinner=False)
-def _cached_projects() -> list[dict]:
-    """프로젝트 목록 캐시 저장."""
+def _cached_projects() -> list[dict]: # 확인 완료
     try:
         resp = httpx.get(f"{FASTAPI_URL}/projects", timeout=REQUEST_TIMEOUT)
         if resp.is_success:
@@ -109,7 +90,6 @@ def _cached_projects() -> list[dict]:
 
 @st.cache_data(ttl=30, show_spinner=False)
 def _cached_system_status() -> dict:
-    """시스템 상태. 30초 TTL — 상태 탭에서 새로고침 버튼 클릭 시 .clear() 로 무효화."""
     try:
         resp = httpx.get(f"{FASTAPI_URL}/status", timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
@@ -118,23 +98,20 @@ def _cached_system_status() -> dict:
         logger.exception("fetch_system_status 예외")
         return {}
 
-
+# 확인 완료
 def fetch_projects(force: bool = False) -> list[dict]:
-    """프로젝트 목록 반환. force=True 시 캐시 무효화 후 재조회."""
     if force:
         _cached_projects.clear()
     return _cached_projects()
 
 
 def fetch_system_status(force: bool = False) -> dict:
-    """시스템 상태 반환. force=True 시 캐시 무효화 후 재조회."""
     if force:
         _cached_system_status.clear()
     return _cached_system_status()
 
 
 # ── API 헬퍼 ─────────────────────────────────────────────────────
-# 확인 완료
 def _headers(user_id: str) -> dict[str, str]:
     return {"X-User-Id": user_id}
 
@@ -157,9 +134,7 @@ def api_error_message(resp: httpx.Response) -> str:
 
 
 # ── 히스토리 API ─────────────────────────────────────────────────
-# 확인 완료
 def fetch_history(user_id: str) -> list[dict]:
-    """사용자 히스토리 로드 (오래된 순)."""
     try:
         resp = httpx.get(
             f"{FASTAPI_URL}/history",
@@ -179,9 +154,8 @@ def fetch_history(user_id: str) -> list[dict]:
         st.warning(f"히스토리 조회 중 오류: {e}")
     return []
 
-
+# 확인 완료
 def post_history(user_id: str, question: str, answer: str) -> None:
-    """스트리밍 완료 후 Q&A 쌍 저장."""
     try:
         resp = httpx.post(
             f"{FASTAPI_URL}/history",
@@ -197,9 +171,8 @@ def post_history(user_id: str, question: str, answer: str) -> None:
         logger.exception("post_history 예외")
         st.warning(f"히스토리 저장 실패: {e}")
 
-
+# 확인 완료
 def clear_history_api(user_id: str) -> bool:
-    """사용자 히스토리 전체 삭제."""
     try:
         resp = httpx.delete(
             f"{FASTAPI_URL}/history",
@@ -217,17 +190,80 @@ def clear_history_api(user_id: str) -> bool:
     return False
 
 
-# ── 스트리밍 응답 ─────────────────────────────────────────────────
+# ── Diagram API ──────────────────────────────────────────────────
 
+_DIAGRAM_TRIGGERS = (
+    "관계도", "다이어그램", "mermaid", "머메이드", "diagram",
+    "flowchart", "플로우차트", "구조도", "흐름도", "의존관계",
+    "그려줘", "그려", "시각화",
+)
+
+# 특정 엔티티를 지목하는 패턴
+_ENTITY_HINT_PATTERNS = [
+    r"\b([A-Z][A-Za-z0-9]{2,})\s*(?:관련|에\s*관련|의|관계|테이블|구조)",
+    r"([A-Z_]{2,})\s*(?:테이블|관련|구조)",          # 대문자 테이블명 (USER, ORDER_ITEM)
+    r"(?:관련|에\s*관련된)\s+([A-Za-z가-힣][A-Za-z0-9가-힣_]{1,})",
+]
+
+# 확인 완료
+def is_diagram_question(question: str) -> bool:
+    q = question.lower()
+    return any(k in q for k in _DIAGRAM_TRIGGERS)
+
+# 확인 완료
+def extract_diagram_entity(question: str) -> str | None:
+    """
+    필터할 엔티티명(테이블명/클래스명)을 추출한다.
+    없으면 None → 전체 다이어그램.
+    """
+    for pat in _ENTITY_HINT_PATTERNS:
+        m = re.search(pat, question, re.I)
+        if m:
+            return m.group(1).strip().upper()
+    return None
+
+# 확인 완료
+def fetch_diagram(
+    user_id: str,
+    project_id: str,
+    project_name: str | None = None,
+    entity_filter: str | None = None,   # 특정 테이블/클래스 필터
+) -> dict:
+    """백엔드 /diagram 엔드포인트 호출 — Mermaid 코드 반환."""
+    params: dict = {"project_id": project_id}
+    if project_name:
+        params["project_name"] = project_name
+    if entity_filter:
+        params["entity_filter"] = entity_filter
+    try:
+        resp = httpx.get(
+            f"{FASTAPI_URL}/diagram",
+            params=params,
+            headers=_headers(user_id),
+            timeout=120.0,
+        )
+        if resp.is_success:
+            return resp.json()
+        return {"error": api_error_message(resp)}
+    except httpx.TimeoutException:
+        return {"error": "다이어그램 생성 시간이 초과되었습니다."}
+    except httpx.ConnectError:
+        return {"error": "백엔드 서버에 연결할 수 없습니다."}
+    except Exception as e:
+        logger.exception("fetch_diagram 예외")
+        return {"error": str(e)}
+
+
+# ── 스트리밍 응답 ─────────────────────────────────────────────────
 def get_streaming_response(
     user_id: str,
     question: str,
     project_id: str | None = None,
     project_name: str | None = None,
 ) -> Generator[str, None, None]:
-    params: dict = {"question": question,}
+    params: dict = {"question": question}
     if project_id:
-        params["project_id"] = project_id
+        params["project_id"]   = project_id
         params["project_name"] = project_name
     try:
         with httpx.Client(timeout=STREAM_TIMEOUT) as client:
@@ -251,8 +287,14 @@ def get_streaming_response(
 
 
 # ── Mermaid 렌더링 ────────────────────────────────────────────────
-
+# 확인 완료
 def render_mermaid(mermaid_code: str, height: int = 900) -> None:
+    """
+    Mermaid 코드를 HTML iframe으로 렌더링.
+
+    Streamlit의 st.markdown은 mermaid 코드블록을 네이티브 렌더하지 않으므로
+    components.html()을 사용한다. 단, chat_message 컨텍스트 밖에서 호출해야 한다.
+    """
     import streamlit.components.v1 as components
     if not mermaid_code or not mermaid_code.strip():
         return
@@ -277,8 +319,9 @@ def render_mermaid(mermaid_code: str, height: int = 900) -> None:
         scrolling=True,
     )
 
-
+# 확인 완료
 def extract_mermaid_blocks(text: str) -> list[str]:
+    """텍스트에서 mermaid 코드블록을 추출한다."""
     if not text:
         return []
     patterns = [
@@ -297,6 +340,42 @@ def extract_mermaid_blocks(text: str) -> list[str]:
         if dm:
             blocks.append(dm.group(1).strip())
     return blocks
+
+# 확인 완료
+def render_message(msg: dict) -> None:
+    """
+    단일 메시지를 렌더링한다.
+    """
+    role = msg["role"]
+    content = msg["content"]
+
+    mermaid_blocks = []
+
+    with st.chat_message(role):
+        if role == "assistant":
+
+            mermaid_blocks = extract_mermaid_blocks(content)
+
+            if mermaid_blocks:
+                text_only = re.sub(
+                    r"```mermaid.*?```",
+                    "",
+                    content,
+                    flags=re.S
+                ).strip()
+
+                if text_only:
+                    st.markdown(text_only)
+            else:
+                st.markdown(content)
+
+        else:
+            st.markdown(content)
+
+    if role == "assistant":
+        for block in mermaid_blocks:
+
+            render_mermaid(block)
 
 
 # ── 상태 패널 렌더링 ──────────────────────────────────────────────
@@ -389,8 +468,6 @@ def render_upload_tab(user_id: str) -> None:
                     if resp.is_success:
                         data = resp.json()
                         st.session_state.analysis_targets = data.get("targets", [])
-                        # 업로드 완료 후 프로젝트 목록 캐시 무효화 후 다시 캐싱
-                        # fetch_projects(force=True) 여기서 이걸 수행하면, 현재시점에 업로드된게 아니라 sqlite에 저장된 모든 프로젝트를 담음.
                         st.success(f"✅ {data.get('count', 0)}개 소스 파일 수집 완료")
                     else:
                         st.error(
@@ -422,7 +499,7 @@ def render_upload_tab(user_id: str) -> None:
                         data = resp.json()
                         total = format_count(data.get("total_chunks") or 0)
                         st.success(f"✅ 인덱싱 완료! 생성된 청크: {total}")
-                        # st.session_state.analysis_targets = []   # 인덱싱 후 초기화
+                        st.session_state.analysis_targets = [] # session 에 저장된 파일구조 초기화
                         if data.get("logs"):
                             with st.expander("인덱싱 로그 보기"):
                                 st.text("\n".join(data["logs"]))
@@ -441,27 +518,24 @@ def render_chat_tab(user_id: str) -> None:
     st.subheader("💬 AI 코드 분석")
 
     # ── 프로젝트 선택 ──────────────────────────────────────────
-    projects = fetch_projects()
-    project_map = {p["project_name"]: p["project_id"] for p in projects}
+    projects     = fetch_projects()
+    project_map  = {p["project_name"]: p["project_id"] for p in projects}
     project_names = list(project_map.keys())
 
     col_proj, col_refresh, col_clear = st.columns([4, 1, 1])
     with col_proj:
         if project_names:
-            prev = st.session_state.selected_project
+            prev        = st.session_state.selected_project
             default_idx = project_names.index(prev) if prev in project_names else 0
-            selected = st.selectbox(
-                "🗂 분석할 프로젝트",
-                project_names,
-                index=default_idx,
+            selected    = st.selectbox(
+                "🗂 분석할 프로젝트", project_names, index=default_idx,
                 key="project_selectbox",
             )
-            st.session_state.selected_project = selected
+            st.session_state.selected_project    = selected
             st.session_state.selected_project_id = project_map[selected]
-
         else:
             st.info("업로드된 프로젝트가 없습니다. 먼저 ZIP 파일을 업로드하고 인덱싱하세요.")
-            st.session_state.selected_project = None
+            st.session_state.selected_project    = None
             st.session_state.selected_project_id = None
 
     with col_refresh:
@@ -483,30 +557,62 @@ def render_chat_tab(user_id: str) -> None:
 
     # ── 누적 대화 렌더링 ───────────────────────────────────────
     for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            if msg["role"] == "assistant":
-                for block in extract_mermaid_blocks(msg["content"]):
-                    render_mermaid(block)
+        render_message(msg)
 
     # ── 새 질문 입력 ───────────────────────────────────────────
     query = st.chat_input("소스 코드에 대해 궁금한 점을 물어보세요")
     if not query or not query.strip():
         return
 
-    question = query.strip()
-    project_id = st.session_state.selected_project_id
+    question     = query.strip()
+    project_id   = st.session_state.selected_project_id
     project_name = st.session_state.selected_project
 
-    st.session_state.messages.append({"role": "user", "content": question})
-    with st.chat_message("user"):
-        st.markdown(question)
+    # 사용자 메시지 즉시 표시
+    user_msg = {"role": "user", "content": question}
+    st.session_state.messages.append(user_msg)
+    render_message(user_msg)
 
+    # ── diagram 질문 분기 ──────────────────────────────────────
+    if is_diagram_question(question) and project_id:
+        entity_filter = extract_diagram_entity(question)   # 특정 엔티티 필터 (없으면 None)
+
+        with st.spinner("소스 파일을 분석해 관계도를 생성하는 중..."):
+            result = fetch_diagram(user_id, project_id, project_name, entity_filter)
+
+        if "error" in result:
+            answer = f"❌ 다이어그램 생성 실패: {result['error']}"
+            with st.chat_message("assistant"):
+                st.warning(answer)
+
+        elif not result.get("mermaid"):
+            answer = result.get("message", "다이어그램을 생성할 수 없습니다.")
+            with st.chat_message("assistant"):
+                st.info(answer)
+
+        else:
+            mermaid_code = result["mermaid"]
+            tables       = result.get("tables", [])
+            rel_count    = result.get("relation_count", 0)
+            filter_label = f" (필터: {entity_filter})" if entity_filter else ""
+            caption      = f"테이블 {len(tables)}개 / 관계 {rel_count}건{filter_label}"
+            answer       = f"```mermaid\n{mermaid_code}\n```"
+
+            with st.chat_message("assistant"):
+                st.caption(caption)
+            render_mermaid(mermaid_code)
+
+        assistant_msg = {"role": "assistant", "content": answer}
+        st.session_state.messages.append(assistant_msg)
+        post_history(user_id, question, answer)
+        return
+
+    # ── 일반 질문: /ask 스트리밍 ──────────────────────────────
     collected: list[str] = []
+    # mermaid_blocks: list[str] = []   # with 블록 밖 참조를 위해 미리 선언
 
     with st.chat_message("assistant"):
-
-        def gen():
+        def _stream_gen():
             for chunk in get_streaming_response(
                 user_id=user_id,
                 question=question,
@@ -516,14 +622,23 @@ def render_chat_tab(user_id: str) -> None:
                 collected.append(chunk)
                 yield chunk
 
-        st.write_stream(gen)
+        st.write_stream(_stream_gen())
 
-    answer = "".join(collected)
-    if answer:
-        st.session_state.messages.append({"role": "assistant", "content": answer})
-        post_history(user_id, question, answer)
-        for block in extract_mermaid_blocks(answer):
-            render_mermaid(block)
+        full_answer    = "".join(collected)
+        # mermaid_blocks = extract_mermaid_blocks(full_answer)
+        # if mermaid_blocks:
+        #     text_only = re.sub(r"```mermaid.*?```", "", full_answer, flags=re.S).strip()
+        #     if text_only:
+        #         st.markdown(text_only)
+
+    # components.html은 반드시 chat_message 컨텍스트 밖에서 호출
+    # for block in mermaid_blocks:
+    #     render_mermaid(block)
+
+    if full_answer:
+        assistant_msg = {"role": "assistant", "content": full_answer}
+        st.session_state.messages.append(assistant_msg)
+        post_history(user_id, question, full_answer)
     else:
         st.session_state.messages.pop()
         st.warning("응답을 받지 못했습니다. 다시 시도해주세요.")
@@ -537,7 +652,6 @@ def render_status_tab(user_id: str) -> None:
     with refresh_col:
         refresh_clicked = st.button("🔄 상태 새로고침", type="primary", use_container_width=True)
 
-    # 새로고침 버튼 → 캐시 무효화 후 재조회, 아니면 캐시 그대로 반환
     status = fetch_system_status(force=refresh_clicked)
 
     if status:
@@ -576,7 +690,7 @@ def render_status_tab(user_id: str) -> None:
                             if resp.is_success:
                                 st.success("✅ 벡터 DB 초기화 완료")
                                 st.session_state.show_reset_dialog = False
-                                st.session_state.analysis_targets = []
+                                st.session_state.analysis_targets  = []
                                 fetch_system_status(force=True)
                                 fetch_projects(force=True)
                                 st.rerun()
@@ -611,10 +725,10 @@ def main() -> None:
         st.session_state.messages = [
             msg
             for r in rows
-                for msg in (
-                    {"role": "user",      "content": r["question"]},
-                    {"role": "assistant", "content": r["answer"]},
-                )
+            for msg in (
+                {"role": "user",      "content": r["question"]},
+                {"role": "assistant", "content": r["answer"]},
+            )
         ]
         st.session_state.history_loaded = True
 

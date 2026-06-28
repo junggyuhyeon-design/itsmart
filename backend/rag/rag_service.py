@@ -22,7 +22,7 @@ class RAGService:
         self.ollama_service    = OllamaService(settings)
 
     # ── 인덱싱 ──────────────────────────────────────────────────
-
+    # 확인 완료
     def index_files(self, targets: list) -> dict:
         self.qdrant_service.ensure_collection(self.embedding_service.dimension)
         results: dict = {"success": 0, "failed": 0, "total_chunks": 0, "logs": []}
@@ -77,10 +77,11 @@ class RAGService:
         return results
 
     # ── 질문 스트리밍 ────────────────────────────────────────────
-
+    # 확인 완료
     async def ask_with_context_stream(
         self,
         question:         str,
+        search_query:     str,               # ← 정제된 검색 쿼리 (노이즈 제거)
         project_id:       str | None,
         project_name:     str | None,
         extra_context:    str               = "",
@@ -93,7 +94,7 @@ class RAGService:
         """Qdrant 검색 → OllamaService 스트리밍."""
         top_k = top_k or self.settings.top_k
 
-        query_vector = self.embedding_service.embed_query(question)
+        query_vector = self.embedding_service.embed_query(search_query)
         hits = self.qdrant_service.search(
             query_vector,
             project_id=project_id,
@@ -103,7 +104,7 @@ class RAGService:
         )
 
         gen = self.ollama_service.generate_response_stream(
-            question=question,
+            question=question,       # LLM에는 원문 질문 전달
             hits=hits,
             query_type=query_type,
             project_name=project_name,
@@ -113,7 +114,7 @@ class RAGService:
         return gen, hits
 
     # ── 전체 초기화 ──────────────────────────────────────────────
-
+    # 확인 완료
     def reset(self) -> None:
         try:
             self.qdrant_service.reset_collection(self.embedding_service.dimension)
@@ -122,11 +123,352 @@ class RAGService:
             logger.exception("RAGService reset 실패")
             raise
 
-    # ── SQL 파싱 유틸 (Mermaid 생성 보조) ────────────────────────
+    # ── DB 관계 분석 (Mermaid 생성용) ────────────────────────────
+    # 확인 완료
+    def analyze_db_relations(
+        self,
+        targets: list,
+        entity_filter: str | None = None,  # 대문자, 파일경로/테이블명 부분 매칭
+    ) -> dict:
+        """
+        Qdrant 청크를 조회해 테이블 정의와 소스↔테이블 관계를 추출한다.
 
-    def _find_mentioned_tables(self, text_upper: str, table_names: list[str]) -> list[str]:
-        return [t for t in table_names if re.search(rf"\b{re.escape(t)}\b", text_upper)]
+        entity_filter 가 있으면:
+          1. scroll_all 단계에서 relative_path/file_name 에 키워드 포함 파일만 로드
+          2. 관계 추출 단계에서 해당 키워드를 테이블명에 포함하는 관계만 추적
+          → 전체 스캔 대신 관련 청크만 처리해 성능 및 정확도 향상
+        """
+        from collections import defaultdict
 
+        project_id = targets[0].get("project_id") if targets else None
+        ef         = entity_filter.upper() if entity_filter else None
+
+        # 1. Qdrant 스크롤 — entity_filter 있으면 파일 경로 기준 1차 필터
+        #    단, SQL 파일(테이블 정의)은 entity_filter 무관하게 항상 포함해야
+        #    테이블명을 인식할 수 있으므로 두 번 조회 후 합산
+        if ef:
+            # 필터 대상 파일 청크 (relative_path/file_name 키워드 포함)
+            filtered_chunks = self.qdrant_service.scroll_all(
+                project_id=project_id,
+                relative_path_keyword=ef,
+            )
+            # SQL 파일 청크 (테이블 정의 확보 — 키워드 무관)
+            sql_chunks = self.qdrant_service.scroll_all(
+                project_id=project_id,
+                relative_path_keyword=".sql",  # .sql 파일만
+            )
+            # 중복 제거 후 합산 (relative_path + chunk_index 기준)
+            seen: set[str] = set()
+            all_chunks: list[dict] = []
+            for chunk in filtered_chunks + sql_chunks:
+                key = f"{chunk.get('relative_path', '')}:{chunk.get('chunk_index', '')}"
+                if key not in seen:
+                    seen.add(key)
+                    all_chunks.append(chunk)
+        else:
+            all_chunks = self.qdrant_service.scroll_all(project_id=project_id)
+
+        # 2. 청크 → 파일 단위 raw_text 합산
+        parsed_files: list[dict] = []
+        for chunk in all_chunks:
+            if not chunk.get("text"):
+                continue
+            parsed_files.append({
+                "relative_path": chunk.get("relative_path", ""),
+                "file_name":     chunk.get("file_name", ""),
+                "extension":     (chunk.get("extension") or "").lower(),
+                "raw_text":      chunk.get("text", ""),
+                "raw_upper":     (chunk.get("text", "") or "").upper(),
+            })
+
+        if not parsed_files:
+            return {"tables": [], "table_definitions": {}, "relations": [], "source_to_tables": {}}
+
+        file_texts: dict[str, dict] = {}
+        for pf in parsed_files:
+            path = pf["relative_path"]
+            if path not in file_texts:
+                file_texts[path] = dict(pf)
+            else:
+                file_texts[path]["raw_text"]  += "\n" + pf["raw_text"]
+                file_texts[path]["raw_upper"] += "\n" + pf["raw_upper"]
+
+        merged_files = list(file_texts.values())
+
+        # 3. 테이블 정의 추출 (전체 SQL 파일 기준)
+        table_names, table_definitions, _ = self._extract_table_definitions(merged_files)
+
+        # entity_filter 가 있으면 관련 테이블만 추적
+        #   - 테이블명에 ef 포함 → 직접 대상
+        #   - 나머지는 1-hop 확장(직접 대상 테이블을 사용하는 파일이 쓰는 다른 테이블)은
+        #     generate_source_to_table_mermaid 의 후처리에서 처리
+        target_tables = table_names  # 기본: 전체
+        if ef:
+            target_tables = {t for t in table_names if ef in t}
+            if not target_tables:
+                # 테이블명 매칭 없으면 전체 테이블로 폴백 (파일 경로 필터만 적용)
+                target_tables = table_names
+
+        # 4. 관계 추출
+        relations: list[dict] = []
+        source_to_tables: dict = defaultdict(lambda: defaultdict(lambda: {
+            "ops": set(), "categories": set(), "scopes": set(),
+        }))
+
+        for file_info in merged_files:
+            entities = self._extract_entities(file_info["raw_text"], file_info["extension"])
+            for entity in entities:
+                entity_text_upper = entity["text"].upper()
+                for table in target_tables:
+                    usage_ops = self._detect_table_usage(entity_text_upper, table)
+                    if not usage_ops:
+                        continue
+                    categories = {self._map_op_category(op) for op in usage_ops}
+                    relations.append({
+                        "file":        file_info["relative_path"],
+                        "file_name":   Path(file_info["relative_path"]).name
+                                       if file_info["relative_path"] else file_info["file_name"],
+                        "entity_type": entity["type"],
+                        "entity_name": entity["name"],
+                        "table":       table,
+                        "operations":  sorted(usage_ops),
+                        "categories":  sorted(categories),
+                    })
+                    bucket = source_to_tables[file_info["relative_path"]][table]
+                    bucket["ops"].update(usage_ops)
+                    bucket["categories"].update(categories)
+                    bucket["scopes"].add(f"{entity['type']}:{entity['name']}")
+
+            if file_info["relative_path"] not in source_to_tables:
+                for table in target_tables:
+                    if re.search(rf"\b{re.escape(table)}\b", file_info["raw_upper"]):
+                        bucket = source_to_tables[file_info["relative_path"]][table]
+                        if not bucket["ops"]:
+                            bucket["ops"].add("REF")
+                            bucket["categories"].add("REF")
+                            bucket["scopes"].add(
+                                f"file:{Path(file_info['relative_path']).name}"
+                            )
+
+        normalized: dict = {}
+        for file_path, table_map in source_to_tables.items():
+            normalized[file_path] = {
+                table: {
+                    "operations": sorted(meta["ops"]),
+                    "categories": sorted(meta["categories"]),
+                    "scopes":     sorted(meta["scopes"]),
+                }
+                for table, meta in table_map.items()
+            }
+
+        return {
+            "tables":            sorted(target_tables),
+            "table_definitions": table_definitions,
+            "relations":         relations,
+            "source_to_tables":  normalized,
+        }
+
+    # 확인 완료 [개선 필요]
+    def generate_source_to_table_mermaid(
+            self, 
+            db_data: dict, 
+    ) -> str:
+        """
+        analyze_db_relations() 결과를 Mermaid flowchart 코드로 변환.
+        entity_filter 가 있으면 관련 relation / node 만 남겨서 부분 구조도를 만든다.
+        """
+        relations = db_data.get("relations", []) or []
+        source_to_tables = db_data.get("source_to_tables", {}) or {}
+        tables_from_data = db_data.get("tables", []) or []
+
+        def _safe_node_text(value: str) -> str:
+            text = str(value or "").strip()
+            if not text:
+                text = "UNKNOWN"
+            text = Path(text).name if "/" in text or "\\" in text else text
+            text = text.replace(" ", "_")
+            return self._escape_mermaid(text)
+
+        def _safe_edge_label(categories: list[str] | None, operations: list[str] | None) -> str:
+            categories = categories or []
+            operations = operations or []
+
+            label_parts: list[str] = []
+            for c in categories:
+                if c and c not in label_parts:
+                    label_parts.append(c)
+
+            detail_ops = [op for op in operations if op and op != "REF"]
+            if detail_ops:
+                op_label = "/".join(dict.fromkeys(detail_ops))
+                if op_label not in label_parts:
+                    label_parts.append(op_label)
+
+            if not label_parts:
+                label_parts = ["REF"]
+
+            return self._escape_mermaid(", ".join(label_parts))
+
+        def _is_sql_definition_file(file_path: str) -> bool:
+            name = Path(file_path or "").name.lower()
+            return name.endswith(".sql")
+
+        # 1) 실제 사용할 파일/테이블/엔티티 수집
+        file_set: set[str] = set()
+        table_set: set[str] = set(t for t in tables_from_data if t)
+
+        entity_keys: list[tuple[str, str, str]] = []
+        entity_seen: set[tuple[str, str, str]] = set()
+
+        edge_rows: list[dict] = []
+
+        # relations 기준 edge 우선 구성
+        for r in relations:
+            file_path = r.get("file", "") or ""
+            table = r.get("table", "") or ""
+            entity_type = r.get("entity_type", "") or "file"
+            entity_name = r.get("entity_name", "") or Path(file_path).name
+            categories = r.get("categories", []) or []
+            operations = r.get("operations", []) or []
+
+            if not file_path or not table:
+                continue
+
+            if _is_sql_definition_file(file_path):
+                continue
+
+            file_set.add(file_path)
+            table_set.add(table)
+
+            if entity_type != "file":
+                key = (file_path, entity_type, entity_name)
+                if key not in entity_seen:
+                    entity_seen.add(key)
+                    entity_keys.append(key)
+
+            edge_rows.append(
+                {
+                    "file": file_path,
+                    "table": table,
+                    "entity_type": entity_type,
+                    "entity_name": entity_name,
+                    "categories": categories,
+                    "operations": operations,
+                }
+            )
+
+        # source_to_tables 기준으로 빠진 file -> table 관계 보강
+        # relations 에 이미 같은 file/table/entity_type=file 조합이 있으면 중복 추가하지 않음
+        existing_file_table_edges = {
+            (e["file"], e["table"])
+            for e in edge_rows
+            if e["entity_type"] == "file"
+        }
+
+        for file_path, table_map in source_to_tables.items():
+            if not file_path or _is_sql_definition_file(file_path):
+                continue
+
+            file_set.add(file_path)
+
+            for table, meta in (table_map or {}).items():
+                if not table:
+                    continue
+
+                table_set.add(table)
+
+                scopes = meta.get("scopes", []) or []
+                operations = meta.get("operations", []) or []
+                categories = meta.get("categories", []) or []
+
+                # file 스코프가 명시되어 있으면 file -> table 관계로 보강
+                has_file_scope = any(str(s).startswith("file:") for s in scopes)
+
+                if has_file_scope and (file_path, table) not in existing_file_table_edges:
+                    edge_rows.append(
+                        {
+                            "file": file_path,
+                            "table": table,
+                            "entity_type": "file",
+                            "entity_name": Path(file_path).name,
+                            "categories": categories,
+                            "operations": operations,
+                        }
+                    )
+                    existing_file_table_edges.add((file_path, table))
+
+        # relation/보강 결과가 전혀 없으면 최소 Mermaid 반환
+        if not edge_rows and not table_set:
+            return 'flowchart LR\n    N0["NO_RELATIONS"]'
+
+        all_tables = sorted(table_set)
+        all_files = sorted(file_set)
+
+        table_ids: dict[str, str] = {t: f"T{i}" for i, t in enumerate(all_tables)}
+        file_ids: dict[str, str] = {f: f"F{i}" for i, f in enumerate(all_files)}
+        entity_ids: dict[tuple[str, str, str], str] = {
+            k: f"E{i}" for i, k in enumerate(entity_keys)
+        }
+
+        lines: list[str] = ["flowchart LR"]
+
+        # 2) 테이블 노드
+        for table in all_tables:
+            tid = table_ids[table]
+            lines.append(f'    {tid}["{_safe_node_text(table)}"]')
+
+        # 3) 파일 노드
+        for file_path in all_files:
+            fid = file_ids[file_path]
+            file_label = _safe_node_text(Path(file_path).name)
+            lines.append(f'    {fid}["{file_label}"]')
+
+        # 4) 엔티티 노드
+        for (file_path, entity_type, entity_name), eid in entity_ids.items():
+            label = _safe_node_text(entity_name)
+            lines.append(f'    {eid}["{label}"]')
+
+        # 5) 파일 -> 엔티티 포함선
+        for (file_path, _, _), eid in entity_ids.items():
+            fid = file_ids.get(file_path)
+            if fid:
+                lines.append(f"    {fid} -. contains .-> {eid}")
+
+        # 6) 엔티티/파일 -> 테이블 관계선
+        emitted_edges: set[tuple[str, str, str]] = set()
+
+        for e in edge_rows:
+            file_path = e["file"]
+            table = e["table"]
+            entity_type = e["entity_type"]
+            entity_name = e["entity_name"]
+
+            target_id = table_ids.get(table)
+            if not target_id:
+                continue
+
+            if entity_type == "file":
+                source_id = file_ids.get(file_path)
+            else:
+                source_id = entity_ids.get((file_path, entity_type, entity_name))
+
+            if not source_id:
+                continue
+
+            edge_label = _safe_edge_label(e.get("categories"), e.get("operations"))
+            edge_key = (source_id, target_id, edge_label)
+            if edge_key in emitted_edges:
+                continue
+            emitted_edges.add(edge_key)
+
+            lines.append(f"    {source_id} -->|{edge_label}| {target_id}")
+
+        return "\n".join(lines)
+
+    # def _find_mentioned_tables(self, text_upper: str, table_names: list[str]) -> list[str]:
+    #     return [t for t in table_names if re.search(rf"\b{re.escape(t)}\b", text_upper)]
+
+    # 확인 완료
     def _extract_table_definitions(self, parsed_files: list[dict]):
         table_names:       set[str]        = set()
         table_definitions: dict[str, str]  = {}
@@ -175,6 +517,7 @@ class RAGService:
 
         return table_names, table_definitions, list(table_details.values())
 
+    # 확인 완료
     def _find_balanced_paren_end(self, text: str, open_index: int) -> int | None:
         if open_index >= len(text) or text[open_index] != "(":
             return None
@@ -200,6 +543,7 @@ class RAGService:
             i += 1
         return None
 
+    # 확인 완료
     def _parse_column_names(self, table_body: str) -> list[str]:
         columns = []
         skip_prefixes = (
@@ -217,6 +561,7 @@ class RAGService:
                 columns.append(m.group(1).upper())
         return columns
 
+    # 확인 완료
     def _extract_entities(self, text: str, extension: str) -> list[dict]:
         entities = [{"type": "file", "name": "FILE_SCOPE", "text": text}]
         added: set[tuple] = set()
@@ -277,7 +622,9 @@ class RAGService:
 
         return entities
 
+    # 확인 완료
     def _detect_table_usage(self, text_upper: str, table_upper: str) -> set[str]:
+        """table 이 text 내에서 어떤 연산으로 사용되었는지를 추출 """
         escaped = re.escape(table_upper)
         ops: set[str] = set()
         if re.search(rf"\bFROM\b\s+{escaped}\b",          text_upper): ops.add("SELECT")
@@ -288,10 +635,12 @@ class RAGService:
         if not ops and re.search(rf"\b{escaped}\b",         text_upper): ops.add("REF")
         return ops
 
+    # 확인 완료
     def _map_op_category(self, op: str) -> str:
         return {"SELECT": "READS", "INSERT": "WRITES", "UPDATE": "WRITES",
                 "DELETE": "WRITES", "JOIN": "JOINS"}.get(op, "REF")
 
+    # 확인 완료
     def _escape_mermaid(self, text: str) -> str:
         return (
             str(text)

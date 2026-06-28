@@ -29,7 +29,7 @@ class QdrantService:
         return self._client
 
     # ── 컬렉션 관리 ─────────────────────────────────────────────
-
+    # 확인 완료
     def _collection_exists(self) -> bool:
         try:
             collections = self.client.get_collections().collections
@@ -50,7 +50,7 @@ class QdrantService:
             raise
 
     # ── 저장 ────────────────────────────────────────────────────
-
+    # 확인 완료
     def upsert_chunks(self, chunks: list[dict[str, Any]], vectors: list[list[float]]) -> int:
         """청크와 벡터를 Qdrant에 저장. 저장된 포인트 수 반환."""
         if not chunks or not vectors:
@@ -76,7 +76,7 @@ class QdrantService:
             raise
 
     # ── 검색 ────────────────────────────────────────────────────
-
+    # 확인 완료
     def search(
         self,
         query_vector:     list[float],
@@ -115,6 +115,65 @@ class QdrantService:
         except Exception:
             logger.exception("search 실패")
             raise
+
+    # ── 전체 스크롤 (Mermaid 분석용) ────────────────────────────
+    # 확인 완료
+    def scroll_all(
+        self,
+        project_id:            str | None = None,
+        relative_path_keyword: str | None = None,  # 파일경로에 키워드 포함 여부 후처리 필터
+        batch_size:            int        = 100,
+    ) -> list[dict[str, Any]]:
+        """
+        Qdrant 전체 청크를 페이지 단위로 순회해 반환.
+        벡터 검색 없이 payload 전체를 가져온다 — analyze_db_relations() 전용.
+
+        relative_path_keyword:
+          Qdrant payload filter는 exact/prefix match만 지원하므로
+          부분 문자열 매칭은 Python 레벨에서 후처리한다.
+          entity_filter("USER") → relative_path나 file_name에 "USER" 포함 청크만 반환.
+        """
+        if not self._collection_exists():
+            return []
+
+        conditions = []
+        if project_id:
+            conditions.append(
+                FieldCondition(key="project_id", match=MatchValue(value=project_id))
+            )
+        scroll_filter = Filter(must=conditions) if conditions else None
+
+        all_payloads: list[dict[str, Any]] = []
+        kw = relative_path_keyword.upper() if relative_path_keyword else None
+        offset = None
+
+        try:
+            while True:
+                results, next_offset = self.client.scroll(
+                    collection_name=self.settings.qdrant_collection,
+                    scroll_filter=scroll_filter,
+                    limit=batch_size,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in results:
+                    if not point.payload:
+                        continue
+                    if kw:
+                        # relative_path 또는 file_name 에 키워드 포함 여부로 필터
+                        rp = (point.payload.get("relative_path") or "").upper()
+                        fn = (point.payload.get("file_name")     or "").upper()
+                        if kw not in rp and kw not in fn:
+                            continue
+                    all_payloads.append(point.payload)
+                if next_offset is None:
+                    break
+                offset = next_offset
+        except Exception:
+            logger.exception("scroll_all 실패")
+
+        return all_payloads
 
     # ── 관리 ────────────────────────────────────────────────────
 

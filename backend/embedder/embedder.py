@@ -14,5 +14,6 @@ class EmbeddingService:
     def embed_texts(self, texts: list[str]): # 임베딩 모델(BAAI/bge-m3)이 벡터화를 진행
         return self.model.encode(texts).tolist()
 
+    # 확인 완료
     def embed_query(self, query: str):
         return self.embed_texts([query])[0]  # 단일 문자열(질의)을 임베딩 벡터로 변환

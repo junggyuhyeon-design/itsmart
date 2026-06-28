@@ -64,9 +64,9 @@ def safe_filename(filename: str) -> str:
     return name or "upload"
 
 
-def is_allowed_extension(filename: str) -> bool:
-    """업로드 시점에 허용할 확장자인지 검사 (분석 대상 확장자)."""
-    return Path(filename).suffix.lower() in ANALYSIS_TARGET_EXTENSIONS
+# def is_allowed_extension(filename: str) -> bool:
+#     """업로드 시점에 허용할 확장자인지 검사 (분석 대상 확장자)."""
+#     return Path(filename).suffix.lower() in ANALYSIS_TARGET_EXTENSIONS
 
 # 확인 완료. zip + 개별 확장자(이후 확장)
 def is_allowed_upload_extension(filename: str) -> bool:

@@ -14,11 +14,11 @@ from database.history_repository import (
     delete_history,
     get_all_projects,
     get_file_index,
+    get_file_index_summary,
     get_history,
     save_history,
     save_uploaded_file,
     upsert_user,
-    get_file_index_summary,
 )
 from database.init_db import init_db
 from fastapi import Body, FastAPI, File, Header, HTTPException, Request, UploadFile
@@ -116,7 +116,7 @@ def _require_user(x_user_id: str | None) -> str:
         raise HTTPException(status_code=500, detail="사용자 등록 중 오류가 발생했습니다.")
     return uid
 
-
+# 확인 완료
 async def _save_upload_stream(upload: UploadFile, dest: Path) -> None:
     total_written = 0
     try:
@@ -140,38 +140,37 @@ async def _save_upload_stream(upload: UploadFile, dest: Path) -> None:
         logger.error("파일 저장 실패: %s — %s", dest.name, e)
         raise HTTPException(status_code=500, detail=f"파일 저장 중 오류: {e}") from e
 
-def build_project_structure_context(project_id: str, project_name: str | None = None) -> str:
-    """프로젝트 파일 구조를 조회하여 프롬프트 작성"""
-    summary = get_file_index_summary(project_id)
-    total = summary.get("total", 0)
-    by_extension = summary.get("by_extension", {})
-    files = summary.get("files", [])
+# def build_project_structure_context(project_id: str, project_name: str | None = None) -> str:
+#     """프로젝트 파일 구조를 조회하여 프롬프트 작성"""
+#     summary = get_file_index_summary(project_id)
+#     total = summary.get("total", 0)
+#     by_extension = summary.get("by_extension", {})
+#     files = summary.get("files", [])
 
-    lines: list[str] = []
-    lines.append("### 프로젝트 파일 구조 정보")
-    if project_name:
-        lines.append(f"- 프로젝트명: {project_name}")
-    lines.append(f"- 전체 파일 수: {total}")
+#     lines: list[str] = []
+#     lines.append("### 프로젝트 파일 구조 정보")
+#     if project_name:
+#         lines.append(f"- 프로젝트명: {project_name}")
+#     lines.append(f"- 전체 파일 수: {total}")
 
-    if by_extension:
-        lines.append("- 확장자별 파일 수:")
-        for ext, cnt in by_extension.items():
-            lines.append(f"  - .{ext}: {cnt}")
+#     if by_extension:
+#         lines.append("- 확장자별 파일 수:")
+#         for ext, cnt in by_extension.items():
+#             lines.append(f"  - .{ext}: {cnt}")
 
-    if files:
-        lines.append("- 파일 목록:") # 최대 300개로 제한.
-        for f in files[:300]:
-            rel = f.get("relative_path", "")
-            ext = f.get("extension", "")
-            lines.append(f"  - [{ext}] {rel}")
+#     if files:
+#         lines.append("- 파일 목록:") # 최대 300개로 제한.
+#         for f in files[:300]:
+#             rel = f.get("relative_path", "")
+#             ext = f.get("extension", "")
+#             lines.append(f"  - [{ext}] {rel}")
 
-        if len(files) > 300:
-            lines.append(f"  - ... 생략 {len(files) - 300}건")
+#         if len(files) > 300:
+#             lines.append(f"  - ... 생략 {len(files) - 300}건")
 
-    lines.append("")
-    lines.append("위 구조 정보를 참고하여 프로젝트 구조, 파일 분포, 포함 여부, 위치 관련 질문에 우선 답변하라.")
-    lines.append("구현 상세 분석이 필요하면 구조 정보와 함께 검색된 코드 문맥을 조합해서 답변하라.")
-    return "\n".join(lines)
+#     lines.append("")
+#     return "\n".join(lines)
+
 
 # ── 업로드 & 인덱싱 ──────────────────────────────────────────────
 # 확인 완료
@@ -230,7 +229,7 @@ async def upload(
         "projects": len(projects_created),
     }
 
-
+# 확인 완료
 @app.post("/index")
 async def index(request: Request, targets: List = Body(...)):
     """수집된 파일 목록을 Qdrant 에 인덱싱."""
@@ -260,34 +259,34 @@ def list_projects():
         raise HTTPException(status_code=500, detail=f"프로젝트 조회 중 오류: {e}") from e
 
 
-@app.get("/projects/{project_id}/files")
-def list_project_files(project_id: str, project_name: str, extension: str | None = None):
-    """
-    특정 프로젝트의 인덱싱된 파일 목록 반환.
-    extension 파라미터로 필터 가능 (예: ?extension=xml).
-    """
-    try:
-        pid   = project_id
-        pnm   = project_name
-        files = get_file_index(pid, extension)
-        return {
-            "project_id":       pid,
-            "project_name":     pnm,
-            "file_name":        files.file_name,
-            "relative_path":    files.relative_path,
-            "extension":        files.extension,
-            "files":            files,
-            "count":            len(files),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("프로젝트 파일 조회 실패")
-        raise HTTPException(status_code=500, detail=f"조회 중 오류: {e}") from e
+# @app.get("/projects/{project_id}/files")
+# def list_project_files(project_id: str, project_name: str, extension: str | None = None):
+#     """
+#     특정 프로젝트의 인덱싱된 파일 목록 반환.
+#     extension 파라미터로 필터 가능 (예: ?extension=xml).
+#     """
+#     try:
+#         pid   = project_id
+#         pnm   = project_name
+#         files = get_file_index(pid, extension)
+#         return {
+#             "project_id":       pid,
+#             "project_name":     pnm,
+#             "file_name":        files.file_name,
+#             "relative_path":    files.relative_path,
+#             "extension":        files.extension,
+#             "files":            files,
+#             "count":            len(files),
+#         }
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.exception("프로젝트 파일 조회 실패")
+#         raise HTTPException(status_code=500, detail=f"조회 중 오류: {e}") from e
 
 
 # ── 질문 ─────────────────────────────────────────────────────────
-
+# 확인 완료
 @app.get("/ask")
 async def ask(
     request:       Request,
@@ -301,22 +300,28 @@ async def ask(
     if not question or not question.strip():
         raise HTTPException(status_code=400, detail="질문이 비어 있습니다.")
 
+    # 1. 질문 분석 (검색 쿼리 정제 + 전략 결정)
+    intent = _analyzer.analyze(question)
+    logger.info(
+        "질문 분석 — type=%s top_k=%d layer=%s ext=%s hint=%r search_query=%r",
+        intent.query_type, intent.top_k,
+        intent.layer_filter, intent.extension_filter, intent.search_query,
+    )
+
+    # 2. 히스토리 조회 (DB)
     chat_history = list(reversed(get_history(user_id, limit=settings.chat_history_turns)))
-    intent       = _analyzer.analyze(question)
-    service      = get_rag_service(request)
-    extra_context_parts: list[str] = []
 
-    if project_id:
-        structure_context = build_project_structure_context(project_id, project_name)
+    # 3. 파일구조: diagram 타입일 때만 주입 (소형 모델은 파일구조가 크면 소스코드를 밀어냄)
+    extra_context = ""
+    # if project_id and intent.query_type == "diagram":
+    #     extra_context = build_project_structure_context(project_id, project_name)
 
-        if structure_context.strip():
-            extra_context_parts.append(structure_context)
-
-    extra_context = "\n\n".join(extra_context_parts)
-
+    # 4. Qdrant 검색 + Ollama 스트리밍
+    service = get_rag_service(request)
     try:
         gen, _ = await service.ask_with_context_stream(
             question=question.strip(),
+            search_query=intent.search_query,
             project_id=project_id,
             project_name=project_name,
             extra_context=extra_context,
@@ -332,9 +337,76 @@ async def ask(
         logger.error("ask 처리 실패: %s", e)
         raise HTTPException(status_code=500, detail=f"질문 처리 중 오류: {e}") from e
 
+# 확인 완료
+@app.get("/diagram")
+async def diagram(
+    request:       Request,
+    project_id:    str,
+    project_name:  str | None = None,
+    entity_filter: str | None = None,
+    x_user_id:     str | None = Header(default=None),
+):
+    """
+    프로젝트 소스를 정적 분석해 Mermaid 다이어그램(소스↔테이블 관계도)을 반환.
+    entity_filter 가 있으면 해당 테이블/클래스와 관련된 노드만 추출.
+    LLM 없이 RAGService.analyze_db_relations() 로 직접 생성.
+    """
+    _require_user(x_user_id)
+    service = get_rag_service(request)
+
+    try:
+        files = get_file_index(project_id)
+        if not files:
+            raise HTTPException(
+                status_code=404,
+                detail="인덱싱된 파일이 없습니다. 먼저 인덱싱을 실행하세요.",
+            )
+
+        targets = [{"project_id": project_id, "project_name": project_name}]
+        db_data = await run_in_threadpool(service.analyze_db_relations, targets)
+
+        if not db_data.get("tables"):
+            return {
+                "mermaid": None,
+                "message": (
+                    "SQL 테이블 정의를 찾지 못했습니다. "
+                    ".sql 파일이 인덱싱되었는지 확인하세요."
+                ),
+                "tables": [],
+            }
+
+        # entity_filter 가 있으면 관련 노드만 추출
+        entity_upper = entity_filter.strip().upper() if entity_filter else None
+        # TODO : 하단 부터 개선 필요. 중복되는 내용 제거해야함.
+        mermaid_code = service.generate_source_to_table_mermaid(db_data)
+
+        # 필터 적용 후 실제 포함된 테이블만 집계
+        filtered_tables = (
+            [t for t in db_data["tables"] if entity_upper in t]
+            if entity_upper else db_data["tables"]
+        )
+        filtered_relations = (
+            [r for r in db_data["relations"]
+             if entity_upper in r["table"] or entity_upper in r.get("entity_name", "").upper()]
+            if entity_upper else db_data["relations"]
+        )
+
+        return {
+            "mermaid":        mermaid_code,
+            "tables":         filtered_tables if entity_upper else db_data["tables"],
+            "relation_count": len(filtered_relations),
+            "entity_filter":  entity_upper,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("diagram 생성 실패")
+        raise HTTPException(status_code=500, detail=f"다이어그램 생성 중 오류: {e}") from e
+
 
 # ── 히스토리 ─────────────────────────────────────────────────────
-
+# 확인 완료
 @app.post("/history")
 def add_history(
     payload:   dict      = Body(...),
@@ -354,14 +426,14 @@ def add_history(
         logger.error("히스토리 저장 실패: %s", e)
         raise HTTPException(status_code=500, detail=f"히스토리 저장 중 오류: {e}") from e
 
-
+# 확인 완료
 @app.get("/history")
 def list_history(limit: int, x_user_id: str | None = Header(default=None)):
     """History 복원(최초 1회) 해당 사용자의 채팅 히스토리 반환 (최신순)."""
     user_id = _require_user(x_user_id)
     return {"history": get_history(user_id, limit=limit)}
 
-
+# 확인 완료
 @app.delete("/history")
 def clear_history(x_user_id: str | None = Header(default=None)):
     """해당 사용자의 채팅 히스토리 전체 삭제."""

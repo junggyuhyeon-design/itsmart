@@ -8,6 +8,7 @@ class ChunkService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    # 확인 완료
     def split_text(self, text: str, file_metadata: dict[str, Any]) -> list[dict[str, Any]]:
         """데이터 청크화 및 청킹된 데이터에 정보 입력"""
         ext      = file_metadata.get("extension", "")
@@ -37,7 +38,7 @@ class ChunkService:
         return chunks
 
     # ── 의미 단위 분할 ───────────────────────────────────────────
-
+    # 확인 완료
     def _split_by_semantic_unit(self, text: str, ext: str) -> list[str]:
         """확장자별로 의미 단위(클래스·메서드·SQL 구문·태그)로 분리."""
         if ext == "xml":
@@ -48,6 +49,7 @@ class ChunkService:
             return self._split_sql(text)
         return [text]
 
+    # 확인 완료
     def _split_xml(self, text: str) -> list[str]:
         """XML: MyBatis SQL 태그 단위로 분리. 헤더(namespace)를 각 청크에 접두어로 붙인다."""
         tags    = ["select", "insert", "update", "delete", "resultMap", "sql"]
@@ -66,18 +68,20 @@ class ChunkService:
                 segments.append(f"{header[:300]}\n{s}" if header else s)
         return segments if segments else [text]
 
+    # 확인 완료
     def _split_by_blank_lines(self, text: str) -> list[str]:
         """Java/Python/JS/TS: 빈 줄 2개 이상 기준으로 분리 (클래스·메서드 경계)."""
         parts = re.split(r"\n{2,}", text)
         return [p.strip() for p in parts if p.strip()]
 
+    # 확인 완료
     def _split_sql(self, text: str) -> list[str]:
         """SQL: 세미콜론 단위로 분리."""
         parts = re.split(r";\s*\n", text)
         return [p.strip() + ";" for p in parts if p.strip()]
 
     # ── 청크 생성 ────────────────────────────────────────────────
-
+    # 확인 완료
     def _make_chunk(
         self, text: str, idx: int, meta: dict[str, Any]
     ) -> dict[str, Any] | None:
