@@ -9,7 +9,12 @@ itsmart_codeMind/
 │  ├─ config.py
 │  ├─ Dockerfile
 │  ├─ main.py
+│  ├─ health_service.py
 │  ├─ requirements.txt
+│  ├─ database/
+│  │  ├─ database.py
+│  │  ├─ history_repository.py
+│  │  └─ init_db.py
 │  ├─ embedder/
 │  │  └─ embedder.py
 │  ├─ parser/
@@ -17,7 +22,9 @@ itsmart_codeMind/
 │  │  └─ file_parser.py
 │  ├─ rag/
 │  │  ├─ ollama_service.py
+│  │  ├─ prompt_builder.py
 │  │  ├─ qdrant_service.py
+│  │  ├─ query_analyzer.py
 │  │  └─ rag_service.py
 │  └─ utils/
 │     └─ file_utils.py
