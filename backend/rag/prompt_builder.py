@@ -155,9 +155,12 @@ class PromptBuilder:
 
         messages.append({"role": "user", "content": "\n\n".join(parts)})
 
-        # 작성된 프롬프트를 확인한다. 
+        # 작성된 프롬프트를 확인한다.
         for m in messages:
-            logger.info("content: %s", m["content"])
+            content = m.get("content", "")
+            if not isinstance(content, str):
+                content = str(content)
+            logger.info("content: %s", content)
 
         return messages
 

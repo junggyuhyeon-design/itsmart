@@ -169,16 +169,18 @@ class RAGService:
             all_chunks = self.qdrant_service.scroll_all(project_id=project_id)
 
         # 2. 청크 → 파일 단위 raw_text 합산
+        # scroll_all 반환 payload의 텍스트 키는 "text" (chunk_service._make_chunk 기준)
         parsed_files: list[dict] = []
         for chunk in all_chunks:
-            if not chunk.get("text"):
+            chunk_text = chunk.get("text") or ""
+            if not chunk_text.strip():
                 continue
             parsed_files.append({
                 "relative_path": chunk.get("relative_path", ""),
                 "file_name":     chunk.get("file_name", ""),
                 "extension":     (chunk.get("extension") or "").lower(),
-                "raw_text":      chunk.get("text", ""),
-                "raw_upper":     (chunk.get("text", "") or "").upper(),
+                "raw_text":      chunk_text,
+                "raw_upper":     chunk_text.upper(),
             })
 
         if not parsed_files:
@@ -190,8 +192,9 @@ class RAGService:
             if path not in file_texts:
                 file_texts[path] = dict(pf)
             else:
+                # 텍스트 누적 후 raw_upper 재계산
                 file_texts[path]["raw_text"]  += "\n" + pf["raw_text"]
-                file_texts[path]["raw_upper"] += "\n" + pf["raw_upper"]
+                file_texts[path]["raw_upper"]  = file_texts[path]["raw_text"].upper()
 
         merged_files = list(file_texts.values())
 
@@ -310,8 +313,14 @@ class RAGService:
             return self._escape_mermaid(", ".join(label_parts))
 
         def _is_sql_definition_file(file_path: str) -> bool:
+            """
+            DDL(CREATE TABLE) 전용 파일만 노드에서 제외한다.
+            DML(.sql)이 섞인 파일은 관계 노드로 포함해야 하므로
+            파일명 키워드 기반으로 한정 필터링한다.
+            """
             name = Path(file_path or "").name.lower()
-            return name.endswith(".sql")
+            ddl_names = ("init.sql", "schema.sql", "ddl.sql", "create.sql", "tables.sql")
+            return name in ddl_names
 
         # 1) 실제 사용할 파일/테이블/엔티티 수집
         file_set: set[str] = set()
@@ -563,6 +572,8 @@ class RAGService:
 
     # 확인 완료
     def _extract_entities(self, text: str, extension: str) -> list[dict]:
+        # extension 정규화: None/"" 방어 및 소문자 보장
+        extension = (extension or "").lower().strip().lstrip(".")
         entities = [{"type": "file", "name": "FILE_SCOPE", "text": text}]
         added: set[tuple] = set()
 
@@ -624,15 +635,20 @@ class RAGService:
 
     # 확인 완료
     def _detect_table_usage(self, text_upper: str, table_upper: str) -> set[str]:
-        """table 이 text 내에서 어떤 연산으로 사용되었는지를 추출 """
+        """table 이 text 내에서 어떤 연산으로 사용되었는지를 추출"""
         escaped = re.escape(table_upper)
         ops: set[str] = set()
-        if re.search(rf"\bFROM\b\s+{escaped}\b",          text_upper): ops.add("SELECT")
-        if re.search(rf"\bJOIN\b\s+{escaped}\b",           text_upper): ops.add("JOIN")
-        if re.search(rf"\bINSERT\s+INTO\b\s+{escaped}\b",  text_upper): ops.add("INSERT")
-        if re.search(rf"\bUPDATE\b\s+{escaped}\b",         text_upper): ops.add("UPDATE")
-        if re.search(rf"\bDELETE\s+FROM\b\s+{escaped}\b",  text_upper): ops.add("DELETE")
-        if not ops and re.search(rf"\b{escaped}\b",         text_upper): ops.add("REF")
+        # 개행·공백 여러 칸을 허용하는 패턴으로 변경
+        ws = r"[\s\n\r]+"
+        if re.search(rf"\bFROM\b{ws}{escaped}\b",         text_upper): ops.add("SELECT")
+        if re.search(rf"\bJOIN\b{ws}{escaped}\b",          text_upper): ops.add("JOIN")
+        if re.search(rf"\bINSERT\s+INTO\b{ws}{escaped}\b", text_upper): ops.add("INSERT")
+        if re.search(rf"\bUPDATE\b{ws}{escaped}\b",        text_upper): ops.add("UPDATE")
+        if re.search(rf"\bDELETE\s+FROM\b{ws}{escaped}\b", text_upper): ops.add("DELETE")
+        # MERGE INTO (Oracle/SQL Server 호환)
+        if re.search(rf"\bMERGE\s+INTO\b{ws}{escaped}\b",  text_upper): ops.add("INSERT")
+        # 연산 없이 단순 참조만 있는 경우
+        if not ops and re.search(rf"\b{escaped}\b", text_upper): ops.add("REF")
         return ops
 
     # 확인 완료

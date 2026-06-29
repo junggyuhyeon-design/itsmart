@@ -100,6 +100,7 @@ class QueryAnalyzer:
             top_k=top_k,
             layer_filter=layer_filter,
             extension_filter=ext_filter,
+            entity_hint=entity_hint,
             search_query=search_query,
         )
 

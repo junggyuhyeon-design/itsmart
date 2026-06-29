@@ -305,7 +305,8 @@ async def ask(
     logger.info(
         "질문 분석 — type=%s top_k=%d layer=%s ext=%s hint=%r search_query=%r",
         intent.query_type, intent.top_k,
-        intent.layer_filter, intent.extension_filter, intent.search_query,
+        intent.layer_filter, intent.extension_filter,
+        intent.entity_hint, intent.search_query,
     )
 
     # 2. 히스토리 조회 (DB)
@@ -363,7 +364,7 @@ async def diagram(
             )
 
         targets = [{"project_id": project_id, "project_name": project_name}]
-        db_data = await run_in_threadpool(service.analyze_db_relations, targets)
+        db_data = await run_in_threadpool(service.analyze_db_relations, targets, entity_filter)
 
         if not db_data.get("tables"):
             return {

@@ -77,8 +77,13 @@ class ChunkService:
     # 확인 완료
     def _split_sql(self, text: str) -> list[str]:
         """SQL: 세미콜론 단위로 분리."""
-        parts = re.split(r";\s*\n", text)
-        return [p.strip() + ";" for p in parts if p.strip()]
+        parts = re.split(r";[ \t]*(?:\n|$)", text)
+        result = []
+        for p in parts:
+            s = p.strip()
+            if s:
+                result.append(s + ";")
+        return result if result else [text]
 
     # ── 청크 생성 ────────────────────────────────────────────────
     # 확인 완료
