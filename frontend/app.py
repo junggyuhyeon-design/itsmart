@@ -27,13 +27,12 @@ st.set_page_config(page_title="IT-Smart Source Analyzer", layout="wide")
 
 
 # ── 쿠키 ─────────────────────────────────────────────────────────
-# 확인 완료
 def _get_cookie_manager() -> stx.CookieManager:
     if "_cookie_mgr" not in st.session_state:
         st.session_state["_cookie_mgr"] = stx.CookieManager(key="codemind_cookie_mgr")
     return st.session_state["_cookie_mgr"]
 
-# 확인 완료
+
 def get_or_create_user_id() -> str:
     uid = st.session_state.get("user_id")
     if uid:
@@ -62,7 +61,6 @@ def get_or_create_user_id() -> str:
 
 
 # ── session_state 초기화 ─────────────────────────────────────────
-# 확인 완료
 def init_session() -> None:
     defaults: dict[str, Any] = {
         "user_id":           None,
@@ -158,7 +156,7 @@ def fetch_history(user_id: str) -> list[dict]:
         st.warning(f"히스토리 조회 중 오류: {e}")
     return []
 
-# 확인 완료
+
 def post_history(user_id: str, question: str, answer: str) -> None:
     try:
         resp = httpx.post(

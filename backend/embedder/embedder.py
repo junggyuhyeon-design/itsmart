@@ -8,7 +8,7 @@ class EmbeddingService:
     @property
     def dimension(self):
         """임베딩 모델(BAAI/bge-m3) 자체가 정의한 벡터 크기 반환"""
-        return self.model.get_sentence_embedding_dimension()
+        return self.model.get_embedding_dimension()
 
     def embed_texts(self, texts: list[str]):
         """임베딩 모델(BAAI/bge-m3)이 벡터화를 진행"""

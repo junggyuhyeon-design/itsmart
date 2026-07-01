@@ -11,6 +11,9 @@ torch==2.12.0
 # 벡터 DB 클라이언트
 qdrant-client==1.18.0
 
+# SQL AST 파서 — CREATE TABLE 정의 추출 및 DML 연산 감지
+sqlglot==30.12.0
+
 # Ollama 통신
 httpx==0.28.1
 

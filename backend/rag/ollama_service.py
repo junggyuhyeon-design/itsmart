@@ -15,7 +15,6 @@ class OllamaService:
         hits: list[dict],
         query_type: str = "qa",
         project_name: str | None = None,
-        # struct_context: str         = "",
         chat_history: list[dict] | None = None,
     ):
         """PromptBuilder로 메시지를 조립하고 Ollama 스트리밍 응답을 yield한다."""
