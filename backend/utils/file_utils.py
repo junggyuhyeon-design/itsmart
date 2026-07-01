@@ -36,23 +36,20 @@ _INVALID_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
 # 확인 완료.
 @dataclass(frozen=True)
 class AnalysisTargetFile:
-    source_type: str
     original_name: str
     saved_path: str
     relative_path: str
     extension: str
-    size: int
     project_id: str = ""
     project_name: str = ""
-    root_container_name: str = ""
 
-# 확인 완료.
+
 def ensure_dir(path: Path) -> Path:
     """디렉토리가 존재하지 않으면 생성한다."""
     path.mkdir(parents=True, exist_ok=True)
     return path
 
-# 확인 완료
+
 def safe_filename(filename: str) -> str:
     """
     경로 조작에 쓰일 수 있는 문자/구조를 제거하고 안전한 파일명만 남긴다.
@@ -64,15 +61,10 @@ def safe_filename(filename: str) -> str:
     return name or "upload"
 
 
-# def is_allowed_extension(filename: str) -> bool:
-#     """업로드 시점에 허용할 확장자인지 검사 (분석 대상 확장자)."""
-#     return Path(filename).suffix.lower() in ANALYSIS_TARGET_EXTENSIONS
-
-# 확인 완료. zip + 개별 확장자(이후 확장)
 def is_allowed_upload_extension(filename: str) -> bool:
+    """확장자 허용 여부"""
     return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
 
-# 확인 완료.
 def extract_zip(zip_path: Path, extract_dir: Path) -> Path:
     """
     ZIP 파일을 지정된 디렉토리에 안전하게 추출한다.
@@ -80,7 +72,7 @@ def extract_zip(zip_path: Path, extract_dir: Path) -> Path:
     - 1. 압축 해제 후 예상 용량 계산
     - 2. Zip bomb 방어 : 지나치게 큰 압축 해제를 방어
     - 3. Zip Slip 방어 : 추출 전 각 항목의 최종 경로를 계산해 extract_dir 하위에 있는지 검증
-    - 
+    - 4. Zip 파일 지정경로에 압축 해제
     """
     if extract_dir.exists():
         shutil.rmtree(extract_dir) # 재귀적으로 파일을 삭제
@@ -106,12 +98,12 @@ def extract_zip(zip_path: Path, extract_dir: Path) -> Path:
                 raise ValueError(
                     f"잠재적으로 위험한 zip 항목입니다. (path traversal 공격 가능성) : {member.filename}"
                 )
-        # 3. 파일을 extract_dir에 압축 해제
+        # 3. 파일을 extract_dir에 압축 해제 (Zipfile 라이브러리)
         archive.extractall(extract_dir)
 
-# 확인 완료
+
 def collect_target_files(
-    base_dir: Path, project_id: str, project_name: str, source_type: str, root_container_name: str
+    base_dir: Path, project_id: str, project_name: str
 ) -> list[AnalysisTargetFile]:
     """
     업로드(혹은 압축 해제)된 디렉터리를 재귀 탐색하여 분석 대상 파일 목록을 만든다.
@@ -124,28 +116,23 @@ def collect_target_files(
         if path.is_file() and path.suffix.lower() in ANALYSIS_TARGET_EXTENSIONS:
             targets.append(
                 AnalysisTargetFile(
-                    source_type=source_type,
-                    original_name=path.name,
-                    saved_path=str(path.resolve()),
-                    relative_path=path.relative_to(base_dir).as_posix(),
-                    extension=path.suffix.lstrip(".").lower(),
-                    size=path.stat().st_size,
-                    project_id=project_id,
-                    project_name=project_name,
-                    root_container_name=root_container_name,
+                    original_name=path.name,                               # 파일명
+                    saved_path=str(path.resolve()),                        # 저장 경로(절대경로)
+                    relative_path=path.relative_to(base_dir).as_posix(),   # 저장 경로(상대경로)
+                    extension=path.suffix.lstrip(".").lower(),             # 확장자
+                    project_id=project_id,                                 # 프로젝트아이디
+                    project_name=project_name,                             # 프로젝트명
                 )
             )
     return targets
 
-# 확인 완료. 
+
 def process_uploads_and_collect(
     save_dir: Path,
     only_filenames: list[str] | None = None,
 ) -> list[AnalysisTargetFile]:
     """
-    save_dir(업로드 원본이 저장된 디렉터리)를 순회하며 분석 대상을 수집.
-    only_filenames 가 지정되면 해당 파일명만 처리한다.
-    (지정하지 않으면 save_dir 전체를 처리 — 하위 호환 유지)
+    /extracted 경로에 압축해제 후 전체 파일 정보 반환
     """
     all_targets: list[AnalysisTargetFile] = []
     extracted_root = save_dir.parent / "extracted"
@@ -163,21 +150,19 @@ def process_uploads_and_collect(
         ext = path.suffix.lstrip(".").lower()
 
         if ext == "zip":
-            project_id = str(uuid.uuid4())
+            project_id = str(uuid.uuid4()) # 프로젝트 고유 id 생성
             project_name = path.stem
             extract_dir = extracted_root / path.stem
             try:
-                extract_zip(path, extract_dir)
+                extract_zip(path, extract_dir) # zip 압축해제
             except (zipfile.BadZipFile, ValueError) as e:
                 print(f"[WARN] ZIP 파일 처리 실패: {path.name}:{e}")
                 continue
             all_targets.extend(
-                collect_target_files(
-                    extract_dir,
-                    project_id=project_id,
-                    project_name=project_name,
-                    source_type="zip_entry",
-                    root_container_name=project_name
+                collect_target_files( # 압축해제된 파일 목록 생성
+                    extract_dir,                     # 압축해제 경로
+                    project_id=project_id,           # 프로젝트아이디
+                    project_name=project_name,       # 프로젝트명
                 )
             )
     return all_targets

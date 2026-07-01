@@ -6,16 +6,8 @@ PromptBuilder: 질문 유형·컨텍스트·히스토리를 받아 Ollama messag
   2. History (오래된 → 최신)
   3. User 메시지
      a. [프로젝트]   — 프로젝트명
-     b. [파일구조]   — diagram 타입일 때만 (main.py에서 조건부 전달)
-     c. [소스코드]   — Qdrant 검색 결과 (score 필터 후 조립)
-     d. [질문]       — 원문 질문 (항상 마지막 — 소형 모델은 끝부분에 집중)
-
-hits 구조 (qdrant_service.search() 반환값):
-  {"score": float, ...chunk_payload}
-  chunk_payload 필드 (chunk_service._make_chunk 기준):
-    project_id, project_name, text, file_name, extension,
-    relative_path, chunk_index,
-    layer_type, class_name, package, content_type
+     b. [소스코드]   — Qdrant 검색 결과 (score 필터 후 조립)
+     c. [질문]       — 원문 질문 (항상 마지막 — 소형 모델은 끝부분에 집중)
 """
 from __future__ import annotations
 import logging
@@ -42,43 +34,6 @@ _SYS_BASE = """\
 - 이전 대화의 "그 파일", "아까" 같은 지시어는 대화 맥락을 우선합니다.
 - 답변 후 예상 질문, 추가 질문, 관련 질문을 절대 제안하지 않습니다."""
 
-# _SYS_DIAGRAM = """\
-# 당신은 소스 코드와 DB 구조를 분석하는 도우미입니다.
-
-# 사용자가 Mermaid 다이어그램을 요청한 경우 반드시 아래 규칙을 따른다.
-
-# [DDL 해석 규칙]
-# 1. 업로드된 SQL 파일들 중 CREATE TABLE 등 DDL 문이 포함된 파일을 테이블 정의 기준으로 사용한다.
-# 2. 특정 파일명(init.sql 등)을 가정하지 않는다.
-# 3. 테이블 정의용 SQL 파일은 참고 자료일 뿐이며, 다이어그램 노드로 포함하지 않는다.
-# 4. DDL 파일, schema 파일, SQL 정의 파일 자체는 Mermaid에 그리지 않는다.
-# 5. 실제 다이어그램에는 소스 파일, 클래스, 함수(메서드), 그리고 실제 사용되는 테이블만 포함한다.
-# 6. DDL에 정의된 테이블 중에서도 소스 코드에서 실제 참조/사용되는 테이블만 포함한다.
-# 7. 단순히 정의만 있고 사용되지 않는 테이블은 제외한다.
-
-# [관계 해석 규칙]
-# - SELECT 는 READS
-# - INSERT, UPDATE, DELETE 는 WRITES
-# - JOIN 은 JOINS
-# - 명확하지 않으면 REF
-
-# [출력 규칙]
-# 1. 응답은 오직 하나의 ```mermaid 코드블록만 출력한다.
-# 2. 코드블록 밖의 설명, 제목, 해설, 리스트는 절대 출력하지 않는다.
-# 3. 첫 줄은 반드시 flowchart LR 로 시작한다.
-# 4. Mermaid 10.9.6에서 문법 오류 없이 동작해야 한다.
-# 5. classDef, style, subgraph, click, %% 주석은 사용하지 않는다.
-# 6. 노드명은 단순하게 만든다.
-# 7. 파일/클래스/함수 이름에 공백이 있으면 언더스코어(_)로 바꾼다.
-# 8. edge 라벨은 READS, WRITES, JOINS, REF 만 사용한다.
-# 9. SQL 파일명 자체(init.sql, schema.sql, ddl.sql 등)은 노드로 만들지 않는다.
-
-# [출력 예시]
-# ```mermaid
-# flowchart LR
-# F1[UserService_java] -->|READS| T1[TB_USER]
-# M1[UserMapper_xml] -->|WRITES| T2[TB_LOGIN_LOG]
-# ```"""
 
 _SYS_API = """\
 당신은 REST API 명세서를 작성하는 전문 AI입니다.
@@ -97,7 +52,6 @@ _SYS_LAYER = """\
 - 답변 후 예상 질문, 추가 질문, 관련 질문을 절대 제안하지 않습니다."""
 
 _SYS_MAP: dict[str, str] = {
-    # "diagram":      _SYS_DIAGRAM,
     "api_doc":      _SYS_API,
     "layer_search": _SYS_LAYER,
 }
@@ -105,14 +59,12 @@ _SYS_MAP: dict[str, str] = {
 
 class PromptBuilder:
 
-    # 확인 완료
     def build_messages(
         self,
         question:          str,
         hits:              list[dict],
         query_type:        str,
         project_name:      str | None        = None,
-        struct_context:    str               = "",
         chat_history:      list[dict] | None = None,
         max_history_chars: int               = 4000,
     ) -> list[dict]:
@@ -133,24 +85,14 @@ class PromptBuilder:
         if project_name:
             parts.append(f"[프로젝트: {project_name}]")
 
-        # b. 파일구조 (diagram 타입일 때만 main.py에서 전달됨, 200줄 제한)
-        # if struct_context:
-        #     lines   = struct_context.splitlines()
-        #     trimmed = "\n".join(lines[:200])
-        #     if len(lines) > 200:
-        #         trimmed += f"\n... (총 {len(lines)}줄 중 200줄 표시)"
-        #     parts.append(f"[파일구조]\n{trimmed}")
-
-        #     logger.info("diagram 타입으로 구조도를 전달받음")
-
-        # c. 소스코드 청크 (score 필터 적용)
+        # b. 소스코드 청크(+ 헤더) (score 필터 적용)
         code_ctx = self._build_code_context(hits, query_type)
         if code_ctx:
             parts.append(f"[소스코드]\n{code_ctx}")
         else:
             parts.append("[소스코드]\n관련 소스코드를 찾지 못했습니다. 일반 지식으로 답변하세요.")
 
-        # d. 질문 — 항상 마지막 (소형 모델은 끝부분에 집중)
+        # c. 질문 — 항상 마지막 (소형 모델은 끝부분에 집중)
         parts.append(f"[질문]\n{question}")
 
         messages.append({"role": "user", "content": "\n\n".join(parts)})
@@ -165,7 +107,6 @@ class PromptBuilder:
         return messages
 
     # ── 내부 헬퍼 ─────────────────────────────────────────────────
-    # 확인 완료
     def _build_code_context(self, hits: list[dict], query_type: str) -> str:
         """
         Qdrant 청크를 헤더 + 코드블록으로 조립.
@@ -180,8 +121,6 @@ class PromptBuilder:
           - text         : 실제 소스코드            ← 코드블록 본문
           - class_name   : 클래스명 or XML namespace ← 헤더 보조
           - layer_type   : controller/service/...  ← 헤더 보조
-          - content_type : api_endpoint/sql_select/... ← 헤더 보조
-          - package      : Java package            ← 노이즈, 미사용
           - project_id   : 프로젝트 식별자          ← 미사용
           - project_name : 프로젝트명              ← 상위에서 별도 표기, 미사용
         """
@@ -210,11 +149,10 @@ class PromptBuilder:
                 continue
             seen.add(chunk_key)
 
-            # 헤더: 경로 | class | layer | content_type (값 있는 것만)
+            # 헤더: path | class | layer
             header_tokens: list[str] = [h.get("relative_path") or h.get("file_name", "unknown")]
             if h.get("class_name"):   header_tokens.append(f"class={h['class_name']}")
             if h.get("layer_type"):   header_tokens.append(f"layer={h['layer_type']}")
-            if h.get("content_type"): header_tokens.append(f"type={h['content_type']}")
 
             lang = _EXT_LANG.get(h.get("extension", ""), "")
             parts.append(
@@ -224,7 +162,7 @@ class PromptBuilder:
 
         return "\n\n".join(parts)
 
-    # 확인 완료
+
     def _trim_history(self, history: list[dict], max_chars: int) -> list[dict]:
         """최신 턴을 우선 보존하면서 max_chars 이내로 자른다."""
         if not history or max_chars <= 0:

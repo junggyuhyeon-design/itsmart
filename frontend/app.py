@@ -2,6 +2,7 @@ import html as html_mod
 import logging
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Generator
@@ -78,7 +79,8 @@ def init_session() -> None:
 
 # ── API 캐시 ─────────────────────────────────────────────────────
 @st.cache_data(ttl=60, show_spinner=False)
-def _cached_projects() -> list[dict]: # 확인 완료
+def _cached_projects() -> list[dict]:
+    """업로드된 전체 프로젝트 목록 조회"""
     try:
         resp = httpx.get(f"{FASTAPI_URL}/projects", timeout=REQUEST_TIMEOUT)
         if resp.is_success:
@@ -98,8 +100,9 @@ def _cached_system_status() -> dict:
         logger.exception("fetch_system_status 예외")
         return {}
 
-# 확인 완료
+
 def fetch_projects(force: bool = False) -> list[dict]:
+    """업로드된 전체 프로젝트 목록 조회"""
     if force:
         _cached_projects.clear()
     return _cached_projects()
@@ -135,6 +138,7 @@ def api_error_message(resp: httpx.Response) -> str:
 
 # ── 히스토리 API ─────────────────────────────────────────────────
 def fetch_history(user_id: str) -> list[dict]:
+    """user_id 로 대화 이력 조회"""
     try:
         resp = httpx.get(
             f"{FASTAPI_URL}/history",
@@ -171,8 +175,8 @@ def post_history(user_id: str, question: str, answer: str) -> None:
         logger.exception("post_history 예외")
         st.warning(f"히스토리 저장 실패: {e}")
 
-# 확인 완료
 def clear_history_api(user_id: str) -> bool:
+    """히스토리를 초기화한다."""
     try:
         resp = httpx.delete(
             f"{FASTAPI_URL}/history",
@@ -198,19 +202,18 @@ _DIAGRAM_TRIGGERS = (
     "그려줘", "그려", "시각화",
 )
 
-# 특정 엔티티를 지목하는 패턴
 _ENTITY_HINT_PATTERNS = [
     r"\b([A-Z][A-Za-z0-9]{2,})\s*(?:관련|에\s*관련|의|관계|테이블|구조)",
     r"([A-Z_]{2,})\s*(?:테이블|관련|구조)",          # 대문자 테이블명 (USER, ORDER_ITEM)
     r"(?:관련|에\s*관련된)\s+([A-Za-z가-힣][A-Za-z0-9가-힣_]{1,})",
 ]
 
-# 확인 완료
 def is_diagram_question(question: str) -> bool:
+    """질문 내 Mermaid 관련 단어 유무 확인"""
     q = question.lower()
     return any(k in q for k in _DIAGRAM_TRIGGERS)
 
-# 확인 완료
+
 def extract_diagram_entity(question: str) -> str | None:
     """
     필터할 엔티티명(테이블명/클래스명)을 추출한다.
@@ -222,44 +225,49 @@ def extract_diagram_entity(question: str) -> str | None:
             return m.group(1).strip().upper()
     return None
 
-# 확인 완료
+
 def fetch_diagram(
     user_id: str,
     project_id: str,
-    project_name: str | None = None,
-    entity_filter: str | None = None,   # 특정 테이블/클래스 필터
+    project_name: str,
+    entity_filter: str | None = None,
 ) -> dict:
-    """백엔드 /diagram 엔드포인트 호출 — Mermaid 코드 반환."""
-    params: dict = {"project_id": project_id}
-    if project_name:
-        params["project_name"] = project_name
+    """백엔드 /diagram 엔드포인트 호출 — Mermaid 코드 + 소요시간 반환."""
+    params: dict = {
+        "project_id"  : project_id,
+        "project_name": project_name,
+    }
     if entity_filter:
         params["entity_filter"] = entity_filter
     try:
+        _t0  = time.perf_counter()
         resp = httpx.get(
             f"{FASTAPI_URL}/diagram",
             params=params,
             headers=_headers(user_id),
             timeout=120.0,
         )
+        _elapsed = time.perf_counter() - _t0
         if resp.is_success:
-            return resp.json()
-        return {"error": api_error_message(resp)}
+            data = resp.json()
+            data["_elapsed"] = _elapsed   # 소요 시간 주입
+            return data
+        return {"error": api_error_message(resp), "_elapsed": _elapsed}
     except httpx.TimeoutException:
-        return {"error": "다이어그램 생성 시간이 초과되었습니다."}
+        return {"error": "다이어그램 생성 시간이 초과되었습니다.", "_elapsed": 120.0}
     except httpx.ConnectError:
-        return {"error": "백엔드 서버에 연결할 수 없습니다."}
+        return {"error": "백엔드 서버에 연결할 수 없습니다.", "_elapsed": 0.0}
     except Exception as e:
         logger.exception("fetch_diagram 예외")
-        return {"error": str(e)}
+        return {"error": str(e), "_elapsed": 0.0}
 
 
 # ── 스트리밍 응답 ─────────────────────────────────────────────────
 def get_streaming_response(
     user_id: str,
     question: str,
-    project_id: str | None = None,
-    project_name: str | None = None,
+    project_id: str,
+    project_name: str,
 ) -> Generator[str, None, None]:
     params: dict = {"question": question}
     if project_id:
@@ -286,14 +294,42 @@ def get_streaming_response(
         yield f"\n❌ 오류: {e}"
 
 
+# ── 응답 시간 표시 ────────────────────────────────────────────────
+def _elapsed_color(sec: float) -> str:
+    """소요 시간에 따라 색상 반환: 빠름(초록) / 보통(주황) / 느림(빨강)"""
+    if sec < 5:
+        return "#16a34a"   # green-600
+    if sec < 30:
+        return "#d97706"   # amber-600
+    return "#dc2626"       # red-600
+
+
+def render_elapsed(label: str, sec: float) -> None:
+    """
+    API 응답 소요 시간을 인라인 뱃지로 표시한다.
+    예) ⏱ /index  완료  2.34 초
+    """
+    color = _elapsed_color(sec)
+    st.html(f"""
+        <div style="
+            display:inline-flex; align-items:center; gap:8px;
+            background:#f8fafc; border:1px solid #e2e8f0;
+            border-left: 3px solid {color};
+            border-radius:6px; padding:5px 12px;
+            font-family:monospace; font-size:13px;
+            margin:4px 0 8px 0; color:#334155;">
+          <span style="color:{color}; font-size:15px;">⏱</span>
+          <span style="font-weight:600;">{label}</span>
+          <span style="color:#64748b;">완료</span>
+          <span style="color:{color}; font-weight:700;">{sec:.2f} 초</span>
+        </div>
+    """)
+
+
 # ── Mermaid 렌더링 ────────────────────────────────────────────────
-# 확인 완료
 def render_mermaid(mermaid_code: str, height: int = 900) -> None:
     """
     Mermaid 코드를 HTML iframe으로 렌더링.
-
-    Streamlit의 st.markdown은 mermaid 코드블록을 네이티브 렌더하지 않으므로
-    components.html()을 사용한다. 단, chat_message 컨텍스트 밖에서 호출해야 한다.
     """
     import streamlit.components.v1 as components
     if not mermaid_code or not mermaid_code.strip():
@@ -319,7 +355,7 @@ def render_mermaid(mermaid_code: str, height: int = 900) -> None:
         scrolling=True,
     )
 
-# 확인 완료
+
 def extract_mermaid_blocks(text: str) -> list[str]:
     """텍스트에서 mermaid 코드블록을 추출한다."""
     if not text:
@@ -341,7 +377,7 @@ def extract_mermaid_blocks(text: str) -> list[str]:
             blocks.append(dm.group(1).strip())
     return blocks
 
-# 확인 완료
+
 def render_message(msg: dict) -> None:
     """
     단일 메시지를 렌더링한다.
@@ -467,7 +503,7 @@ def render_upload_tab(user_id: str) -> None:
                     )
                     if resp.is_success:
                         data = resp.json()
-                        st.session_state.analysis_targets = data.get("targets", [])
+                        st.session_state.analysis_targets = data.get("targets", []) # session 에 파일 목록 정보 저장
                         st.success(f"✅ {data.get('count', 0)}개 소스 파일 수집 완료")
                     else:
                         st.error(
@@ -489,16 +525,19 @@ def render_upload_tab(user_id: str) -> None:
         if st.button("🚀 전체 인덱싱 시작 (Qdrant 저장)", type="primary"):
             with st.spinner("인덱싱 중... 파일 크기에 따라 수 분이 걸릴 수 있습니다."):
                 try:
+                    _t0 = time.perf_counter()
                     resp = httpx.post(
                         f"{FASTAPI_URL}/index",
                         json=st.session_state.analysis_targets,
                         headers=_headers(user_id),
                         timeout=INDEX_TIMEOUT,
                     )
+                    _elapsed = time.perf_counter() - _t0
                     if resp.is_success:
                         data = resp.json()
                         total = format_count(data.get("total_chunks") or 0)
                         st.success(f"✅ 인덱싱 완료! 생성된 청크: {total}")
+                        render_elapsed("/index", _elapsed)
                         st.session_state.analysis_targets = [] # session 에 저장된 파일구조 초기화
                         if data.get("logs"):
                             with st.expander("인덱싱 로그 보기"):
@@ -575,20 +614,24 @@ def render_chat_tab(user_id: str) -> None:
 
     # ── diagram 질문 분기 ──────────────────────────────────────
     if is_diagram_question(question) and project_id:
-        entity_filter = extract_diagram_entity(question)   # 특정 엔티티 필터 (없으면 None)
+        entity_filter = extract_diagram_entity(question)   # 특정 엔티티 추출 (없으면 None)
 
         with st.spinner("소스 파일을 분석해 관계도를 생성하는 중..."):
             result = fetch_diagram(user_id, project_id, project_name, entity_filter)
+
+        _diag_elapsed = result.get("_elapsed", 0.0)
 
         if "error" in result:
             answer = f"❌ 다이어그램 생성 실패: {result['error']}"
             with st.chat_message("assistant"):
                 st.warning(answer)
+            render_elapsed("/diagram", _diag_elapsed)
 
         elif not result.get("mermaid"):
             answer = result.get("message", "다이어그램을 생성할 수 없습니다.")
             with st.chat_message("assistant"):
                 st.info(answer)
+            render_elapsed("/diagram", _diag_elapsed)
 
         else:
             mermaid_code = result["mermaid"]
@@ -600,6 +643,7 @@ def render_chat_tab(user_id: str) -> None:
 
             with st.chat_message("assistant"):
                 st.caption(caption)
+            render_elapsed("/diagram", _diag_elapsed)
             render_mermaid(mermaid_code)
 
         assistant_msg = {"role": "assistant", "content": answer}
@@ -609,7 +653,7 @@ def render_chat_tab(user_id: str) -> None:
 
     # ── 일반 질문: /ask 스트리밍 ──────────────────────────────
     collected: list[str] = []
-    # mermaid_blocks: list[str] = []   # with 블록 밖 참조를 위해 미리 선언
+    _ask_t0 = time.perf_counter()
 
     with st.chat_message("assistant"):
         def _stream_gen():
@@ -623,19 +667,12 @@ def render_chat_tab(user_id: str) -> None:
                 yield chunk
 
         st.write_stream(_stream_gen())
+        full_answer = "".join(collected)
 
-        full_answer    = "".join(collected)
-        # mermaid_blocks = extract_mermaid_blocks(full_answer)
-        # if mermaid_blocks:
-        #     text_only = re.sub(r"```mermaid.*?```", "", full_answer, flags=re.S).strip()
-        #     if text_only:
-        #         st.markdown(text_only)
-
-    # components.html은 반드시 chat_message 컨텍스트 밖에서 호출
-    # for block in mermaid_blocks:
-    #     render_mermaid(block)
+    _ask_elapsed = time.perf_counter() - _ask_t0
 
     if full_answer:
+        render_elapsed("/ask", _ask_elapsed)
         assistant_msg = {"role": "assistant", "content": full_answer}
         st.session_state.messages.append(assistant_msg)
         post_history(user_id, question, full_answer)

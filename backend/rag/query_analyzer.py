@@ -1,23 +1,10 @@
 """
 QueryAnalyzer: 질문을 분석해 Retrieval 전략을 결정한다.
-
-흐름:
-  1. 질문에서 핵심 검색어(search_query) 추출  — 노이즈("설명해줘", "알려줘") 제거
-  2. entity_hint 추출                         — CamelCase 클래스명, URL 경로 등
-  3. query_type 결정                          — diagram / api_doc / layer_search / qa
-  4. layer_filter / extension_filter 결정     — Qdrant payload 필터
-  5. top_k 결정                               — query_type별 적정 청크 수
-
-query_type:
-  qa            — 일반 코드 질의응답 (기본)
-  diagram       — Mermaid 관계도/흐름도/아키텍처
-  api_doc       — API 엔드포인트/컨트롤러 중심
-  layer_search  — 특정 레이어(controller/service/mapper/repository/ddl) 검색
 """
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -47,7 +34,7 @@ _DIAGRAM_KW = (
     "그려", "그려줘", "시각화",
 )
 _API_KW    = ("api", "엔드포인트", "endpoint", "rest", "swagger", "uri", "명세", "요청값", "응답값")
-_CTRL_KW   = ("controller", "컨트롤러", "@restcontroller", "@controller")
+_CTRL_KW   = ("controller", "컨트롤러", "@RestController", "@controller")
 _SVC_KW    = ("service", "서비스", "@service")
 _MAPPER_KW = ("mapper", "마이바티스", "mybatis")
 _REPO_KW   = ("repository", "repo", "dao", "레포지토리")
@@ -70,25 +57,12 @@ class QueryAnalyzer:
 
     def analyze(self, question: str) -> QueryIntent:
         q           = question.lower().strip()
-        entity_hint = self._extract_entity_hint(question)
-        search_query = self._build_search_query(question, entity_hint)
-        # is_diagram  = self._has(q, _DIAGRAM_KW)
-
-        # diagram: layer/ext 필터 없이 전체 청크를 넓게 검색
-        # if is_diagram:
-        #     return QueryIntent(
-        #         query_type="diagram",
-        #         top_k=self.default_top_k * 8,
-        #         layer_filter=None,
-        #         extension_filter=None,
-        #         entity_hint=entity_hint,
-        #         search_query=search_query,
-        #     )
-
-        layer_filter = self._detect_layer(q, entity_hint)
-        ext_filter   = self._detect_extension(q, layer_filter, entity_hint)
-        query_type   = self._detect_type(q, layer_filter)
-        top_k        = self._decide_top_k(query_type, entity_hint)
+        entity_hint = self._extract_entity_hint(question)                   # key word 추출
+        search_query = self._build_search_query(question, entity_hint)      # 질문 정제
+        layer_filter = self._detect_layer(q, entity_hint)                   # 질문 내 포함된 단어로 계층 추출
+        ext_filter   = self._detect_extension(q, layer_filter, entity_hint) # 확장자 추출
+        query_type   = self._detect_type(q, layer_filter)                   # 질의 유형 추출(api_doc, layer_search, qa)
+        top_k        = self._decide_top_k(query_type, entity_hint)          # top_k 결정
 
         # api_doc 는 controller + java 고정
         if query_type == "api_doc":
@@ -105,11 +79,10 @@ class QueryAnalyzer:
         )
 
     # ── 내부 헬퍼 ─────────────────────────────────────────────────
-
     def _has(self, q: str, kws: tuple[str, ...]) -> bool:
         return any(k in q for k in kws)
 
-    # 확인 완료
+
     def _build_search_query(self, question: str, entity_hint: str) -> str:
         """
         임베딩 검색에 사용할 정제 쿼리 생성.
@@ -128,7 +101,6 @@ class QueryAnalyzer:
 
         return cleaned if cleaned else question
 
-    # 확인 완료
     def _extract_entity_hint(self, question: str) -> str:
         """CamelCase 클래스명, snake_case 식별자, URL 경로를 순서대로 탐색."""
         patterns = [
@@ -143,7 +115,7 @@ class QueryAnalyzer:
                 return m.group(1)
         return ""
 
-    # 확인 완료
+
     def _detect_layer(self, q: str, entity_hint: str) -> str | None:
         eh = entity_hint.lower()
         if self._has(q, _CTRL_KW)   or eh.endswith("controller"):  return "controller"
@@ -153,7 +125,6 @@ class QueryAnalyzer:
         if self._has(q, _DDL_KW)    or self._has(q, _SQL_KW):      return "ddl"
         return None
 
-    # 확인 완료
     def _detect_extension(self, q: str, layer_filter: str | None, entity_hint: str) -> str | None:
         for ext, kws in _EXT_MAP.items():
             if any(k in q for k in kws):
@@ -166,7 +137,7 @@ class QueryAnalyzer:
         if layer_filter == "ddl":                                    return "sql"
         return None
 
-    # 확인 완료
+
     def _detect_type(self, q: str, layer_filter: str | None) -> str:
         if self._has(q, _API_KW):
             return "api_doc"
@@ -174,7 +145,7 @@ class QueryAnalyzer:
             return "layer_search"
         return "qa"
 
-    # 확인 완료
+    
     def _decide_top_k(self, query_type: str, entity_hint: str) -> int:
         k = self.default_top_k
         # entity_hint가 있으면(특정 클래스/파일 지목) 범위 확대

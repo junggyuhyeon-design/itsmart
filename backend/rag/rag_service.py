@@ -15,20 +15,26 @@ logger = logging.getLogger(__name__)
 
 class RAGService:
     def __init__(self, settings: Settings) -> None:
-        self.settings          = settings
-        self.chunk_service     = ChunkService(settings)
+        self.settings = settings
+        self.chunk_service = ChunkService(settings)
         self.embedding_service = EmbeddingService(settings)
-        self.qdrant_service    = QdrantService(settings)
-        self.ollama_service    = OllamaService(settings)
+        self.qdrant_service = QdrantService(settings)
+        self.ollama_service = OllamaService(settings)
 
     # ── 인덱싱 ──────────────────────────────────────────────────
-    # 확인 완료
     def index_files(self, targets: list) -> dict:
         self.qdrant_service.ensure_collection(self.embedding_service.dimension)
         results: dict = {"success": 0, "failed": 0, "total_chunks": 0, "logs": []}
         indexed_meta: list[dict] = []
 
         for t in targets:
+            # ? target 정보 :
+            # original_name : 파일명
+            # saved_path    : 저장경로(절대)
+            # relative_path : 저장경로(상대)
+            # extension     : 확장자
+            # project_id    : 프로젝트아이디
+            # project_name  : 프로젝트명
             rel_path = t.get("relative_path", "unknown")
             try:
                 # 파일 파싱
@@ -36,32 +42,54 @@ class RAGService:
                 if not parsed:
                     results["logs"].append(f"⚠️ {rel_path}: 파싱 결과 없음")
                     continue
+                # ? parsed 정보 :
+                # raw_text      : 파일 원문데이터
+                # project_id    : 프로젝트아이디
+                # project_name  : 프로젝트명
+                # file_name     : 파일명
+                # extension     : 확장자
+                # relative_path : 저장경로
+                # layer_type    : 계층 타입
+                # class_name    : 클래스명
 
                 # 파일 청킹
                 chunks = self.chunk_service.split_text(parsed["raw_text"], parsed)
                 if not chunks:
                     results["logs"].append(f"⚠️ {rel_path}: 생성된 청크 없음")
                     continue
+                # ? chunk 정보 :
+                # project_id    : 프로젝트아이디
+                # project_name  : 프로젝트명
+                # text          : seg 텍스트
+                # file_name     : 파일명
+                # extension     : 확장자
+                # relative_path : 저장경로
+                # chunk_index   : 인덱스
+                # layer_type    : 계층 타입
+                # class_name    : 클래스명
 
-                # 파일 벡터화
-                vectors = self.embedding_service.embed_texts([c["text"] for c in chunks])
+                # 파일 벡터화(BAAI/bge-m3)
+                vectors = self.embedding_service.embed_texts(
+                    [c["text"] for c in chunks]
+                )
 
-                # Qdrant 저장
-                count   = self.qdrant_service.upsert_chunks(chunks, vectors)
+                # Qdrant 저장(Qdrant)
+                count = self.qdrant_service.upsert_chunks(chunks, vectors)
 
-                results["success"]      += 1
+                results["success"] += 1
                 results["total_chunks"] += count
                 results["logs"].append(f"✅ {rel_path} ({count} chunks)")
 
                 # SQLite file_index 저장용 메타데이터 수집
-                indexed_meta.append({
-                    "project_id":    parsed["project_id"],
-                    "project_name":  parsed["project_name"],
-                    "file_name":     parsed["file_name"],
-                    "relative_path": parsed["relative_path"],
-                    "extension":     parsed["extension"],
-                    "file_size":     parsed.get("file_size", 0),
-                })
+                indexed_meta.append(
+                    {
+                        "project_id": parsed["project_id"],
+                        "project_name": parsed["project_name"],
+                        "file_name": parsed["file_name"],
+                        "relative_path": parsed["relative_path"],
+                        "extension": parsed["extension"],
+                    }
+                )
             except Exception as e:
                 results["failed"] += 1
                 results["logs"].append(f"❌ {rel_path}: {e}")
@@ -69,7 +97,7 @@ class RAGService:
 
         if indexed_meta:
             try:
-                saved = bulk_insert_file_index(indexed_meta)
+                saved = bulk_insert_file_index(indexed_meta)  # SQLite 저장
                 logger.info("file_index 저장 완료: %d건", saved)
             except Exception:
                 logger.exception("file_index 저장 실패 — Qdrant 인덱싱은 이미 완료됨")
@@ -77,24 +105,27 @@ class RAGService:
         return results
 
     # ── 질문 스트리밍 ────────────────────────────────────────────
-    # 확인 완료
     async def ask_with_context_stream(
         self,
-        question:         str,
-        search_query:     str,               # ← 정제된 검색 쿼리 (노이즈 제거)
-        project_id:       str | None,
-        project_name:     str | None,
-        extra_context:    str               = "",
-        chat_history:     list[dict] | None = None,
-        top_k:            int | None        = None,
-        layer_filter:     str | None        = None,
-        extension_filter: str | None        = None,
-        query_type:       str               = "qa",
+        question: str,
+        search_query: str,  # ← 정제된 검색 쿼리 (노이즈 제거)
+        project_id: str | None,
+        project_name: str | None,
+        chat_history: list[dict] | None = None,
+        top_k: int | None = None,
+        layer_filter: str | None = None,
+        extension_filter: str | None = None,
+        query_type: str = "qa",
     ):
         """Qdrant 검색 → OllamaService 스트리밍."""
         top_k = top_k or self.settings.top_k
 
+        # 정제된 질문을 BAAI/bge-m3 로 벡터화
         query_vector = self.embedding_service.embed_query(search_query)
+
+        # Qdrant 유사 벡터 검색
+        # ? hits
+        # [{"score": r.score, **r.payload} for r in results]
         hits = self.qdrant_service.search(
             query_vector,
             project_id=project_id,
@@ -104,17 +135,15 @@ class RAGService:
         )
 
         gen = self.ollama_service.generate_response_stream(
-            question=question,       # LLM에는 원문 질문 전달
-            hits=hits,
-            query_type=query_type,
+            question=question,         # LLM에는 원문 질문 전달
+            hits=hits,                 # Qdrant 에서 조회된 청크 데이터
+            query_type=query_type,     # 질문 유형
             project_name=project_name,
-            struct_context=extra_context,
-            chat_history=chat_history,
+            chat_history=chat_history, # 대화 이력
         )
         return gen, hits
 
     # ── 전체 초기화 ──────────────────────────────────────────────
-    # 확인 완료
     def reset(self) -> None:
         try:
             self.qdrant_service.reset_collection(self.embedding_service.dimension)
@@ -124,38 +153,34 @@ class RAGService:
             raise
 
     # ── DB 관계 분석 (Mermaid 생성용) ────────────────────────────
-    # 확인 완료
     def analyze_db_relations(
         self,
         targets: list,
-        entity_filter: str | None = None,  # 대문자, 파일경로/테이블명 부분 매칭
+        entity_filter: str | None = None,
     ) -> dict:
         """
         Qdrant 청크를 조회해 테이블 정의와 소스↔테이블 관계를 추출한다.
 
         entity_filter 가 있으면:
-          1. scroll_all 단계에서 relative_path/file_name 에 키워드 포함 파일만 로드
-          2. 관계 추출 단계에서 해당 키워드를 테이블명에 포함하는 관계만 추적
-          → 전체 스캔 대신 관련 청크만 처리해 성능 및 정확도 향상
+        1. scroll_all 단계에서 relative_path/file_name 에 키워드 포함 파일만 로드
+        2. 관계 추출 단계에서 해당 키워드를 테이블명에 포함하는 관계만 추적
+        → 전체 스캔 대신 관련 청크만 처리해 성능 및 정확도 향상
         """
         from collections import defaultdict
 
         project_id = targets[0].get("project_id") if targets else None
-        ef         = entity_filter.upper() if entity_filter else None
+        ef = entity_filter.upper() if entity_filter else None
 
-        # 1. Qdrant 스크롤 — entity_filter 있으면 파일 경로 기준 1차 필터
-        #    단, SQL 파일(테이블 정의)은 entity_filter 무관하게 항상 포함해야
-        #    테이블명을 인식할 수 있으므로 두 번 조회 후 합산
         if ef:
-            # 필터 대상 파일 청크 (relative_path/file_name 키워드 포함)
+            # 필터 대상 파일 청크 (relative_path/file_name/class_name 키워드 포함)
             filtered_chunks = self.qdrant_service.scroll_all(
                 project_id=project_id,
-                relative_path_keyword=ef,
+                keyword_hint=ef,
             )
             # SQL 파일 청크 (테이블 정의 확보 — 키워드 무관)
             sql_chunks = self.qdrant_service.scroll_all(
                 project_id=project_id,
-                relative_path_keyword=".sql",  # .sql 파일만
+                keyword_hint=".sql",  # .sql 파일만
             )
             # 중복 제거 후 합산 (relative_path + chunk_index 기준)
             seen: set[str] = set()
@@ -175,16 +200,23 @@ class RAGService:
             chunk_text = chunk.get("text") or ""
             if not chunk_text.strip():
                 continue
-            parsed_files.append({
-                "relative_path": chunk.get("relative_path", ""),
-                "file_name":     chunk.get("file_name", ""),
-                "extension":     (chunk.get("extension") or "").lower(),
-                "raw_text":      chunk_text,
-                "raw_upper":     chunk_text.upper(),
-            })
+            parsed_files.append(
+                {
+                    "relative_path": chunk.get("relative_path", ""),
+                    "file_name": chunk.get("file_name", ""),
+                    "extension": (chunk.get("extension") or "").lower(),
+                    "raw_text": chunk_text,
+                    "raw_upper": chunk_text.upper(),
+                }
+            )
 
         if not parsed_files:
-            return {"tables": [], "table_definitions": {}, "relations": [], "source_to_tables": {}}
+            return {
+                "tables": [],
+                "table_definitions": {},
+                "relations": [],
+                "source_to_tables": {},
+            }
 
         file_texts: dict[str, dict] = {}
         for pf in parsed_files:
@@ -192,19 +224,17 @@ class RAGService:
             if path not in file_texts:
                 file_texts[path] = dict(pf)
             else:
-                # 텍스트 누적 후 raw_upper 재계산
-                file_texts[path]["raw_text"]  += "\n" + pf["raw_text"]
-                file_texts[path]["raw_upper"]  = file_texts[path]["raw_text"].upper()
+                file_texts[path]["raw_text"] += "\n" + pf["raw_text"]
+                file_texts[path]["raw_upper"] = file_texts[path]["raw_text"].upper()
 
         merged_files = list(file_texts.values())
 
-        # 3. 테이블 정의 추출 (전체 SQL 파일 기준)
-        table_names, table_definitions, _ = self._extract_table_definitions(merged_files)
+        # 3. 테이블 정의 추출 (조합된 파일)
+        # 테이블 이름, 테이블정의 파일매핑, 테이블 상세정보 리스트
+        table_names, table_definitions, _ = self._extract_table_definitions(
+            merged_files
+        )
 
-        # entity_filter 가 있으면 관련 테이블만 추적
-        #   - 테이블명에 ef 포함 → 직접 대상
-        #   - 나머지는 1-hop 확장(직접 대상 테이블을 사용하는 파일이 쓰는 다른 테이블)은
-        #     generate_source_to_table_mermaid 의 후처리에서 처리
         target_tables = table_names  # 기본: 전체
         if ef:
             target_tables = {t for t in table_names if ef in t}
@@ -214,29 +244,41 @@ class RAGService:
 
         # 4. 관계 추출
         relations: list[dict] = []
-        source_to_tables: dict = defaultdict(lambda: defaultdict(lambda: {
-            "ops": set(), "categories": set(), "scopes": set(),
-        }))
+        source_to_tables: dict = defaultdict(
+            lambda: defaultdict(
+                lambda: {
+                    "ops": set(),
+                    "categories": set(),
+                    "scopes": set(),
+                }
+            )
+        )
 
         for file_info in merged_files:
-            entities = self._extract_entities(file_info["raw_text"], file_info["extension"])
+            entities = self._extract_entities(
+                file_info["raw_text"], file_info["extension"]
+            )
             for entity in entities:
                 entity_text_upper = entity["text"].upper()
                 for table in target_tables:
+                    # 파일 내에서 target 테이블이 어떻게 연산되고있는지 추출
                     usage_ops = self._detect_table_usage(entity_text_upper, table)
                     if not usage_ops:
                         continue
                     categories = {self._map_op_category(op) for op in usage_ops}
-                    relations.append({
-                        "file":        file_info["relative_path"],
-                        "file_name":   Path(file_info["relative_path"]).name
-                                       if file_info["relative_path"] else file_info["file_name"],
-                        "entity_type": entity["type"],
-                        "entity_name": entity["name"],
-                        "table":       table,
-                        "operations":  sorted(usage_ops),
-                        "categories":  sorted(categories),
-                    })
+                    relations.append(
+                        {
+                            "file": file_info["relative_path"],
+                            "file_name": file_info["file_name"],
+                            "entity_type": entity["type"],
+                            "entity_name": entity["name"],
+                            "table": table,
+                            "operations": sorted(
+                                usage_ops
+                            ),  # insert, update, delete, merge ..
+                            "categories": sorted(categories),  # READS, WRITES, JOINS ..
+                        }
+                    )
                     bucket = source_to_tables[file_info["relative_path"]][table]
                     bucket["ops"].update(usage_ops)
                     bucket["categories"].update(categories)
@@ -259,22 +301,21 @@ class RAGService:
                 table: {
                     "operations": sorted(meta["ops"]),
                     "categories": sorted(meta["categories"]),
-                    "scopes":     sorted(meta["scopes"]),
+                    "scopes": sorted(meta["scopes"]),
                 }
                 for table, meta in table_map.items()
             }
 
         return {
-            "tables":            sorted(target_tables),
+            "tables": sorted(target_tables),
             "table_definitions": table_definitions,
-            "relations":         relations,
-            "source_to_tables":  normalized,
+            "relations": relations,
+            "source_to_tables": normalized,
         }
 
-    # 확인 완료 [개선 필요]
     def generate_source_to_table_mermaid(
-            self, 
-            db_data: dict, 
+        self,
+        db_data: dict,
     ) -> str:
         """
         analyze_db_relations() 결과를 Mermaid flowchart 코드로 변환.
@@ -292,7 +333,9 @@ class RAGService:
             text = text.replace(" ", "_")
             return self._escape_mermaid(text)
 
-        def _safe_edge_label(categories: list[str] | None, operations: list[str] | None) -> str:
+        def _safe_edge_label(
+            categories: list[str] | None, operations: list[str] | None
+        ) -> str:
             categories = categories or []
             operations = operations or []
 
@@ -319,7 +362,13 @@ class RAGService:
             파일명 키워드 기반으로 한정 필터링한다.
             """
             name = Path(file_path or "").name.lower()
-            ddl_names = ("init.sql", "schema.sql", "ddl.sql", "create.sql", "tables.sql")
+            ddl_names = (
+                "init.sql",
+                "schema.sql",
+                "ddl.sql",
+                "create.sql",
+                "tables.sql",
+            )
             return name in ddl_names
 
         # 1) 실제 사용할 파일/테이블/엔티티 수집
@@ -369,9 +418,7 @@ class RAGService:
         # source_to_tables 기준으로 빠진 file -> table 관계 보강
         # relations 에 이미 같은 file/table/entity_type=file 조합이 있으면 중복 추가하지 않음
         existing_file_table_edges = {
-            (e["file"], e["table"])
-            for e in edge_rows
-            if e["entity_type"] == "file"
+            (e["file"], e["table"]) for e in edge_rows if e["entity_type"] == "file"
         }
 
         for file_path, table_map in source_to_tables.items():
@@ -393,7 +440,10 @@ class RAGService:
                 # file 스코프가 명시되어 있으면 file -> table 관계로 보강
                 has_file_scope = any(str(s).startswith("file:") for s in scopes)
 
-                if has_file_scope and (file_path, table) not in existing_file_table_edges:
+                if (
+                    has_file_scope
+                    and (file_path, table) not in existing_file_table_edges
+                ):
                     edge_rows.append(
                         {
                             "file": file_path,
@@ -474,14 +524,10 @@ class RAGService:
 
         return "\n".join(lines)
 
-    # def _find_mentioned_tables(self, text_upper: str, table_names: list[str]) -> list[str]:
-    #     return [t for t in table_names if re.search(rf"\b{re.escape(t)}\b", text_upper)]
-
-    # 확인 완료
     def _extract_table_definitions(self, parsed_files: list[dict]):
-        table_names:       set[str]        = set()
-        table_definitions: dict[str, str]  = {}
-        table_details:     dict[str, dict] = {}
+        table_names: set[str] = set()
+        table_definitions: dict[str, str] = {}
+        table_details: dict[str, dict] = {}
 
         sql_candidates = sorted(
             [f for f in parsed_files if f["extension"] == "sql"],
@@ -499,34 +545,33 @@ class RAGService:
         )
 
         for file_info in sql_candidates:
-            text        = file_info["raw_text"]
+            text = file_info["raw_text"]
             source_file = file_info["relative_path"]
             for match in create_table_header.finditer(text):
                 table_upper = match.group(1).upper()
-                open_paren  = match.end() - 1
+                open_paren = match.end() - 1
                 close_paren = self._find_balanced_paren_end(text, open_paren)
                 if close_paren is None:
                     continue
-                body    = text[open_paren + 1: close_paren]
+                body = text[open_paren + 1 : close_paren]
                 columns = self._parse_column_names(body)
                 table_names.add(table_upper)
                 table_definitions.setdefault(table_upper, source_file)
                 if table_upper not in table_details:
                     table_details[table_upper] = {
-                        "table_name":   table_upper,
-                        "source_file":  source_file,
-                        "columns":      columns,
+                        "table_name": table_upper,
+                        "source_file": source_file,
+                        "columns": columns,
                         "column_count": len(columns),
                     }
                 elif columns:
                     existing = table_details[table_upper]
-                    merged   = list(dict.fromkeys(existing["columns"] + columns))
-                    existing["columns"]      = merged
+                    merged = list(dict.fromkeys(existing["columns"] + columns))
+                    existing["columns"] = merged
                     existing["column_count"] = len(merged)
 
         return table_names, table_definitions, list(table_details.values())
 
-    # 확인 완료
     def _find_balanced_paren_end(self, text: str, open_index: int) -> int | None:
         if open_index >= len(text) or text[open_index] != "(":
             return None
@@ -536,28 +581,41 @@ class RAGService:
             ch = text[i]
             if in_single:
                 if ch == "'" and i + 1 < len(text) and text[i + 1] == "'":
-                    i += 2; continue
-                if ch == "'": in_single = False
+                    i += 2
+                    continue
+                if ch == "'":
+                    in_single = False
             elif in_double:
                 if ch == '"' and i + 1 < len(text) and text[i + 1] == '"':
-                    i += 2; continue
-                if ch == '"': in_double = False
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_double = False
             else:
-                if   ch == "'": in_single = True
-                elif ch == '"': in_double = True
-                elif ch == "(": depth += 1
+                if ch == "'":
+                    in_single = True
+                elif ch == '"':
+                    in_double = True
+                elif ch == "(":
+                    depth += 1
                 elif ch == ")":
                     depth -= 1
-                    if depth == 0: return i
+                    if depth == 0:
+                        return i
             i += 1
         return None
 
-    # 확인 완료
+
     def _parse_column_names(self, table_body: str) -> list[str]:
         columns = []
         skip_prefixes = (
-            "PRIMARY KEY", "FOREIGN KEY", "UNIQUE", "CHECK",
-            "CONSTRAINT", "INDEX", "KEY ",
+            "PRIMARY KEY",
+            "FOREIGN KEY",
+            "UNIQUE",
+            "CHECK",
+            "CONSTRAINT",
+            "INDEX",
+            "KEY ",
         )
         for line in table_body.splitlines():
             line = line.strip().rstrip(",").strip()
@@ -570,9 +628,8 @@ class RAGService:
                 columns.append(m.group(1).upper())
         return columns
 
-    # 확인 완료
     def _extract_entities(self, text: str, extension: str) -> list[dict]:
-        # extension 정규화: None/"" 방어 및 소문자 보장
+        """파일 안에 어떤 클래스와 어떤 함수가 있는지 추출해서 각각을 하나의 분석 단위로 만든다"""
         extension = (extension or "").lower().strip().lstrip(".")
         entities = [{"type": "file", "name": "FILE_SCOPE", "text": text}]
         added: set[tuple] = set()
@@ -599,12 +656,12 @@ class RAGService:
             ]
         else:
             class_patterns = []
-            func_patterns  = []
+            func_patterns = []
 
         for pattern in class_patterns:
             for m in re.finditer(pattern, text, re.I):
                 name = m.group(1).strip()
-                key  = ("class", name)
+                key = ("class", name)
                 if key not in added:
                     entities.append({"type": "class", "name": name, "text": m.group(0)})
                     added.add(key)
@@ -612,54 +669,73 @@ class RAGService:
         for pattern in func_patterns:
             for m in re.finditer(pattern, text, re.I):
                 name = m.group(1).strip()
-                key  = ("function", name)
+                key = ("function", name)
                 if key not in added:
-                    entities.append({"type": "function", "name": name, "text": m.group(0)})
+                    entities.append(
+                        {"type": "function", "name": name, "text": m.group(0)}
+                    )
                     added.add(key)
 
         if extension == "xml":
             mapper_match = re.search(r'<mapper[^>]*namespace="([^"]+)"', text, re.I)
             if mapper_match:
-                entities.append({"type": "class", "name": mapper_match.group(1), "text": text})
+                entities.append(
+                    {"type": "class", "name": mapper_match.group(1), "text": text}
+                )
             for tag in ["select", "insert", "update", "delete"]:
                 for m in re.finditer(
                     rf'(?is)<{tag}\b[^>]*id="([^"]+)"[^>]*>(.*?)</{tag}>', text
                 ):
                     name = f"{tag}:{m.group(1)}"
-                    key  = ("function", name)
+                    key = ("function", name)
                     if key not in added:
-                        entities.append({"type": "function", "name": name, "text": m.group(0)})
+                        entities.append(
+                            {"type": "function", "name": name, "text": m.group(0)}
+                        )
                         added.add(key)
 
         return entities
 
-    # 확인 완료
     def _detect_table_usage(self, text_upper: str, table_upper: str) -> set[str]:
-        """table 이 text 내에서 어떤 연산으로 사용되었는지를 추출"""
+        """table이 파일 내에서 어떤 연산으로 사용되었는지를 추출"""
         escaped = re.escape(table_upper)
         ops: set[str] = set()
         # 개행·공백 여러 칸을 허용하는 패턴으로 변경
         ws = r"[\s\n\r]+"
-        if re.search(rf"\bFROM\b{ws}{escaped}\b",         text_upper): ops.add("SELECT")
-        if re.search(rf"\bJOIN\b{ws}{escaped}\b",          text_upper): ops.add("JOIN")
-        if re.search(rf"\bINSERT\s+INTO\b{ws}{escaped}\b", text_upper): ops.add("INSERT")
-        if re.search(rf"\bUPDATE\b{ws}{escaped}\b",        text_upper): ops.add("UPDATE")
-        if re.search(rf"\bDELETE\s+FROM\b{ws}{escaped}\b", text_upper): ops.add("DELETE")
-        # MERGE INTO (Oracle/SQL Server 호환)
-        if re.search(rf"\bMERGE\s+INTO\b{ws}{escaped}\b",  text_upper): ops.add("INSERT")
+        if re.search(rf"\bFROM\b{ws}{escaped}\b", text_upper):
+            ops.add("SELECT")
+        if re.search(rf"\bJOIN\b{ws}{escaped}\b", text_upper):
+            ops.add("JOIN")
+        if re.search(rf"\bINSERT\s+INTO\b{ws}{escaped}\b", text_upper):
+            ops.add("INSERT")
+        if re.search(rf"\bUPDATE\b{ws}{escaped}\b", text_upper):
+            ops.add("UPDATE")
+        if re.search(rf"\bDELETE\s+FROM\b{ws}{escaped}\b", text_upper):
+            ops.add("DELETE")
+        if re.search(rf"\bMERGE\s+INTO\b{ws}{escaped}\b", text_upper):
+            ops.add("INSERT")
         # 연산 없이 단순 참조만 있는 경우
-        if not ops and re.search(rf"\b{escaped}\b", text_upper): ops.add("REF")
+        if not ops and re.search(rf"\b{escaped}\b", text_upper):
+            ops.add("REF")
         return ops
 
-    # 확인 완료
     def _map_op_category(self, op: str) -> str:
-        return {"SELECT": "READS", "INSERT": "WRITES", "UPDATE": "WRITES",
-                "DELETE": "WRITES", "JOIN": "JOINS"}.get(op, "REF")
+        return {
+            "SELECT": "READS",
+            "INSERT": "WRITES",
+            "UPDATE": "WRITES",
+            "DELETE": "WRITES",
+            "JOIN": "JOINS",
+        }.get(op, "REF")
 
-    # 확인 완료
+
     def _escape_mermaid(self, text: str) -> str:
         return (
             str(text)
-            .replace('"', "'").replace("{", "(").replace("}", ")")
-            .replace("[", "(").replace("]", ")").replace("\n", " ")
+            .replace('"', "'")
+            .replace("{", "(")
+            .replace("}", ")")
+            .replace("[", "(")
+            .replace("]", ")")
+            .replace("\n", " ")
         )

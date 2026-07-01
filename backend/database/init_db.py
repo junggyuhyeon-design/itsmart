@@ -19,10 +19,6 @@ DB_PATH = Path("/data/db/codemind.db")
 def get_connection() -> sqlite3.Connection:
     """
     SQLite 커넥션 반환.
-    - check_same_thread=False : FastAPI/uvicorn 멀티스레드 환경에서 안전하게 사용
-    - timeout=10              : 다른 스레드 쓰기 락 대기 최대 10초
-    PRAGMA foreign_keys 는 커넥션별로 설정해야 하므로 여기서 적용한다.
-    (executescript() 는 암묵적 COMMIT 을 먼저 실행하므로 PRAGMA 가 무시됨)
     """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(
@@ -59,7 +55,6 @@ def init_db() -> None:
 
                 -- ZIP 내 개별 파일 메타데이터 (uploaded_files 와 1:N)
                 CREATE TABLE IF NOT EXISTS file_index (
-                    id            INTEGER  PRIMARY KEY AUTOINCREMENT,
                     project_id    TEXT     NOT NULL
                                            REFERENCES uploaded_files(project_id)
                                            ON DELETE CASCADE,
@@ -67,7 +62,6 @@ def init_db() -> None:
                     file_name     TEXT     NOT NULL,
                     relative_path TEXT     NOT NULL,
                     extension     TEXT     NOT NULL,
-                    file_size     INTEGER  NOT NULL DEFAULT 0,
                     indexed_at    DATETIME DEFAULT (datetime('now', 'localtime'))
                 );
 
