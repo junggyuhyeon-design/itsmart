@@ -33,9 +33,9 @@ class OllamaService:
             "messages": messages,
             "stream": True,
             "options": {
-                "temperature": 0.1,  # 사실 기반 답변 고정
+                "temperature": 0.1,      # 사실 기반 답변 고정
                 "repeat_penalty": 1.05,  # 너무 높으면 되레 다른 표현으로 같은 내용 반복함
-                "repeat_last_n": 256,  # 반복 억제 탐지 범위 (토큰)
+                "repeat_last_n": 256,    # 반복 억제 탐지 범위 (토큰)
                 "stop": [
                     "예상 질문",
                     "추가 질문",

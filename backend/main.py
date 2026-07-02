@@ -292,15 +292,15 @@ async def ask(
     service = get_rag_service(request)
     try:
         gen, _ = await service.ask_with_context_stream(
-            question=question.strip(),  # 질문 원문
+            question=question.strip(),         # 질문 원문
             search_query=intent.search_query,  # 정제된 질문
-            project_id=project_id,  # 프로젝트아이디
-            project_name=project_name,  # 프로젝트명
-            chat_history=chat_history,  # 대화 이력
-            top_k=intent.top_k,  # top_k
+            project_id=project_id,             # 프로젝트아이디
+            project_name=project_name,         # 프로젝트명
+            chat_history=chat_history,         # 대화 이력
+            top_k=intent.top_k,                # top_k
             layer_filter=intent.layer_filter,  # 계층 필터
             extension_filter=intent.extension_filter,  # 확장자 필터
-            query_type=intent.query_type,  # 질문유형
+            query_type=intent.query_type,      # 질문유형
         )
         return StreamingResponse(gen, media_type="text/plain")  # 스트리밍으로 받아옴
 

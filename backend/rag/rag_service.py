@@ -2,6 +2,10 @@ import logging
 import re
 from pathlib import Path
 
+import sqlglot
+import sqlglot.expressions as sg_exp
+from sqlglot import ErrorLevel
+
 from config import Settings
 from database.history_repository import bulk_insert_file_index
 from embedder.embedder import EmbeddingService
@@ -171,6 +175,8 @@ class RAGService:
         project_id = targets[0].get("project_id") if targets else None
         ef = entity_filter.upper() if entity_filter else None
 
+        logger.info(f"Analyzing DB relations for project: {project_id}, entity filter: {ef}")
+
         if ef:
             # 필터 대상 파일 청크 (relative_path/file_name/class_name 키워드 포함)
             filtered_chunks = self.qdrant_service.scroll_all(
@@ -206,7 +212,6 @@ class RAGService:
                     "file_name": chunk.get("file_name", ""),
                     "extension": (chunk.get("extension") or "").lower(),
                     "raw_text": chunk_text,
-                    "raw_upper": chunk_text.upper(),
                 }
             )
 
@@ -225,7 +230,6 @@ class RAGService:
                 file_texts[path] = dict(pf)
             else:
                 file_texts[path]["raw_text"] += "\n" + pf["raw_text"]
-                file_texts[path]["raw_upper"] = file_texts[path]["raw_text"].upper()
 
         merged_files = list(file_texts.values())
 
@@ -234,6 +238,8 @@ class RAGService:
         table_names, table_definitions, _ = self._extract_table_definitions(
             merged_files
         )
+
+        logger.info(f"Extracted {len(table_names)} tables from {len(merged_files)} files.")
 
         target_tables = table_names  # 기본: 전체
         if ef:
@@ -259,10 +265,10 @@ class RAGService:
                 file_info["raw_text"], file_info["extension"]
             )
             for entity in entities:
-                entity_text_upper = entity["text"].upper()
                 for table in target_tables:
                     # 파일 내에서 target 테이블이 어떻게 연산되고있는지 추출
-                    usage_ops = self._detect_table_usage(entity_text_upper, table)
+                    # sqlglot 기반으로 교체 — 원문 텍스트 그대로 전달
+                    usage_ops = self._detect_table_usage(entity["text"], table)
                     if not usage_ops:
                         continue
                     categories = {self._map_op_category(op) for op in usage_ops}
@@ -286,7 +292,7 @@ class RAGService:
 
             if file_info["relative_path"] not in source_to_tables:
                 for table in target_tables:
-                    if re.search(rf"\b{re.escape(table)}\b", file_info["raw_upper"]):
+                    if re.search(rf"\b{re.escape(table)}\b", file_info["raw_text"], re.I):
                         bucket = source_to_tables[file_info["relative_path"]][table]
                         if not bucket["ops"]:
                             bucket["ops"].add("REF")
@@ -525,6 +531,16 @@ class RAGService:
         return "\n".join(lines)
 
     def _extract_table_definitions(self, parsed_files: list[dict]):
+        """
+        .sql 파일에서 CREATE TABLE 구문을 파싱해 테이블명·컬럼 정보를 추출한다.
+
+        [sqlglot 교체]
+        기존: 정규식 + _find_balanced_paren_end() + _parse_column_names() 직접 구현
+        변경: sqlglot.parse() → exp.Create / exp.Schema AST 노드 탐색
+            - 중첩 괄호·문자열 리터럴 처리를 sqlglot에 위임
+            - IF NOT EXISTS, 스키마 한정자(schema.table), 백틱·따옴표 식별자 자동 처리
+            - 30개 이상의 SQL dialect 자동 대응
+        """
         table_names: set[str] = set()
         table_definitions: dict[str, str] = {}
         table_details: dict[str, dict] = {}
@@ -537,26 +553,44 @@ class RAGService:
             ),
         )
 
-        create_table_header = re.compile(
-            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
-            r"(?:[`\"\[]?[\w]+[`\"\]]?\.)?"
-            r"[`\"\[]?([a-zA-Z0-9_]+)[`\"\]]?\s*\(",
-            re.I,
-        )
-
         for file_info in sql_candidates:
-            text = file_info["raw_text"]
             source_file = file_info["relative_path"]
-            for match in create_table_header.finditer(text):
-                table_upper = match.group(1).upper()
-                open_paren = match.end() - 1
-                close_paren = self._find_balanced_paren_end(text, open_paren)
-                if close_paren is None:
+            try:
+                stmts = sqlglot.parse(
+                    file_info["raw_text"],
+                    error_level=ErrorLevel.IGNORE,
+                )
+            except Exception:
+                logger.debug("sqlglot 파싱 실패 (무시): %s", source_file)
+                continue
+
+            for stmt in stmts:
+                if stmt is None:
                     continue
-                body = text[open_paren + 1 : close_paren]
-                columns = self._parse_column_names(body)
+                # CREATE TABLE … (…) 구문만 대상
+                if not isinstance(stmt, sg_exp.Create):
+                    continue
+                schema_node = stmt.this
+                if not isinstance(schema_node, sg_exp.Schema):
+                    continue
+
+                # 테이블명 추출 (schema.table → table 부분만)
+                table_node = schema_node.this
+                table_upper = table_node.name.upper()
+                if not table_upper:
+                    continue
+
+                # 컬럼명 추출 — ColumnDef 노드만 (PRIMARY KEY, CONSTRAINT 등 제외)
+                columns: list[str] = []
+                for expr in schema_node.expressions:
+                    if isinstance(expr, sg_exp.ColumnDef):
+                        col_name = expr.this.name.upper()
+                        if col_name:
+                            columns.append(col_name)
+
                 table_names.add(table_upper)
                 table_definitions.setdefault(table_upper, source_file)
+
                 if table_upper not in table_details:
                     table_details[table_upper] = {
                         "table_name": table_upper,
@@ -571,62 +605,6 @@ class RAGService:
                     existing["column_count"] = len(merged)
 
         return table_names, table_definitions, list(table_details.values())
-
-    def _find_balanced_paren_end(self, text: str, open_index: int) -> int | None:
-        if open_index >= len(text) or text[open_index] != "(":
-            return None
-        depth, in_single, in_double = 0, False, False
-        i = open_index
-        while i < len(text):
-            ch = text[i]
-            if in_single:
-                if ch == "'" and i + 1 < len(text) and text[i + 1] == "'":
-                    i += 2
-                    continue
-                if ch == "'":
-                    in_single = False
-            elif in_double:
-                if ch == '"' and i + 1 < len(text) and text[i + 1] == '"':
-                    i += 2
-                    continue
-                if ch == '"':
-                    in_double = False
-            else:
-                if ch == "'":
-                    in_single = True
-                elif ch == '"':
-                    in_double = True
-                elif ch == "(":
-                    depth += 1
-                elif ch == ")":
-                    depth -= 1
-                    if depth == 0:
-                        return i
-            i += 1
-        return None
-
-
-    def _parse_column_names(self, table_body: str) -> list[str]:
-        columns = []
-        skip_prefixes = (
-            "PRIMARY KEY",
-            "FOREIGN KEY",
-            "UNIQUE",
-            "CHECK",
-            "CONSTRAINT",
-            "INDEX",
-            "KEY ",
-        )
-        for line in table_body.splitlines():
-            line = line.strip().rstrip(",").strip()
-            if not line or line.startswith("--"):
-                continue
-            if line.upper().startswith(skip_prefixes):
-                continue
-            m = re.match(r"^[`\"\[]?([a-zA-Z0-9_]+)[`\"\]]?", line)
-            if m:
-                columns.append(m.group(1).upper())
-        return columns
 
     def _extract_entities(self, text: str, extension: str) -> list[dict]:
         """파일 안에 어떤 클래스와 어떤 함수가 있는지 추출해서 각각을 하나의 분석 단위로 만든다"""
@@ -696,27 +674,72 @@ class RAGService:
 
         return entities
 
-    def _detect_table_usage(self, text_upper: str, table_upper: str) -> set[str]:
-        """table이 파일 내에서 어떤 연산으로 사용되었는지를 추출"""
-        escaped = re.escape(table_upper)
+    def _detect_table_usage(self, text: str, table_upper: str) -> set[str]:
+        """
+        소스 텍스트 안에서 특정 테이블이 어떤 SQL 연산으로 사용되는지 추출한다.
+
+        전략:
+        1. 순수 SQL(extension=sql) 청크 → sqlglot AST 파싱으로 정확히 분류
+        2. MyBatis XML 청크(#{} 파라미터, <where> 태그 혼재) → sqlglot이 Alias 등
+           잘못된 노드로 파싱해 테이블을 못 찾음 → 정규식으로만 처리
+        3. Java 소스 → 문자열 리터럴 안 SQL이므로 정규식으로만 처리
+
+        따라서:
+        - sqlglot이 실제 테이블을 찾은 경우에만 AST 결과를 사용
+        - 못 찾은 경우(ops 비어있음) → 정규식 폴백 (XML/Java 포함 모든 케이스 커버)
+        """
         ops: set[str] = set()
-        # 개행·공백 여러 칸을 허용하는 패턴으로 변경
-        ws = r"[\s\n\r]+"
-        if re.search(rf"\bFROM\b{ws}{escaped}\b", text_upper):
-            ops.add("SELECT")
-        if re.search(rf"\bJOIN\b{ws}{escaped}\b", text_upper):
-            ops.add("JOIN")
-        if re.search(rf"\bINSERT\s+INTO\b{ws}{escaped}\b", text_upper):
-            ops.add("INSERT")
-        if re.search(rf"\bUPDATE\b{ws}{escaped}\b", text_upper):
-            ops.add("UPDATE")
-        if re.search(rf"\bDELETE\s+FROM\b{ws}{escaped}\b", text_upper):
-            ops.add("DELETE")
-        if re.search(rf"\bMERGE\s+INTO\b{ws}{escaped}\b", text_upper):
-            ops.add("INSERT")
-        # 연산 없이 단순 참조만 있는 경우
-        if not ops and re.search(rf"\b{escaped}\b", text_upper):
-            ops.add("REF")
+
+        # ── 1. sqlglot AST 파싱 시도 (순수 SQL에만 효과적) ────────
+        try:
+            stmts = sqlglot.parse(text, error_level=ErrorLevel.IGNORE)
+            for stmt in stmts:
+                if stmt is None:
+                    continue
+                # SELECT: From 노드 직계 Table만 (Join Table 중복 방지)
+                for frm in stmt.find_all(sg_exp.From):
+                    for tbl in frm.find_all(sg_exp.Table):
+                        if tbl.name.upper() == table_upper:
+                            ops.add("SELECT")
+                # JOIN: Join 노드 직계 Table
+                for jn in stmt.find_all(sg_exp.Join):
+                    for tbl in jn.find_all(sg_exp.Table):
+                        if tbl.name.upper() == table_upper:
+                            ops.add("JOIN")
+                # INSERT/UPDATE/DELETE/MERGE: 각 노드의 직계 Table
+                for node_type, op_name in [
+                    (sg_exp.Insert, "INSERT"),
+                    (sg_exp.Update, "UPDATE"),
+                    (sg_exp.Delete, "DELETE"),
+                    (sg_exp.Merge,  "INSERT"),
+                ]:
+                    for node in stmt.find_all(node_type):
+                        # Insert.this / Update.this / Delete.this 가 Table
+                        target = node.find(sg_exp.Table)
+                        if target and target.name.upper() == table_upper:
+                            ops.add(op_name)
+        except Exception:
+            pass
+
+        # ── 2. 정규식 폴백 ─────────────────────────────────────────
+        # sqlglot이 테이블을 못 찾은 경우 항상 실행
+        # (MyBatis XML #{} 파라미터, Java 문자열 리터럴 안 SQL, 복잡한 힌트 구문 등)
+        if not ops:
+            text_upper = text.upper()
+            escaped    = re.escape(table_upper)
+            ws         = r"[\s\n\r]+"
+            if re.search(rf"\bFROM\b{ws}{escaped}\b",          text_upper): ops.add("SELECT")
+            if re.search(rf"\bJOIN\b{ws}{escaped}\b",           text_upper): ops.add("JOIN")
+            if re.search(rf"\bINSERT\s+INTO\b{ws}{escaped}\b",  text_upper): ops.add("INSERT")
+            if re.search(rf"\bUPDATE\b{ws}{escaped}\b",         text_upper): ops.add("UPDATE")
+            if re.search(rf"\bDELETE\s+FROM\b{ws}{escaped}\b",  text_upper): ops.add("DELETE")
+            if re.search(rf"\bMERGE\s+INTO\b{ws}{escaped}\b",   text_upper): ops.add("INSERT")
+
+        # ── 3. 단순 참조 폴백 ──────────────────────────────────────
+        if not ops:
+            if re.search(rf"\b{re.escape(table_upper)}\b", text.upper()):
+                ops.add("REF")
+
         return ops
 
     def _map_op_category(self, op: str) -> str:
