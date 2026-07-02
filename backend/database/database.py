@@ -1,13 +1,5 @@
 from database.init_db import get_connection, init_db
 from database.history_repository import (
-<<<<<<< HEAD
-    upsert_user,
-    save_history,
-    get_history,
-    delete_history,
-    save_uploaded_file,
-    get_all_projects,
-=======
     bulk_insert_file_index,
     delete_history,
     find_code_elements_by_name,
@@ -25,20 +17,10 @@ from database.history_repository import (
     save_uploaded_file,
     upsert_user,
     user_exists,
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9
 )
 
 __all__ = [
     "get_connection",
-<<<<<<< HEAD
-    "upsert_user",
-    "save_history",
-    "get_history",
-    "delete_history",
-    "save_uploaded_file",
-    "get_all_projects",
-]
-=======
     "init_db",
     "bulk_insert_file_index",
     "delete_history",
@@ -58,4 +40,3 @@ __all__ = [
     "upsert_user",
     "user_exists",
 ]
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9

@@ -171,17 +171,12 @@ def get_settings() -> Settings:
                 default="/data/uploads",
             )
         ),
-<<<<<<< HEAD
-        chat_history_turns=int(
-            os.environ.get("CHAT_HISTORY_TURNS", 3)
-=======
         extract_dir=Path(
             _get_env_str(
                 "EXTRACTDIR",
                 "EXTRACT_DIR",
                 default="/data/extracted",
             )
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9
         ),
         chat_history_turns=_get_env_int(
             "CHAT_HISTORY_TURNS",

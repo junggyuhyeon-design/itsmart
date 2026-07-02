@@ -10,9 +10,6 @@ from database.init_db import get_connection
 logger = logging.getLogger(__name__)
 
 
-<<<<<<< HEAD
-# ── 사용자 ───────────────────────────────────────────────────────
-=======
 def _json_dumps(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False)
@@ -54,7 +51,6 @@ def _count_lines(text: str | None) -> int:
     return normalized.count("\n") + 1
 
 
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9
 def upsert_user(user_id: str) -> None:
     if not user_id or not user_id.strip():
         raise ValueError("user_id is required")
@@ -73,9 +69,6 @@ def upsert_user(user_id: str) -> None:
         raise
 
 
-<<<<<<< HEAD
-# ── 채팅 히스토리 ────────────────────────────────────────────────
-=======
 def user_exists(user_id: str) -> bool:
     try:
         with get_connection() as conn:
@@ -93,7 +86,6 @@ def user_exists(user_id: str) -> bool:
         return False
 
 
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9
 def save_history(user_id: str, question: str, answer: str) -> int:
     try:
         with get_connection() as conn:
@@ -145,10 +137,6 @@ def delete_history(user_id: str) -> int:
         raise
 
 
-<<<<<<< HEAD
-# ── 공통 업로드 파일 ─────────────────────────────────────────────
-=======
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9
 def save_uploaded_file(project_id: str, project_name: str, saved_path: str) -> str:
     try:
         with get_connection() as conn:
@@ -165,10 +153,6 @@ def save_uploaded_file(project_id: str, project_name: str, saved_path: str) -> s
         raise
 
 
-<<<<<<< HEAD
-def get_all_projects() -> list[dict[str, Any]]:
-    """전체 프로젝트 목록 반환."""
-=======
 def get_uploaded_files() -> list[dict[str, Any]]:
     try:
         with get_connection() as conn:
@@ -203,7 +187,6 @@ def get_uploaded_files_by_project_id(project_id: str) -> dict[str, Any] | None:
 
 
 def get_all_projects() -> list[dict[str, Any]]:
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9
     try:
         with get_connection() as conn:
             rows = conn.execute(
@@ -219,22 +202,9 @@ def get_all_projects() -> list[dict[str, Any]]:
         return []
 
 
-<<<<<<< HEAD
-# ── file_index ───────────────────────────────────────────────────
-=======
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9
 def bulk_insert_file_index(files: list[dict[str, Any]]) -> int:
     if not files:
         return 0
-<<<<<<< HEAD
-    rows = [
-        (
-            f["project_id"],
-            f["project_name"],
-            f["file_name"],
-            f["relative_path"],
-            f["extension"],
-=======
 
     normalized_rows = []
     for f in files:
@@ -254,21 +224,10 @@ def bulk_insert_file_index(files: list[dict[str, Any]]) -> int:
                 extension,
                 file_size,
             )
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9
         )
 
     try:
         with get_connection() as conn:
-<<<<<<< HEAD
-            project_ids = list({r[0] for r in rows})
-            for pid in project_ids:
-                conn.execute("DELETE FROM file_index WHERE project_id = ?", (pid,))
-            conn.executemany(
-                """
-                INSERT INTO file_index
-                    (project_id, project_name, file_name, relative_path, extension)
-                VALUES (?, ?, ?, ?, ?)
-=======
             project_ids = list({r[0] for r in normalized_rows if r[0]})
             for pid in project_ids:
                 conn.execute(
@@ -284,7 +243,6 @@ def bulk_insert_file_index(files: list[dict[str, Any]]) -> int:
                 INSERT INTO file_index
                 (project_id, project_name, file_name, relative_path, extension, file_size)
                 VALUES (?, ?, ?, ?, ?, ?)
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9
                 """,
                 normalized_rows,
             )
@@ -300,7 +258,7 @@ def get_file_index(project_id: str, extension: str | None = None) -> list[dict[s
             if extension:
                 rows = conn.execute(
                     """
-                    SELECT file_name, relative_path, extension, indexed_at
+                    SELECT file_name, relative_path, extension, file_size, indexed_at
                     FROM file_index
                     WHERE project_id = ? AND extension = ?
                     ORDER BY relative_path
@@ -310,7 +268,7 @@ def get_file_index(project_id: str, extension: str | None = None) -> list[dict[s
             else:
                 rows = conn.execute(
                     """
-                    SELECT file_name, relative_path, extension, indexed_at
+                    SELECT file_name, relative_path, extension, file_size, indexed_at
                     FROM file_index
                     WHERE project_id = ?
                     ORDER BY extension, relative_path

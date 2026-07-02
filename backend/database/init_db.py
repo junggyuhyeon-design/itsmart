@@ -22,19 +22,7 @@ DB_PATH = _resolve_db_path()
 
 
 def get_connection() -> sqlite3.Connection:
-<<<<<<< HEAD
-    """
-    SQLite 커넥션 반환.
-    """
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(
-        str(DB_PATH),
-        check_same_thread=False,
-        timeout=10,
-    )
-=======
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -79,19 +67,6 @@ def init_db() -> None:
             """
         )
 
-<<<<<<< HEAD
-                -- ZIP 내 개별 파일 메타데이터 (uploaded_files 와 1:N)
-                CREATE TABLE IF NOT EXISTS file_index (
-                    project_id    TEXT     NOT NULL
-                                           REFERENCES uploaded_files(project_id)
-                                           ON DELETE CASCADE,
-                    project_name  TEXT     NOT NULL,
-                    file_name     TEXT     NOT NULL,
-                    relative_path TEXT     NOT NULL,
-                    extension     TEXT     NOT NULL,
-                    indexed_at    DATETIME DEFAULT (datetime('now', 'localtime'))
-                );
-=======
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS file_index (
@@ -118,7 +93,6 @@ def init_db() -> None:
             ON file_index(project_id, extension)
             """
         )
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9
 
         conn.execute(
             """
