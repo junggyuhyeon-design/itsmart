@@ -1,12 +1,14 @@
+from __future__ import annotations
+
 import logging
-import re
-from pathlib import Path
+from typing import Any
 
 from config import Settings
-from database.history_repository import bulk_insert_file_index
+from database.history_repository import bulkinsertfileindex, insertcodeelements
 from embedder.embedder import EmbeddingService
 from parser.chunk_service import ChunkService
-from parser.file_parser import parse_text_file
+from parser.file_parser import extract_static_analysis, parse_text_file
+from rag.diagram_service import DiagramService
 from rag.ollama_service import OllamaService
 from rag.qdrant_service import QdrantService
 
@@ -15,287 +17,289 @@ logger = logging.getLogger(__name__)
 
 class RAGService:
     def __init__(self, settings: Settings) -> None:
-        self.settings          = settings
-        self.chunk_service     = ChunkService(settings)
+        self.settings = settings
+        self.chunk_service = ChunkService(settings)
         self.embedding_service = EmbeddingService(settings)
-        self.qdrant_service    = QdrantService(settings)
-        self.ollama_service    = OllamaService(settings)
+        self.qdrant_service = QdrantService(settings)
+        self.ollama_service = OllamaService(settings)
+        self.diagram_service = DiagramService()
 
-    # ── 인덱싱 ──────────────────────────────────────────────────
+        self._ensure_collection()
 
-    def index_files(self, targets: list) -> dict:
-        self.qdrant_service.ensure_collection(self.embedding_service.dimension)
-        results: dict = {"success": 0, "failed": 0, "total_chunks": 0, "logs": []}
-        indexed_meta: list[dict] = []
+    def _ensure_collection(self) -> None:
+        try:
+            self.qdrant_service.ensure_collection(self.embedding_service.dimension)
+            logger.info("Qdrant collection ready: %s", self.settings.qdrant_collection)
+        except Exception:
+            logger.exception("Failed to ensure Qdrant collection")
+            raise
 
-        for t in targets:
-            rel_path = t.get("relative_path", "unknown")
-            try:
-                parsed = parse_text_file(t)
-                if not parsed:
-                    results["logs"].append(f"⚠️ {rel_path}: 파싱 결과 없음")
-                    continue
-
-                chunks = self.chunk_service.split_text(parsed["raw_text"], parsed)
-                if not chunks:
-                    results["logs"].append(f"⚠️ {rel_path}: 생성된 청크 없음")
-                    continue
-
-                vectors = self.embedding_service.embed_texts([c["text"] for c in chunks])
-                count   = self.qdrant_service.upsert_chunks(chunks, vectors)
-
-                results["success"]      += 1
-                results["total_chunks"] += count
-                results["logs"].append(f"✅ {rel_path} ({count} chunks)")
-
-                # SQLite file_index 저장용 메타데이터 수집
-                indexed_meta.append({
-                    "project_id":    parsed["project_id"],
-                    "project_name":  parsed["project_name"],
-                    "file_name":     parsed["file_name"],
-                    "relative_path": parsed["relative_path"],
-                    "extension":     parsed["extension"],
-                    "file_size":     parsed.get("file_size", 0),
-                })
-            except Exception as e:
-                results["failed"] += 1
-                results["logs"].append(f"❌ {rel_path}: {e}")
-                logger.exception("index_files 실패: %s", rel_path)
-
-        if indexed_meta:
-            try:
-                saved = bulk_insert_file_index(indexed_meta)
-                logger.info("file_index 저장 완료: %d건", saved)
-            except Exception:
-                logger.exception("file_index 저장 실패 — Qdrant 인덱싱은 이미 완료됨")
-
-        return results
-
-    # ── 질문 스트리밍 ────────────────────────────────────────────
-
-    async def ask_with_context_stream(
-        self,
-        question:         str,
-        project_id:       str | None       = None,
-        project_name:     str | None       = None,
-        extra_context:    str              = "",
-        top_k:            int | None       = None,
-        layer_filter:     str | None       = None,
-        extension_filter: str | None       = None,
-        query_type:       str              = "qa",
-        chat_history:     list[dict] | None = None,
+    async def askwithcontextstream(
+            self,
+            question: str,
+            projectid: str | None = None,
+            projectname: str | None = None,
+            extracontext: str = "",
+            sqlitecontext: str = "",
+            topk: int | None = None,
+            layerfilter: str | None = None,
+            extensionfilter: str | None = None,
+            querytype: str = "qa",
+            chathistory: list[dict] | None = None,
     ):
-        """
-        Qdrant 검색 → OllamaService 스트리밍 순으로 처리.
-        - top_k=0 이면 Qdrant 검색 스킵 (listing 분기)
-        - layer_filter / extension_filter 로 Qdrant payload 필터
-        - query_type 은 PromptBuilder의 System Prompt 선택에 사용
-        """
-        if top_k is None:
-            top_k = self.settings.top_k
+        if topk is None:
+            topk = self.settings.top_k
+
+        if querytype == "diagram" and projectid:
+            q = (question or "").lower()
+            try:
+                if any(k in q for k in ("erd", "db", "table", "schema", "mermaid")):
+                    mermaid = self.diagram_service.build_table_erd(projectid)
+                else:
+                    mermaid = self.diagram_service.build_flow_mermaid(projectid)
+
+                if mermaid and len(mermaid.splitlines()) > 1:
+                    async def mermaid_gen():
+                        yield "```mermaid\n"
+                        yield f"{mermaid}\n"
+                        yield "```"
+
+                    return mermaid_gen(), []
+            except Exception as e:
+                logger.warning("DiagramService fallback to LLM: %s", e)
 
         query_vector = self.embedding_service.embed_query(question)
         hits = self.qdrant_service.search(
             query_vector,
-            project_id=project_id,
-            top_k=top_k,
-            layer_filter=layer_filter,
-            extension_filter=extension_filter,
+            project_id=projectid,
+            top_k=topk,
+            layer_filter=layerfilter,
+            extension_filter=extensionfilter,
         )
 
         gen = self.ollama_service.generate_response_stream(
             question=question,
             hits=hits,
-            query_type=query_type,
-            project_name=project_name,
-            struct_context=extra_context,
-            chat_history=chat_history,
+            query_type=querytype,
+            project_name=projectname,
+            struct_context=extracontext,
+            chat_history=chathistory,
+            sqlite_context=sqlitecontext,
         )
         return gen, hits
 
-    # ── 전체 초기화 ──────────────────────────────────────────────
+    async def ask_with_context_stream(
+            self,
+            question: str,
+            projectid: str | None = None,
+            projectname: str | None = None,
+            extracontext: str = "",
+            sqlitecontext: str = "",
+            topk: int | None = None,
+            layerfilter: str | None = None,
+            extensionfilter: str | None = None,
+            querytype: str = "qa",
+            chathistory: list[dict] | None = None,
+    ):
+        return await self.askwithcontextstream(
+            question=question,
+            projectid=projectid,
+            projectname=projectname,
+            extracontext=extracontext,
+            sqlitecontext=sqlitecontext,
+            topk=topk,
+            layerfilter=layerfilter,
+            extensionfilter=extensionfilter,
+            querytype=querytype,
+            chathistory=chathistory,
+        )
+
+    def indexfiles(
+            self,
+            targets: list[dict],
+            progresscallback=None,
+    ) -> dict[str, Any]:
+        if not targets:
+            return {
+                "success": 0,
+                "failed": 0,
+                "totalchunks": 0,
+                "logs": ["no targets"],
+            }
+
+        success_count = 0
+        failed_count = 0
+        total_chunks = 0
+        logs: list[str] = []
+
+        file_index_rows: list[dict[str, Any]] = []
+        code_elements_by_project: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
+        total_targets = len(targets)
+
+        def report(message: str, error: str | None = None) -> None:
+            if progresscallback:
+                progresscallback(
+                    processedtargets=success_count + failed_count,
+                    successcount=success_count,
+                    failedcount=failed_count,
+                    totalchunks=total_chunks,
+                    message=message,
+                    error=error,
+                    logs=logs[-200:],
+                )
+
+        for idx, target in enumerate(targets, start=1):
+            project_id = (target.get("projectid") or target.get("project_id") or "").strip()
+            project_name = (target.get("projectname") or target.get("project_name") or "").strip()
+            saved_path = target.get("savedpath") or target.get("saved_path") or ""
+            relative_path = target.get("relativepath") or target.get("relative_path") or ""
+            filename = (
+                    target.get("filename")
+                    or target.get("originalname")
+                    or target.get("original_name")
+                    or ""
+            )
+            extension = (target.get("extension") or "").lower().strip(".")
+            size = int(target.get("size") or target.get("file_size") or 0)
+            source_type = target.get("sourcetype") or target.get("source_type") or ""
+            root_container_name = (
+                    target.get("rootcontainername")
+                    or target.get("root_container_name")
+                    or ""
+            )
+
+            file_label = relative_path or filename or saved_path or f"target-{idx}"
+            report(f"[{idx}/{total_targets}] indexing {file_label}")
+
+            try:
+                parsed = parse_text_file(
+                    {
+                        "project_id": project_id,
+                        "project_name": project_name,
+                        "saved_path": saved_path,
+                        "relative_path": relative_path,
+                        "original_name": filename,
+                        "extension": extension,
+                        "size": size,
+                        "source_type": source_type,
+                        "root_container_name": root_container_name,
+                    }
+                )
+
+                if not parsed:
+                    failed_count += 1
+                    logs.append(f"SKIP parse failed: {file_label}")
+                    report(f"parse failed: {file_label}")
+                    continue
+
+                chunks = self.chunk_service.split_text(
+                    parsed["raw_text"],
+                    {
+                        "project_id": parsed.get("project_id", project_id),
+                        "project_name": parsed.get("project_name", project_name),
+                        "file_name": parsed.get("file_name", filename),
+                        "extension": parsed.get("extension", extension),
+                        "relative_path": parsed.get("relative_path", relative_path),
+                        "saved_path": parsed.get("saved_path", saved_path),
+                        "file_path": parsed.get("file_path", saved_path),
+                        "file_size": parsed.get("file_size", size),
+                        "source_type": parsed.get("source_type", source_type),
+                        "root_container_name": parsed.get("root_container_name", root_container_name),
+                        "layer_type": parsed.get("layer_type", ""),
+                        "class_name": parsed.get("class_name", ""),
+                        "package": parsed.get("package", ""),
+                        "content_type": parsed.get("content_type", ""),
+                    },
+                )
+
+                if chunks:
+                    vectors = self.embedding_service.embed_texts([c["text"] for c in chunks])
+                    self.qdrant_service.upsert_chunks(chunks, vectors)
+                    total_chunks += len(chunks)
+
+                analysis = extract_static_analysis(
+                    {
+                        "project_id": project_id,
+                        "project_name": project_name,
+                        "saved_path": saved_path,
+                        "relative_path": relative_path,
+                        "original_name": filename,
+                        "extension": extension,
+                        "size": size,
+                        "source_type": source_type,
+                        "root_container_name": root_container_name,
+                    }
+                )
+
+                if analysis:
+                    key = (project_id, project_name)
+                    code_elements_by_project.setdefault(key, []).append(analysis)
+
+                file_index_rows.append(
+                    {
+                        "project_id": project_id,
+                        "project_name": project_name,
+                        "file_name": filename,
+                        "relative_path": relative_path,
+                        "extension": extension,
+                        "file_size": size,
+                    }
+                )
+
+                success_count += 1
+                logs.append(f"OK {file_label} ({len(chunks)} chunks)")
+                report(f"indexed: {file_label}")
+
+            except Exception as e:
+                failed_count += 1
+                logger.exception("index target failed: %s", file_label)
+                logs.append(f"FAIL {file_label}: {e}")
+                report(f"failed: {file_label}", error=str(e))
+
+        try:
+            if file_index_rows:
+                bulkinsertfileindex(file_index_rows)
+        except Exception:
+            logger.exception("bulk file index insert failed")
+            logs.append("FAIL bulk_insert_file_index")
+
+        try:
+            for (project_id, project_name), elements in code_elements_by_project.items():
+                insertcodeelements(project_id, project_name, elements)
+        except Exception:
+            logger.exception("insert code elements failed")
+            logs.append("FAIL insert_code_elements")
+
+        final_message = (
+            f"indexing completed: success={success_count}, "
+            f"failed={failed_count}, chunks={total_chunks}"
+        )
+        logs.append(final_message)
+        report(final_message)
+
+        return {
+            "success": success_count,
+            "failed": failed_count,
+            "totalchunks": total_chunks,
+            "logs": logs[-500:],
+        }
+
+    def index_files(
+            self,
+            targets: list[dict],
+            progress_callback=None,
+    ) -> dict[str, Any]:
+        return self.indexfiles(targets, progresscallback=progress_callback)
 
     def reset(self) -> None:
         try:
-            self.qdrant_service.reset_collection(self.embedding_service.dimension)
-            logger.info("RAGService reset 완료")
-        except Exception:
-            logger.exception("RAGService reset 실패")
-            raise
-
-    # ── SQL 파싱 유틸 (Mermaid 생성 보조) ────────────────────────
-
-    def _find_mentioned_tables(self, text_upper: str, table_names: list[str]) -> list[str]:
-        return [t for t in table_names if re.search(rf"\b{re.escape(t)}\b", text_upper)]
-
-    def _extract_table_definitions(self, parsed_files: list[dict]):
-        table_names:       set[str]        = set()
-        table_definitions: dict[str, str]  = {}
-        table_details:     dict[str, dict] = {}
-
-        sql_candidates = sorted(
-            [f for f in parsed_files if f["extension"] == "sql"],
-            key=lambda x: (
-                0 if Path(x["relative_path"]).name.lower() == "init.sql" else 1,
-                x["relative_path"].lower(),
-            ),
-        )
-
-        create_table_header = re.compile(
-            r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
-            r"(?:[`\"\[]?[\w]+[`\"\]]?\.)?"
-            r"[`\"\[]?([a-zA-Z0-9_]+)[`\"\]]?\s*\(",
-            re.I,
-        )
-
-        for file_info in sql_candidates:
-            text        = file_info["raw_text"]
-            source_file = file_info["relative_path"]
-            for match in create_table_header.finditer(text):
-                table_upper = match.group(1).upper()
-                open_paren  = match.end() - 1
-                close_paren = self._find_balanced_paren_end(text, open_paren)
-                if close_paren is None:
-                    continue
-                body    = text[open_paren + 1: close_paren]
-                columns = self._parse_column_names(body)
-                table_names.add(table_upper)
-                table_definitions.setdefault(table_upper, source_file)
-                if table_upper not in table_details:
-                    table_details[table_upper] = {
-                        "table_name":   table_upper,
-                        "source_file":  source_file,
-                        "columns":      columns,
-                        "column_count": len(columns),
-                    }
-                elif columns:
-                    existing = table_details[table_upper]
-                    merged   = list(dict.fromkeys(existing["columns"] + columns))
-                    existing["columns"]      = merged
-                    existing["column_count"] = len(merged)
-
-        return table_names, table_definitions, list(table_details.values())
-
-    def _find_balanced_paren_end(self, text: str, open_index: int) -> int | None:
-        if open_index >= len(text) or text[open_index] != "(":
-            return None
-        depth, in_single, in_double = 0, False, False
-        i = open_index
-        while i < len(text):
-            ch = text[i]
-            if in_single:
-                if ch == "'" and i + 1 < len(text) and text[i + 1] == "'":
-                    i += 2; continue
-                if ch == "'": in_single = False
-            elif in_double:
-                if ch == '"' and i + 1 < len(text) and text[i + 1] == '"':
-                    i += 2; continue
-                if ch == '"': in_double = False
+            if hasattr(self.qdrant_service, "reset_collection"):
+                self.qdrant_service.reset_collection(self.embedding_service.dimension)
+            elif hasattr(self.qdrant_service, "recreate_collection"):
+                self.qdrant_service.recreate_collection(self.embedding_service.dimension)
             else:
-                if   ch == "'": in_single = True
-                elif ch == '"': in_double = True
-                elif ch == "(": depth += 1
-                elif ch == ")":
-                    depth -= 1
-                    if depth == 0: return i
-            i += 1
-        return None
-
-    def _parse_column_names(self, table_body: str) -> list[str]:
-        columns = []
-        skip_prefixes = (
-            "PRIMARY KEY", "FOREIGN KEY", "UNIQUE", "CHECK",
-            "CONSTRAINT", "INDEX", "KEY ",
-        )
-        for line in table_body.splitlines():
-            line = line.strip().rstrip(",").strip()
-            if not line or line.startswith("--"):
-                continue
-            if line.upper().startswith(skip_prefixes):
-                continue
-            m = re.match(r"^[`\"\[]?([a-zA-Z0-9_]+)[`\"\]]?", line)
-            if m:
-                columns.append(m.group(1).upper())
-        return columns
-
-    def _extract_entities(self, text: str, extension: str) -> list[dict]:
-        entities = [{"type": "file", "name": "FILE_SCOPE", "text": text}]
-        added: set[tuple] = set()
-
-        if extension == "py":
-            class_patterns = [
-                r"(?ms)^class\s+([A-Za-z_][A-Za-z0-9_]*)[^\n]*:\s*(.*?)"
-                r"(?=^class\s+[A-Za-z_]|^def\s+[A-Za-z_]|$\Z)"
-            ]
-            func_patterns = [
-                r"(?ms)^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*:\s*(.*?)"
-                r"(?=^def\s+[A-Za-z_]|^class\s+[A-Za-z_]|$\Z)"
-            ]
-        elif extension == "java":
-            class_patterns = [
-                r"(?ms)\bclass\s+([A-Za-z_][A-Za-z0-9_]*)[^{]*\{(.*?)"
-                r"(?=\n\s*(?:public\s+)?class\s+[A-Za-z_]|$\Z)"
-            ]
-            func_patterns = [
-                r"(?ms)(?:public|private|protected)?\s*(?:static\s+)?[\w<>\[\], ?]+\s+"
-                r"([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*\{(.*?)"
-                r"(?=\n\s*(?:public|private|protected)?\s*(?:static\s+)?[\w<>\[\], ?]+"
-                r"\s+[A-Za-z_][A-Za-z0-9_]*\s*\(|$\Z)"
-            ]
-        else:
-            class_patterns = []
-            func_patterns  = []
-
-        for pattern in class_patterns:
-            for m in re.finditer(pattern, text, re.I):
-                name = m.group(1).strip()
-                key  = ("class", name)
-                if key not in added:
-                    entities.append({"type": "class", "name": name, "text": m.group(0)})
-                    added.add(key)
-
-        for pattern in func_patterns:
-            for m in re.finditer(pattern, text, re.I):
-                name = m.group(1).strip()
-                key  = ("function", name)
-                if key not in added:
-                    entities.append({"type": "function", "name": name, "text": m.group(0)})
-                    added.add(key)
-
-        if extension == "xml":
-            mapper_match = re.search(r'<mapper[^>]*namespace="([^"]+)"', text, re.I)
-            if mapper_match:
-                entities.append({"type": "class", "name": mapper_match.group(1), "text": text})
-            for tag in ["select", "insert", "update", "delete"]:
-                for m in re.finditer(
-                    rf'(?is)<{tag}\b[^>]*id="([^"]+)"[^>]*>(.*?)</{tag}>', text
-                ):
-                    name = f"{tag}:{m.group(1)}"
-                    key  = ("function", name)
-                    if key not in added:
-                        entities.append({"type": "function", "name": name, "text": m.group(0)})
-                        added.add(key)
-
-        return entities
-
-    def _detect_table_usage(self, text_upper: str, table_upper: str) -> set[str]:
-        escaped = re.escape(table_upper)
-        ops: set[str] = set()
-        if re.search(rf"\bFROM\b\s+{escaped}\b",          text_upper): ops.add("SELECT")
-        if re.search(rf"\bJOIN\b\s+{escaped}\b",           text_upper): ops.add("JOIN")
-        if re.search(rf"\bINSERT\s+INTO\b\s+{escaped}\b",  text_upper): ops.add("INSERT")
-        if re.search(rf"\bUPDATE\b\s+{escaped}\b",         text_upper): ops.add("UPDATE")
-        if re.search(rf"\bDELETE\s+FROM\b\s+{escaped}\b",  text_upper): ops.add("DELETE")
-        if not ops and re.search(rf"\b{escaped}\b",         text_upper): ops.add("REF")
-        return ops
-
-    def _map_op_category(self, op: str) -> str:
-        return {"SELECT": "READS", "INSERT": "WRITES", "UPDATE": "WRITES",
-                "DELETE": "WRITES", "JOIN": "JOINS"}.get(op, "REF")
-
-    def _escape_mermaid(self, text: str) -> str:
-        return (
-            str(text)
-            .replace('"', "'").replace("{", "(").replace("}", ")")
-            .replace("[", "(").replace("]", ")").replace("\n", " ")
-        )
+                self.qdrant_service.ensure_collection(self.embedding_service.dimension)
+        except Exception:
+            logger.exception("RAG reset failed")
+            raise

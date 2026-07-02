@@ -28,8 +28,6 @@ class QdrantService:
             self._client = QdrantClient(url=self.settings.qdrant_url)
         return self._client
 
-    # ── 컬렉션 관리 ─────────────────────────────────────────────
-
     def _collection_exists(self) -> bool:
         try:
             collections = self.client.get_collections().collections
@@ -49,60 +47,77 @@ class QdrantService:
             logger.exception("ensure_collection 실패")
             raise
 
-    # ── 저장 ────────────────────────────────────────────────────
-
     def upsert_chunks(self, chunks: list[dict[str, Any]], vectors: list[list[float]]) -> int:
-        """청크와 벡터를 Qdrant에 저장. 저장된 포인트 수 반환."""
         if not chunks or not vectors:
             return 0
+
         try:
-            points = [
-                PointStruct(
-                    id=hashlib.md5(
-                        f"{chunk['project_name']}:{chunk['relative_path']}:{idx}".encode()
-                    ).hexdigest(),
-                    vector=vector,
-                    payload=chunk,   # layer_type, class_name, package, content_type 포함
+            points: list[PointStruct] = []
+
+            for idx, (chunk, vector) in enumerate(zip(chunks, vectors)):
+                point_id = hashlib.md5(
+                    f"{chunk.get('project_name','')}:{chunk.get('relative_path','')}:{chunk.get('chunk_index', idx)}".encode()
+                ).hexdigest()
+
+                payload = {
+                    "project_id": chunk.get("project_id", ""),
+                    "project_name": chunk.get("project_name", ""),
+                    "file_name": chunk.get("file_name", ""),
+                    "extension": chunk.get("extension", ""),
+                    "relative_path": chunk.get("relative_path", ""),
+                    "saved_path": chunk.get("saved_path", ""),
+                    "file_path": chunk.get("file_path", chunk.get("saved_path", "")),
+                    "chunk_index": chunk.get("chunk_index", idx),
+                    "file_size": chunk.get("file_size", 0),
+                    "source_type": chunk.get("source_type", ""),
+                    "root_container_name": chunk.get("root_container_name", ""),
+                    "layer_type": chunk.get("layer_type", ""),
+                    "class_name": chunk.get("class_name", ""),
+                    "package": chunk.get("package", ""),
+                    "content_type": chunk.get("content_type", ""),
+                    "text": chunk.get("text", ""),
+                }
+
+                points.append(
+                    PointStruct(
+                        id=point_id,
+                        vector=vector,
+                        payload=payload,
+                    )
                 )
-                for idx, (chunk, vector) in enumerate(zip(chunks, vectors))
-            ]
+
             self.client.upsert(
                 collection_name=self.settings.qdrant_collection,
                 points=points,
             )
             return len(points)
+
         except Exception:
             logger.exception("upsert_chunks 실패 (chunk 수: %d)", len(chunks))
             raise
 
-    # ── 검색 ────────────────────────────────────────────────────
-
     def search(
-        self,
-        query_vector:     list[float],
-        project_id:       str | None = None,
-        top_k:            int        = 5,
-        layer_filter:     str | None = None,    # "controller" | "service" | "mapper" | "ddl" …
-        extension_filter: str | None = None,    # "java" | "xml" | "sql" …
+            self,
+            query_vector: list[float],
+            project_id: str | None = None,
+            top_k: int = 5,
+            layer_filter: str | None = None,
+            extension_filter: str | None = None,
     ) -> list[dict[str, Any]]:
-        """
-        유사 벡터 검색.
-        - top_k=0 이면 즉시 빈 리스트 반환 (listing 분기용)
-        - layer_filter / extension_filter 로 Qdrant payload 필터링
-        """
         if top_k <= 0:
             return []
+
         if not self._collection_exists():
             logger.warning("search 호출 시 컬렉션 없음 — 인덱싱 전 상태")
             return []
 
         conditions = []
         if project_id:
-            conditions.append(FieldCondition(key="project_id",  match=MatchValue(value=project_id)))
+            conditions.append(FieldCondition(key="project_id", match=MatchValue(value=project_id)))
         if layer_filter:
-            conditions.append(FieldCondition(key="layer_type",  match=MatchValue(value=layer_filter)))
+            conditions.append(FieldCondition(key="layer_type", match=MatchValue(value=layer_filter)))
         if extension_filter:
-            conditions.append(FieldCondition(key="extension",   match=MatchValue(value=extension_filter)))
+            conditions.append(FieldCondition(key="extension", match=MatchValue(value=extension_filter)))
 
         query_filter = Filter(must=conditions) if conditions else None
 
@@ -118,8 +133,6 @@ class QdrantService:
         except Exception:
             logger.exception("search 실패")
             raise
-
-    # ── 관리 ────────────────────────────────────────────────────
 
     def count_points(self) -> int:
         if not self._collection_exists():
