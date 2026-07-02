@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 
 import httpx
@@ -9,7 +11,7 @@ from rag.prompt_builder import PromptBuilder
 class OllamaService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._prompt_builder = PromptBuilder()
+        self.prompt_builder = PromptBuilder()
 
     async def generate_response_stream(
             self,
@@ -23,7 +25,7 @@ class OllamaService:
             recent_entities: list[dict] | None = None,
             sqlite_context: str = "",
     ):
-        messages = self._prompt_builder.build_messages(
+        messages = self.prompt_builder.build_messages(
             question=question,
             hits=hits,
             query_type=query_type,
@@ -44,12 +46,16 @@ class OllamaService:
 
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream("POST", url, json=payload) as response:
+                response.raise_for_status()
+
                 async for line in response.aiter_lines():
                     if not line:
                         continue
+
                     chunk = json.loads(line)
                     content = chunk.get("message", {}).get("content", "")
                     if content:
                         yield content
+
                     if chunk.get("done"):
                         break

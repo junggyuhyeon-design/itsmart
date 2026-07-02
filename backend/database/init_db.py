@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 
 
-def _resolve_db_path() -> Path:
+def resolve_db_path() -> Path:
     raw = (
             os.environ.get("SQLITE_DB_PATH")
             or os.environ.get("SQLITEDBPATH")
@@ -18,7 +18,7 @@ def _resolve_db_path() -> Path:
     return path
 
 
-DB_PATH = _resolve_db_path()
+DB_PATH = resolve_db_path()
 
 
 def get_connection() -> sqlite3.Connection:
@@ -37,7 +37,6 @@ def init_db() -> None:
             )
             """
         )
-
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS chat_history (
@@ -55,7 +54,6 @@ def init_db() -> None:
             ON chat_history(user_id, created_at DESC)
             """
         )
-
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS uploaded_files (
@@ -66,7 +64,6 @@ def init_db() -> None:
             )
             """
         )
-
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS file_index (
@@ -93,7 +90,6 @@ def init_db() -> None:
             ON file_index(project_id, extension)
             """
         )
-
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS code_elements (
@@ -136,7 +132,6 @@ def init_db() -> None:
             ON code_elements(project_id, layer_type)
             """
         )
-
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS turn_entities (
@@ -155,7 +150,6 @@ def init_db() -> None:
             ON turn_entities(user_id, created_at DESC)
             """
         )
-
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS index_jobs (
@@ -184,13 +178,4 @@ def init_db() -> None:
             ON index_jobs(user_id, created_at DESC)
             """
         )
-
         conn.commit()
-
-
-def getconnection() -> sqlite3.Connection:
-    return get_connection()
-
-
-def initdb() -> None:
-    init_db()

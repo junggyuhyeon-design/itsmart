@@ -9,29 +9,13 @@ from pathlib import Path
 
 from config import get_settings
 
-ANALYSIS_TARGET_EXTENSIONS = (
-    ".py",
-    ".java",
-    ".js",
-    ".ts",
-    ".sql",
-    ".sh",
-    ".txt",
-    ".md",
-    ".json",
-    ".xml",
-    ".yml",
-    ".yaml",
-    ".ini",
-    ".toml",
-    ".html",
-    ".htm",
-    ".css",
-)
-
-ALLOWED_EXTENSIONS = ANALYSIS_TARGET_EXTENSIONS + (".zip",)
-MAX_ZIP_UNCOMPRESSED_SIZE = 1024 * 1024 * 1024 * 2
-_INVALID_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
+ANALYSIS_TARGET_EXTENSIONS = {
+    ".py", ".java", ".js", ".ts", ".sql", ".sh", ".txt", ".md",
+    ".json", ".xml", ".yml", ".yaml", ".ini", ".toml", ".html", ".htm", ".css",
+}
+ALLOWED_EXTENSIONS = ANALYSIS_TARGET_EXTENSIONS | {".zip"}
+MAX_ZIP_UNCOMPRESSED_SIZE = 2 * 1024 * 1024 * 1024
+INVALID_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._\- ]+")
 
 
 @dataclass(frozen=True)
@@ -42,37 +26,9 @@ class AnalysisTargetFile:
     relative_path: str
     extension: str
     size: int
-    project_id: str = ""
-    project_name: str = ""
-    root_container_name: str = ""
-
-    @property
-    def sourcetype(self) -> str:
-        return self.source_type
-
-    @property
-    def originalname(self) -> str:
-        return self.original_name
-
-    @property
-    def savedpath(self) -> str:
-        return self.saved_path
-
-    @property
-    def relativepath(self) -> str:
-        return self.relative_path
-
-    @property
-    def projectid(self) -> str:
-        return self.project_id
-
-    @property
-    def projectname(self) -> str:
-        return self.project_name
-
-    @property
-    def rootcontainername(self) -> str:
-        return self.root_container_name
+    project_id: str
+    project_name: str
+    root_container_name: str
 
 
 def ensure_dir(path: Path) -> Path:
@@ -82,7 +38,7 @@ def ensure_dir(path: Path) -> Path:
 
 def safe_filename(filename: str) -> str:
     name = Path(filename).name.strip()
-    name = _INVALID_FILENAME_CHARS.sub("_", name)
+    name = INVALID_FILENAME_CHARS.sub("_", name)
     return name or "upload"
 
 
@@ -94,168 +50,97 @@ def is_allowed_upload_extension(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
 
 
-def extract_zip(zip_path: Path, extract_dir: Path) -> Path:
-    if extract_dir.exists():
-        shutil.rmtree(extract_dir)
-    ensure_dir(extract_dir)
-    extract_dir_resolved = extract_dir.resolve()
-
-    with zipfile.ZipFile(zip_path, "r") as archive:
-        total_size = sum(info.file_size for info in archive.infolist())
-        if total_size > MAX_ZIP_UNCOMPRESSED_SIZE:
-            raise ValueError(
-                f"'{zip_path.name}' 압축 해제 예상 용량({total_size} bytes)이 "
-                f"허용치({MAX_ZIP_UNCOMPRESSED_SIZE} bytes)를 초과합니다."
-            )
-
-        for member in archive.infolist():
-            target_path = (extract_dir / member.filename).resolve()
-            if (
-                    extract_dir_resolved != target_path
-                    and extract_dir_resolved not in target_path.parents
-            ):
-                raise ValueError(
-                    f"잠재적으로 위험한 zip 항목입니다. "
-                    f"(path traversal 공격 가능성): {member.filename}"
-                )
-
-        archive.extractall(extract_dir)
-
-    return extract_dir
+def _make_project_name(filename: str) -> str:
+    return Path(filename).stem.strip() or "project"
 
 
-def collect_target_files(
-        base_dir: Path,
-        project_id: str,
-        project_name: str,
-        source_type: str,
-        root_container_name: str,
-) -> list[AnalysisTargetFile]:
-    targets: list[AnalysisTargetFile] = []
-
-    if not base_dir.exists():
-        return targets
-
-    for path in sorted(base_dir.rglob("*")):
-        if path.is_file() and path.suffix.lower() in ANALYSIS_TARGET_EXTENSIONS:
-            targets.append(
-                AnalysisTargetFile(
-                    source_type=source_type,
-                    original_name=path.name,
-                    saved_path=str(path.resolve()),
-                    relative_path=path.relative_to(base_dir).as_posix(),
-                    extension=path.suffix.lstrip(".").lower(),
-                    size=path.stat().st_size,
-                    project_id=project_id,
-                    project_name=project_name,
-                    root_container_name=root_container_name,
-                )
-            )
-
-    return targets
+def _make_project_id() -> str:
+    return str(uuid.uuid4())
 
 
-def process_uploads_and_collect(
-        save_dir: Path,
-        only_filenames: list[str] | None = None,
-) -> list[AnalysisTargetFile]:
+def _collect_regular_file(saved_path: Path) -> list[AnalysisTargetFile]:
+    if not is_allowed_extension(saved_path.name):
+        return []
+
+    project_id = _make_project_id()
+    project_name = _make_project_name(saved_path.name)
+
+    return [
+        AnalysisTargetFile(
+            source_type="file",
+            original_name=saved_path.name,
+            saved_path=str(saved_path),
+            relative_path=saved_path.name,
+            extension=saved_path.suffix.lower().lstrip("."),
+            size=saved_path.stat().st_size if saved_path.exists() else 0,
+            project_id=project_id,
+            project_name=project_name,
+            root_container_name=saved_path.name,
+        )
+    ]
+
+
+def _extract_zip(saved_zip: Path, extract_root: Path) -> list[AnalysisTargetFile]:
     settings = get_settings()
-    all_targets: list[AnalysisTargetFile] = []
+    ensure_dir(extract_root)
+    project_id = _make_project_id()
+    project_name = _make_project_name(saved_zip.name)
+    target_root = extract_root / f"{project_name}_{project_id[:8]}"
 
-    extracted_root = ensure_dir(Path("/data/extracted"))
+    if target_root.exists():
+        shutil.rmtree(target_root, ignore_errors=True)
+    ensure_dir(target_root)
 
-    candidates = (
-        [save_dir / fn for fn in only_filenames]
-        if only_filenames
-        else list(save_dir.glob("*"))
-    )
+    results: list[AnalysisTargetFile] = []
 
-    for path in candidates:
+    with zipfile.ZipFile(saved_zip, "r") as archive:
+        total_uncompressed = sum(info.file_size for info in archive.infolist())
+        if total_uncompressed > MAX_ZIP_UNCOMPRESSED_SIZE:
+            raise ValueError(f"zip too large: {saved_zip.name}")
+
+        archive.extractall(target_root)
+
+    for path in target_root.rglob("*"):
         if not path.is_file():
             continue
+        if path.suffix.lower() not in ANALYSIS_TARGET_EXTENSIONS:
+            continue
 
-        ext = path.suffix.lstrip(".").lower()
-
-        if ext == "zip":
-            project_id = str(uuid.uuid4())
-            project_name = path.stem
-            extract_dir = extracted_root / project_name
-
-            try:
-                extract_zip(path, extract_dir)
-            except (zipfile.BadZipFile, ValueError) as e:
-                print(f"[WARN] ZIP 파일 처리 실패: {path.name}: {e}")
-                continue
-
-            all_targets.extend(
-                collect_target_files(
-                    extract_dir,
-                    project_id=project_id,
-                    project_name=project_name,
-                    source_type="zip_entry",
-                    root_container_name=project_name,
-                )
+        relative_path = str(path.relative_to(target_root)).replace("\\", "/")
+        results.append(
+            AnalysisTargetFile(
+                source_type="zip_entry",
+                original_name=path.name,
+                saved_path=str(path),
+                relative_path=relative_path,
+                extension=path.suffix.lower().lstrip("."),
+                size=path.stat().st_size,
+                project_id=project_id,
+                project_name=project_name,
+                root_container_name=saved_zip.name,
             )
+        )
 
-        elif path.suffix.lower() in ANALYSIS_TARGET_EXTENSIONS:
-            project_id = str(uuid.uuid4())
-            project_name = path.stem
-
-            all_targets.append(
-                AnalysisTargetFile(
-                    source_type="upload_file",
-                    original_name=path.name,
-                    saved_path=str(path.resolve()),
-                    relative_path=path.name,
-                    extension=path.suffix.lstrip(".").lower(),
-                    size=path.stat().st_size,
-                    project_id=project_id,
-                    project_name=project_name,
-                    root_container_name=project_name,
-                )
-            )
-
-    return all_targets
+    return results
 
 
-# ------------------------------------------------------------------
-# backward-compatible aliases for old imports
-# ------------------------------------------------------------------
+def process_uploads_and_collect(upload_dir: Path, saved_filenames: list[str]) -> list[AnalysisTargetFile]:
+    settings = get_settings()
+    extract_dir = Path(settings.extract_dir)
+    ensure_dir(upload_dir)
+    ensure_dir(extract_dir)
 
-def ensuredir(path: Path) -> Path:
-    return ensure_dir(path)
+    collected: list[AnalysisTargetFile] = []
 
+    for filename in saved_filenames:
+        saved_path = upload_dir / filename
+        if not saved_path.exists() or not saved_path.is_file():
+            continue
 
-def safefilename(filename: str) -> str:
-    return safe_filename(filename)
+        suffix = saved_path.suffix.lower()
+        if suffix == ".zip":
+            collected.extend(_extract_zip(saved_path, extract_dir))
+        elif suffix in ANALYSIS_TARGET_EXTENSIONS:
+            collected.extend(_collect_regular_file(saved_path))
 
-
-def isallowedextension(filename: str) -> bool:
-    return is_allowed_extension(filename)
-
-
-def isalloweduploadextension(filename: str) -> bool:
-    return is_allowed_upload_extension(filename)
-
-
-def collecttargetfiles(
-        base_dir: Path,
-        projectid: str,
-        projectname: str,
-        sourcetype: str,
-        rootcontainername: str,
-) -> list[AnalysisTargetFile]:
-    return collect_target_files(
-        base_dir=base_dir,
-        project_id=projectid,
-        project_name=projectname,
-        source_type=sourcetype,
-        root_container_name=rootcontainername,
-    )
-
-
-def processuploadsandcollect(
-        save_dir: Path,
-        only_filenames: list[str] | None = None,
-) -> list[AnalysisTargetFile]:
-    return process_uploads_and_collect(save_dir, only_filenames)
+    return collected

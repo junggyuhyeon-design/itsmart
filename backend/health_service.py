@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import httpx
 
 from config import Settings
@@ -12,25 +14,19 @@ def check_qdrant(settings: Settings) -> dict:
     }
     try:
         with httpx.Client(timeout=5.0) as client:
-            resp = client.get(f"{settings.qdrant_url}/collections")
-            if resp.is_success:
-                collections = [
-                    c["name"]
-                    for c in resp.json().get("result", {}).get("collections", [])
-                ]
+            response = client.get(f"{settings.qdrant_url}/collections")
+            if response.is_success:
+                collections = [c["name"] for c in response.json().get("result", {}).get("collections", [])]
                 collection_exists = settings.qdrant_collection in collections
                 item["status"] = "running"
-                item["message"] = (
-                    f"연결됨 · 컬렉션 '{settings.qdrant_collection}' "
-                    f"{'존재' if collection_exists else '미생성'}"
-                )
+                item["message"] = f"collection={settings.qdrant_collection}" if collection_exists else "collection missing"
                 item["collection_exists"] = collection_exists
             else:
                 item["status"] = "error"
-                item["message"] = f"HTTP {resp.status_code}"
-    except Exception as e:
+                item["message"] = f"HTTP {response.status_code}"
+    except Exception as error:
         item["status"] = "stopped"
-        item["message"] = str(e)
+        item["message"] = str(error)
     return item
 
 
@@ -43,75 +39,65 @@ def check_ollama(settings: Settings) -> dict:
     }
     try:
         with httpx.Client(timeout=5.0) as client:
-            resp = client.get(f"{settings.ollama_base_url}/api/tags")
-            if resp.is_success:
+            response = client.get(f"{settings.ollama_base_url}/api/tags")
+            if response.is_success:
                 item["status"] = "running"
-                model_count = len(resp.json().get("models", []))
-                item["message"] = f"연결됨 · 등록된 모델 {model_count}개"
+                item["message"] = f"models={len(response.json().get('models', []))}"
             else:
                 item["status"] = "error"
-                item["message"] = f"HTTP {resp.status_code}"
-    except Exception as e:
+                item["message"] = f"HTTP {response.status_code}"
+    except Exception as error:
         item["status"] = "stopped"
-        item["message"] = str(e)
+        item["message"] = str(error)
     return item
 
 
-def _ollama_model_available(settings: Settings) -> tuple[bool, list[str], str]:
+def ollama_model_available(settings: Settings) -> tuple[bool, list[str], str]:
     try:
         with httpx.Client(timeout=5.0) as client:
-            resp = client.get(f"{settings.ollama_base_url}/api/tags")
-            if not resp.is_success:
-                return False, [], f"Ollama 조회 실패 (HTTP {resp.status_code})"
+            response = client.get(f"{settings.ollama_base_url}/api/tags")
+            if not response.is_success:
+                return False, [], f"Ollama HTTP {response.status_code}"
 
-            models = [m.get("name", "") for m in resp.json().get("models", [])]
+            models = [model.get("name", "") for model in response.json().get("models", [])]
             target = settings.ollama_model
 
             if target in models:
-                return True, models, "모델 사용 가능"
+                return True, models, ""
 
             base_name = target.split(":")[0]
-            partial = [m for m in models if m.split(":")[0] == base_name]
+            partial = [model for model in models if model.split(":")[0] == base_name]
             if partial:
-                return True, models, f"유사 모델 발견: {', '.join(partial)}"
+                return True, models, f"closest models: {', '.join(partial)}"
 
-            return False, models, "모델이 pull 되지 않았습니다"
-    except Exception as e:
-        return False, [], str(e)
+            return False, models, "pull required"
+    except Exception as error:
+        return False, [], str(error)
 
 
 def check_ollama_model(settings: Settings) -> dict:
-    available, installed, message = _ollama_model_available(settings)
+    available, installed_models, message = ollama_model_available(settings)
     return {
         "name": settings.ollama_model,
         "kind": "llm",
         "provider": "Ollama",
         "status": "available" if available else "missing",
         "message": message,
-        "installed_models": installed,
+        "installed_models": installed_models,
     }
 
 
 def check_embedding_model(settings: Settings, rag_initialized: bool) -> dict:
-    item = {
+    return {
         "name": settings.embedding_model,
         "kind": "embedding",
         "provider": "HuggingFace",
+        "status": "loaded" if rag_initialized else "not_loaded",
+        "message": "" if rag_initialized else "RAG not initialized",
     }
-    if rag_initialized:
-        item["status"] = "loaded"
-        item["message"] = "메모리에 로드됨"
-    else:
-        item["status"] = "not_loaded"
-        item["message"] = "RAG 서비스 미초기화 (모델 미로드)"
-    return item
 
 
-def build_system_status(
-        settings: Settings,
-        rag_initialized: bool,
-        init_error: str | None,
-) -> dict:
+def build_system_status(settings: Settings, rag_initialized: bool, init_error: str | None) -> dict:
     qdrant = check_qdrant(settings)
     ollama = check_ollama(settings)
     ollama_model = check_ollama_model(settings)
@@ -124,7 +110,7 @@ def build_system_status(
             "container": "codeMind-backend",
             "url": "http://codeMind-backend:8000",
             "status": "running" if rag_initialized else "degraded",
-            "message": "정상" if rag_initialized else f"API 응답 중 · RAG 미초기화: {init_error or '알 수 없음'}",
+            "message": "" if rag_initialized else f"API/RAG init failed: {init_error or ''}",
         },
         qdrant,
         ollama,
@@ -134,12 +120,11 @@ def build_system_status(
             "container": "codeMind-frontend",
             "url": "http://codeMind-frontend:8501",
             "status": "running",
-            "message": "현재 페이지에서 접속 중",
+            "message": "",
         },
     ]
 
     models = [ollama_model, embedding]
-
     all_ok = (
             qdrant["status"] == "running"
             and ollama["status"] == "running"
@@ -155,7 +140,3 @@ def build_system_status(
         "services": services,
         "models": models,
     }
-
-
-def buildsystemstatus(settings: Settings, rag_initialized: bool, init_error: str | None) -> dict:
-    return build_system_status(settings, rag_initialized, init_error)

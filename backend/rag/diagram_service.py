@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import re
 
-from database.history_repository import getrelationshipedges
+from database.history_repository import get_relationship_edges
 
 
 class DiagramService:
-    _ALLOWED_RELATIONS = {
+    allowed_relations = {
         "READS",
         "WRITES",
         "JOINS",
@@ -18,34 +18,18 @@ class DiagramService:
     }
 
     def build_flow_mermaid(self, project_id: str) -> str:
-        edges = getrelationshipedges(project_id)
+        edges = get_relationship_edges(project_id)
         lines = ["flowchart LR"]
         seen = set()
 
-        for e in edges:
-            rel = (e.get("relation") or "CALLS").upper()
-            if rel not in self._ALLOWED_RELATIONS:
+        for edge in edges:
+            relation = (edge.get("relation") or "CALLS").upper()
+            if relation not in self.allowed_relations:
                 continue
 
-            src = self._safe(
-                e.get("src_name")
-                or e.get("srcname")
-                or "UNKNOWN_SRC"
-            )
-            dst = self._safe(
-                e.get("dst_name")
-                or e.get("dstname")
-                or "UNKNOWN_DST"
-            )
-
-            label = rel if rel in {
-                "READS",
-                "WRITES",
-                "JOINS",
-                "CALLS",
-                "EXTENDS",
-                "IMPLEMENTS",
-            } else "CALLS"
+            src = self.safe_name(edge.get("src_name") or "UNKNOWN_SRC")
+            dst = self.safe_name(edge.get("dst_name") or "UNKNOWN_DST")
+            label = relation if relation in {"READS", "WRITES", "JOINS", "CALLS", "EXTENDS", "IMPLEMENTS"} else "CALLS"
 
             line = f"    {src} -->|{label}| {dst}"
             if line not in seen:
@@ -55,22 +39,13 @@ class DiagramService:
         return "\n".join(lines)
 
     def build_table_erd(self, project_id: str) -> str:
-        edges = getrelationshipedges(project_id, relation="REFERENCES")
+        edges = get_relationship_edges(project_id, relation="REFERENCES")
         lines = ["erDiagram"]
         seen = set()
 
-        for e in edges:
-            src = self._safe(
-                e.get("src_name")
-                or e.get("srcname")
-                or "UNKNOWN_SRC"
-            )
-            dst = self._safe(
-                e.get("dst_name")
-                or e.get("dstname")
-                or "UNKNOWN_DST"
-            )
-
+        for edge in edges:
+            src = self.safe_name(edge.get("src_name") or "UNKNOWN_SRC")
+            dst = self.safe_name(edge.get("dst_name") or "UNKNOWN_DST")
             line = f"    {src} ||--o{{ {dst} : REFERENCES"
             if line not in seen:
                 seen.add(line)
@@ -78,7 +53,7 @@ class DiagramService:
 
         return "\n".join(lines)
 
-    def _safe(self, name: str) -> str:
+    def safe_name(self, name: str) -> str:
         name = re.sub(r"[^A-Za-z0-9_]", "_", name)
         name = re.sub(r"_+", "_", name).strip("_")
         return name or "UNKNOWN"
