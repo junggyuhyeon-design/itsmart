@@ -1,14 +1,7 @@
 from database.init_db import get_connection, init_db
 from database.history_repository import (
-<<<<<<< HEAD
-    upsert_user,
-    save_history,
-    get_history,
-    delete_history,
-    save_uploaded_file,
-    get_all_projects,
-=======
     bulk_insert_file_index,
+    create_index_job,
     delete_history,
     find_code_elements_by_name,
     get_all_projects,
@@ -16,31 +9,29 @@ from database.history_repository import (
     get_file_index,
     get_file_index_summary,
     get_history,
+    get_index_job,
     get_recent_entities,
+    get_table_rows_for_admin,
     get_uploaded_files,
     get_uploaded_files_by_project_id,
+    init_index_jobs_table,
     insert_code_elements,
+    list_db_tables,
+    list_index_jobs,
+    purge_all_runtime_data,
     save_history,
     save_turn_entities,
     save_uploaded_file,
+    update_index_job,
     upsert_user,
     user_exists,
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9
 )
 
 __all__ = [
     "get_connection",
-<<<<<<< HEAD
-    "upsert_user",
-    "save_history",
-    "get_history",
-    "delete_history",
-    "save_uploaded_file",
-    "get_all_projects",
-]
-=======
     "init_db",
     "bulk_insert_file_index",
+    "create_index_job",
     "delete_history",
     "find_code_elements_by_name",
     "get_all_projects",
@@ -48,14 +39,20 @@ __all__ = [
     "get_file_index",
     "get_file_index_summary",
     "get_history",
+    "get_index_job",
     "get_recent_entities",
+    "get_table_rows_for_admin",
     "get_uploaded_files",
     "get_uploaded_files_by_project_id",
+    "init_index_jobs_table",
     "insert_code_elements",
+    "list_db_tables",
+    "list_index_jobs",
+    "purge_all_runtime_data",
     "save_history",
     "save_turn_entities",
     "save_uploaded_file",
+    "update_index_job",
     "upsert_user",
     "user_exists",
 ]
->>>>>>> e3e85489126674750763f7592c68a889f1fce4c9

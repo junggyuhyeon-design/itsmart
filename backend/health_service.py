@@ -63,14 +63,18 @@ def _ollama_model_available(settings: Settings) -> tuple[bool, list[str], str]:
             resp = client.get(f"{settings.ollama_base_url}/api/tags")
             if not resp.is_success:
                 return False, [], f"Ollama 조회 실패 (HTTP {resp.status_code})"
+
             models = [m.get("name", "") for m in resp.json().get("models", [])]
             target = settings.ollama_model
+
             if target in models:
                 return True, models, "모델 사용 가능"
+
             base_name = target.split(":")[0]
             partial = [m for m in models if m.split(":")[0] == base_name]
             if partial:
                 return True, models, f"유사 모델 발견: {', '.join(partial)}"
+
             return False, models, "모델이 pull 되지 않았습니다"
     except Exception as e:
         return False, [], str(e)
@@ -103,7 +107,11 @@ def check_embedding_model(settings: Settings, rag_initialized: bool) -> dict:
     return item
 
 
-def build_system_status(settings: Settings, rag_initialized: bool, init_error: str | None) -> dict:
+def build_system_status(
+        settings: Settings,
+        rag_initialized: bool,
+        init_error: str | None,
+) -> dict:
     qdrant = check_qdrant(settings)
     ollama = check_ollama(settings)
     ollama_model = check_ollama_model(settings)
@@ -115,7 +123,7 @@ def build_system_status(settings: Settings, rag_initialized: bool, init_error: s
             "kind": "container",
             "container": "codeMind-backend",
             "url": "http://codeMind-backend:8000",
-            "status": "running",
+            "status": "running" if rag_initialized else "degraded",
             "message": "정상" if rag_initialized else f"API 응답 중 · RAG 미초기화: {init_error or '알 수 없음'}",
         },
         qdrant,
@@ -133,10 +141,11 @@ def build_system_status(settings: Settings, rag_initialized: bool, init_error: s
     models = [ollama_model, embedding]
 
     all_ok = (
-        qdrant["status"] == "running"
-        and ollama["status"] == "running"
-        and ollama_model["status"] == "available"
-        and embedding["status"] == "loaded"
+            qdrant["status"] == "running"
+            and ollama["status"] == "running"
+            and ollama_model["status"] == "available"
+            and embedding["status"] == "loaded"
+            and rag_initialized
     )
 
     return {
@@ -146,3 +155,7 @@ def build_system_status(settings: Settings, rag_initialized: bool, init_error: s
         "services": services,
         "models": models,
     }
+
+
+def buildsystemstatus(settings: Settings, rag_initialized: bool, init_error: str | None) -> dict:
+    return build_system_status(settings, rag_initialized, init_error)
