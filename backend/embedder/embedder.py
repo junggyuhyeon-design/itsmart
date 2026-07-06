@@ -11,7 +11,7 @@ class EmbeddingService:
 
     @property
     def dimension(self) -> int:
-        return int(self.model.get_sentence_embedding_dimension())
+        return self.model.get_embedding_dimension()
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:

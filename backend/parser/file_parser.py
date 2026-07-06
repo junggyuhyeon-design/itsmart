@@ -167,12 +167,7 @@ def extract_table_names(text: str, extension: str) -> list[str]:
 
 def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
     try:
-        saved_path = (
-                file_info.get("saved_path")
-                or file_info.get("savedpath")
-                or file_info.get("file_path")
-                or file_info.get("filepath")
-        )
+        saved_path = file_info.get("saved_path")
         if not saved_path:
             raise KeyError("saved_path")
 
@@ -188,22 +183,16 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
 
         return {
             "raw_text": raw_text,
-            "project_id": file_info.get("project_id", file_info.get("projectid", "")),
-            "project_name": file_info.get("project_name", file_info.get("projectname", "")),
-            "file_name": file_info.get(
-                "file_name",
-                file_info.get("filename", file_info.get("original_name", file_info.get("originalname", ""))),
-            ),
+            "project_id": file_info.get("project_id", ""),
+            "project_name": file_info.get("project_name", ""),
+            "file_name": file_info.get("file_name", ""),
             "extension": extension,
-            "relative_path": file_info.get("relative_path", file_info.get("relativepath", "")),
+            "relative_path": file_info.get("relative_path", ""),
             "saved_path": saved_path,
             "file_path": saved_path,
-            "file_size": file_info.get("file_size", file_info.get("size", 0)),
-            "source_type": file_info.get("source_type", file_info.get("sourcetype", "")),
-            "root_container_name": file_info.get(
-                "root_container_name",
-                file_info.get("rootcontainername", ""),
-            ),
+            "file_size": file_info.get("file_size", ""),
+            "source_type": file_info.get("source_type", ""),
+            "root_container_name": file_info.get("root_container_name", ""),
             "layer_type": layer_type,
             "content_type": content_type,
             "class_name": class_name,
