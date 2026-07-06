@@ -3,11 +3,12 @@ from __future__ import annotations
 import logging
 import re
 import sys
+import time
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List
+from typing import Any
 
 import aiofiles
 from fastapi import BackgroundTasks, Body, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
@@ -17,23 +18,25 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from config import get_settings
 from database.history_repository import (
-    createindexjob,
-    deletehistory,
-    getallprojects,
-    getcodeelements,
-    getfileindex,
-    getfileindexsummary,
-    gethistory,
-    getindexjob,
-    gettablerowsforadmin,
-    initindexjobstable,
-    listdbtables,
-    listindexjobs,
-    purgeallruntimedata,
-    savehistory,
-    saveuploadedfile,
-    updateindexjob,
-    upsertuser,
+    create_index_job,
+    delete_history,
+    get_all_projects,
+    get_code_elements,
+    get_file_index,
+    get_file_index_summary,
+    get_history,
+    get_index_job,
+    get_recent_entities,
+    get_table_rows_for_admin,
+    init_index_jobs_table,
+    list_db_tables,
+    list_index_jobs,
+    purge_all_runtime_data,
+    save_history,
+    save_turn_entities,
+    save_uploaded_file,
+    update_index_job,
+    upsert_user,
 )
 from database.init_db import init_db
 from health_service import build_system_status
@@ -41,13 +44,14 @@ from rag.query_analyzer import QueryAnalyzer
 from rag.rag_service import RAGService
 from utils.file_utils import ensure_dir, is_allowed_upload_extension, process_uploads_and_collect, safe_filename
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.append(str(ROOT_DIR))
+root_dir = Path(__file__).resolve().parent.parent
+sys.path.append(str(root_dir))
 
 logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+
 logging.getLogger("main").setLevel(logging.INFO)
 logging.getLogger("rag").setLevel(logging.INFO)
 logging.getLogger("database").setLevel(logging.INFO)
@@ -56,12 +60,11 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 logger = logging.getLogger("main")
 settings = get_settings()
+upload_dir = Path(settings.upload_dir)
+extract_dir = Path(settings.extract_dir)
+query_analyzer = QueryAnalyzer(default_top_k=settings.top_k)
 
-UPLOAD_DIR = Path(settings.upload_dir)
-EXTRACT_DIR = Path("/data/extracted")
-analyzer = QueryAnalyzer(default_top_k=settings.top_k)
-
-TABLE_PATTERNS = [
+table_patterns = [
     r"\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)",
     r"\bJOIN\s+([A-Za-z_][A-Za-z0-9_]*)",
     r"\bUPDATE\s+([A-Za-z_][A-Za-z0-9_]*)",
@@ -71,10 +74,11 @@ TABLE_PATTERNS = [
 
 
 class AccessLogFilter(logging.Filter):
-    SKIP = ("health", "status", "collections")
+    skip_keywords = {"health", "status", "collections"}
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return not any(s in record.getMessage() for s in self.SKIP)
+        message = record.getMessage()
+        return not any(keyword in message for keyword in self.skip_keywords)
 
 
 access_logger = logging.getLogger("uvicorn.access")
@@ -84,184 +88,227 @@ access_logger.setLevel(logging.WARNING)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting up...")
+    logger.info("startup begin")
     try:
-        ensure_dir(UPLOAD_DIR)
-        ensure_dir(EXTRACT_DIR)
+        ensure_dir(upload_dir)
+        ensure_dir(extract_dir)
         init_db()
-        initindexjobstable()
-        rag = RAGService(settings)
-        app.state.ragservice = rag
-        app.state.raginitialized = True
-        app.state.initerror = None
-        logger.info("Startup complete")
-    except Exception as e:
-        logger.exception("Startup failed: %s", e)
-        app.state.ragservice = None
-        app.state.raginitialized = False
-        app.state.initerror = str(e)
-        raise RuntimeError(f"Startup failed: {e}") from e
+        init_index_jobs_table()
+
+        rag_service = RAGService(settings)
+        app.state.rag_service = rag_service
+        app.state.rag_initialized = True
+        app.state.init_error = None
+
+        logger.info("startup completed")
+    except Exception as error:
+        logger.exception("startup failed: %s", error)
+        app.state.rag_service = None
+        app.state.rag_initialized = False
+        app.state.init_error = str(error)
+        raise RuntimeError(f"startup failed: {error}") from error
+
     yield
-    logger.info("Shutdown complete")
+
+    logger.info("shutdown completed")
 
 
-app = FastAPI(title="IT-Smart CodeMind API", lifespan=lifespan)
+app = FastAPI(
+    title="IT-Smart CodeMind API",
+    lifespan=lifespan,
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,
 )
 
 
 def get_rag_service(request: Request) -> RAGService:
-    svc = getattr(request.app.state, "ragservice", None)
-    if svc is None:
-        raise HTTPException(status_code=503, detail="RAGService is not ready")
-    return svc
+    rag_service = getattr(request.app.state, "rag_service", None)
+    if rag_service is None:
+        raise HTTPException(status_code=503, detail="RAG service is not ready")
+    return rag_service
 
 
 def require_user(x_user_id: str | None) -> str:
     if not x_user_id or not x_user_id.strip():
         raise HTTPException(status_code=400, detail="X-User-Id header is required")
-    uid = x_user_id.strip()
+
+    user_id = x_user_id.strip()
     try:
-        upsertuser(uid)
-    except Exception as e:
-        logger.error("upsertuser failed: %s", e)
-        raise HTTPException(status_code=500, detail="failed to ensure user") from e
-    return uid
+        upsert_user(user_id)
+    except Exception as error:
+        logger.exception("upsert_user failed user_id=%s", user_id)
+        raise HTTPException(status_code=500, detail="failed to ensure user") from error
+
+    return user_id
 
 
-async def save_upload_stream(upload: UploadFile, dest: Path) -> None:
+async def save_upload_stream(upload_file: UploadFile, destination: Path) -> None:
     total_written = 0
+
     try:
-        async with aiofiles.open(dest, "wb") as outfile:
+        async with aiofiles.open(destination, "wb") as output_file:
             while True:
-                chunk = await upload.read(settings.upload_chunk_size)
+                chunk = await upload_file.read(settings.upload_chunk_size)
                 if not chunk:
                     break
+
                 total_written += len(chunk)
                 if total_written > settings.max_file_size:
-                    dest.unlink(missing_ok=True)
-                    raise HTTPException(status_code=413, detail=f"{upload.filename} exceeds max file size")
-                await outfile.write(chunk)
+                    destination.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"{upload_file.filename} exceeds max file size",
+                    )
+
+                await output_file.write(chunk)
+
     except HTTPException:
         raise
-    except Exception as e:
-        dest.unlink(missing_ok=True)
-        logger.error("save_upload_stream failed for %s: %s", dest.name, e)
-        raise HTTPException(status_code=500, detail=f"failed to save upload: {e}") from e
+    except Exception as error:
+        destination.unlink(missing_ok=True)
+        logger.exception("save_upload_stream failed file=%s", upload_file.filename)
+        raise HTTPException(status_code=500, detail=f"failed to save upload: {error}") from error
 
 
-def normalize_project_item(p: dict) -> dict:
+def normalize_project_item(item: dict[str, Any]) -> dict[str, Any]:
     return {
-        "project_id": p.get("projectid") or p.get("project_id") or "",
-        "project_name": p.get("projectname") or p.get("project_name") or "",
-        "uploaded_at": p.get("uploadedat") or p.get("uploaded_at") or "",
+        "project_id": item.get("project_id", ""),
+        "project_name": item.get("project_name", ""),
+        "uploaded_at": item.get("uploaded_at", ""),
     }
 
 
-def normalize_job_item(job: dict) -> dict:
+def normalize_job_item(item: dict[str, Any]) -> dict[str, Any]:
     return {
-        "job_id": job.get("jobid") or job.get("job_id"),
-        "project_id": job.get("projectid") or job.get("project_id"),
-        "project_name": job.get("projectname") or job.get("project_name"),
-        "status": job.get("status"),
-        "total_targets": job.get("totaltargets") or job.get("total_targets", 0),
-        "processed_targets": job.get("processedtargets") or job.get("processed_targets", 0),
-        "success_count": job.get("successcount") or job.get("success_count", 0),
-        "failed_count": job.get("failedcount") or job.get("failed_count", 0),
-        "total_chunks": job.get("totalchunks") or job.get("total_chunks", 0),
-        "message": job.get("message", ""),
-        "error": job.get("error", ""),
-        "logs": job.get("logs", []),
-        "created_at": job.get("createdat") or job.get("created_at"),
-        "updated_at": job.get("updatedat") or job.get("updated_at"),
-        "finished_at": job.get("finishedat") or job.get("finished_at"),
+        "job_id": item.get("job_id"),
+        "project_id": item.get("project_id"),
+        "project_name": item.get("project_name"),
+        "status": item.get("status"),
+        "total_targets": int(item.get("total_targets", 0) or 0),
+        "processed_targets": int(item.get("processed_targets", 0) or 0),
+        "success_count": int(item.get("success_count", 0) or 0),
+        "failed_count": int(item.get("failed_count", 0) or 0),
+        "total_chunks": int(item.get("total_chunks", 0) or 0),
+        "message": item.get("message", ""),
+        "error": item.get("error", ""),
+        "logs": item.get("logs", []),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "finished_at": item.get("finished_at"),
     }
 
 
-def normalize_table_item(t: dict) -> dict:
+def normalize_table_item(item: dict[str, Any]) -> dict[str, Any]:
     return {
-        "table_name": t.get("tablename") or t.get("table_name"),
-        "row_count": t.get("rowcount") or t.get("row_count", 0),
+        "table_name": item.get("table_name", ""),
+        "row_count": int(item.get("row_count", 0) or 0),
     }
 
 
-def build_listing_context(summary: dict, extension_filter: str | None) -> str:
+def normalize_target_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "project_id": item.get("project_id"),
+        "project_name": item.get("project_name"),
+        "saved_path": item.get("saved_path"),
+        "relative_path": item.get("relative_path"),
+        "original_name": item.get("original_name") or item.get("file_name"),
+        "file_name": item.get("file_name") or item.get("original_name"),
+        "extension": item.get("extension"),
+        "file_size": int(item.get("file_size") or item.get("size") or 0),
+        "file_path": item.get("file_path") or item.get("saved_path"),
+        "source_type": item.get("source_type", ""),
+        "root_container_name": item.get("root_container_name", ""),
+    }
+
+
+def build_listing_context_summary(summary: dict[str, Any], extension_filter: str | None) -> str:
     lines: list[str] = []
-    files = summary.get("files", []) or []
+    files = summary.get("files", [])
 
     if extension_filter:
-        filtered = [f for f in files if (f.get("extension") or "") == extension_filter]
-        lines.append(f"{extension_filter.upper()} files: {len(filtered)}")
-        for f in filtered:
-            lines.append(f"- {f.get('relativepath') or f.get('relative_path')}")
-    else:
-        lines.append(f"Total files: {summary.get('total', 0)}")
-        by_ext: dict[str, list[str]] = {}
-        for f in files:
-            ext = f.get("extension", "")
-            rel = f.get("relativepath") or f.get("relative_path")
-            by_ext.setdefault(ext, []).append(rel)
-        for ext, paths in sorted(by_ext.items()):
-            lines.append(f"{ext.upper()} ({len(paths)})")
-            for p in paths:
-                lines.append(f"- {p}")
+        filtered_files = [item for item in files if item.get("extension") == extension_filter]
+        lines.append(f"{extension_filter.upper()} files: {len(filtered_files)}")
+        for item in filtered_files:
+            lines.append(f"- {item.get('relative_path')}")
+        return "\n".join(lines)
+
+    lines.append(f"Total files: {summary.get('total', 0)}")
+
+    by_extension: dict[str, list[str]] = {}
+    for item in files:
+        extension = item.get("extension", "")
+        relative_path = item.get("relative_path", "")
+        by_extension.setdefault(extension, []).append(relative_path)
+
+    for extension, paths in sorted(by_extension.items()):
+        lines.append(f"{extension.upper()}: {len(paths)}")
+        for relative_path in paths:
+            lines.append(f"- {relative_path}")
 
     return "\n".join(lines)
 
 
 def extract_tables_from_text(text: str) -> list[str]:
-    found = []
-    for pattern in TABLE_PATTERNS:
-        for match in re.findall(pattern, text or "", flags=re.IGNORECASE):
-            name = (match or "").strip()
-            if not name:
+    found_tables: list[str] = []
+
+    for pattern in table_patterns:
+        matches = re.findall(pattern, text or "", flags=re.IGNORECASE)
+        for match in matches:
+            table_name = (match or "").strip()
+            if not table_name:
                 continue
-            upper_name = name.upper()
+
+            upper_name = table_name.upper()
             if upper_name in {"SELECT", "FROM", "WHERE", "AND", "OR", "SET", "VALUES", "RESULTMAP", "DUAL"}:
                 continue
-            found.append(upper_name)
 
-    deduped = []
+            found_tables.append(upper_name)
+
+    deduped: list[str] = []
     seen = set()
-    for t in found:
-        if t not in seen:
-            seen.add(t)
-            deduped.append(t)
+    for table_name in found_tables:
+        if table_name not in seen:
+            seen.add(table_name)
+            deduped.append(table_name)
+
     return deduped
 
 
 def build_table_listing(project_id: str, project_name: str) -> str:
-    elements = getcodeelements(project_id)
-    if not elements:
+    code_elements = get_code_elements(project_id)
+    if not code_elements:
         return f"{project_name} has no code elements."
 
     table_to_files: dict[str, set[str]] = {}
-    table_counter: Counter = Counter()
+    table_counter: Counter[str] = Counter()
 
-    for el in elements:
-        tables = el.get("tablenames") or el.get("table_names") or []
+    for element in code_elements:
+        tables = element.get("table_names") or []
         if not tables:
-            raw_text = el.get("rawtext") or el.get("raw_text_preview") or el.get("rawtextpreview") or ""
+            raw_text = element.get("raw_text") or element.get("raw_text_preview") or ""
             tables = extract_tables_from_text(raw_text)
-        rel_path = el.get("relativepath") or el.get("relative_path") or ""
-        for table in tables:
-            normalized = (table or "").strip().upper()
-            if not normalized:
+
+        relative_path = element.get("relative_path") or ""
+        for table_name in tables:
+            normalized_name = (table_name or "").strip().upper()
+            if not normalized_name:
                 continue
-            table_counter[normalized] += 1
-            table_to_files.setdefault(normalized, set()).add(rel_path)
+
+            table_counter[normalized_name] += 1
+            table_to_files.setdefault(normalized_name, set()).add(relative_path)
 
     if not table_counter:
         return f"{project_name} has no detected DB tables."
 
     lines = [f"{project_name} detected tables: {len(table_counter)}"]
     for table_name, count in table_counter.most_common():
-        files = sorted(x for x in table_to_files.get(table_name, set()) if x)
+        files = sorted(path for path in table_to_files.get(table_name, set()) if path)
         lines.append(f"- {table_name} ({count})")
         for path in files[:10]:
             lines.append(f"  - {path}")
@@ -272,64 +319,61 @@ def build_table_listing(project_id: str, project_name: str) -> str:
 
 
 def detect_meta_request(question: str) -> bool:
-    q = (question or "").lower()
+    lowered = (question or "").lower()
     keywords = [
-        "count", "controller", "service", "repository", "mapper", "xml", "java", "sql",
-        "목록", "개수", "테이블", "파일", "구조", "분석", "설명", "소스",
+        "count",
+        "controller",
+        "service",
+        "repository",
+        "mapper",
+        "xml",
+        "java",
+        "sql",
+        "구조",
+        "레이어",
+        "테이블",
+        "db",
     ]
-    return any(k in q for k in keywords)
+    return any(keyword in lowered for keyword in keywords)
 
 
 def build_sqlite_context(project_id: str, project_name: str, question: str) -> str:
-    q = (question or "").lower()
-    parts: list[str] = [f"SQLite summary for {project_name}"]
+    lowered = (question or "").lower()
+    parts = [f"SQLite summary for {project_name}"]
 
-    summary = getfileindexsummary(project_id)
+    summary = get_file_index_summary(project_id)
     total_files = int(summary.get("total", 0) or 0)
-    by_ext = summary.get("byextension", {}) or summary.get("by_extension", {}) or {}
-    parts.append(f"- total files: {total_files}")
-    if by_ext:
-        parts.append("- extensions:")
-        for ext, cnt in sorted(by_ext.items(), key=lambda x: (-x[1], x[0])):
-            parts.append(f"  - {ext}: {cnt}")
+    by_extension = summary.get("by_extension", {}) or {}
 
-    elements = getcodeelements(project_id)
-    if elements:
-        layer_counter = Counter()
-        for el in elements:
-            layer = (el.get("layertype") or el.get("layer_type") or "").strip().lower()
-            if layer:
-                layer_counter[layer] += 1
+    parts.append(f"- total files: {total_files}")
+
+    if by_extension:
+        parts.append("- extensions:")
+        for extension, count in sorted(by_extension.items(), key=lambda item: (-item[1], item[0])):
+            parts.append(f"  - {extension}: {count}")
+
+    code_elements = get_code_elements(project_id)
+    if code_elements:
+        layer_counter: Counter[str] = Counter()
+        for element in code_elements:
+            layer_type = (element.get("layer_type") or "").strip().lower()
+            if layer_type:
+                layer_counter[layer_type] += 1
+
         if layer_counter:
             parts.append("- layers:")
-            for layer, cnt in layer_counter.most_common():
-                parts.append(f"  - {layer}: {cnt}")
+            for layer_type, count in layer_counter.most_common():
+                parts.append(f"  - {layer_type}: {count}")
 
-    if "table" in q or "테이블" in q:
+    if "table" in lowered or "db" in lowered or "테이블" in lowered:
         parts.append("")
         parts.append(build_table_listing(project_id, project_name))
 
     return "\n".join(parts)
 
 
-def normalize_target_item(t: dict) -> dict:
-    return {
-        "projectid": t.get("projectid") or t.get("project_id"),
-        "projectname": t.get("projectname") or t.get("project_name"),
-        "savedpath": t.get("savedpath") or t.get("saved_path"),
-        "relativepath": t.get("relativepath") or t.get("relative_path"),
-        "originalname": t.get("originalname") or t.get("original_name") or t.get("filename"),
-        "filename": t.get("filename") or t.get("originalname") or t.get("original_name"),
-        "extension": t.get("extension"),
-        "size": t.get("size") or t.get("file_size") or 0,
-        "filepath": t.get("filepath") or t.get("savedpath") or t.get("saved_path"),
-        "sourcetype": t.get("sourcetype") or t.get("source_type") or "",
-        "rootcontainername": t.get("rootcontainername") or t.get("root_container_name") or "",
-    }
-
-
 async def call_ask_with_context_stream(
-        service: RAGService,
+        rag_service: RAGService,
         *,
         question: str,
         project_id: str | None,
@@ -340,285 +384,61 @@ async def call_ask_with_context_stream(
         layer_filter: str | None,
         extension_filter: str | None,
         query_type: str,
-        chat_history: list[dict],
+        chat_history: list[dict[str, Any]],
+        recent_entities: list[dict[str, Any]],
 ):
-    if hasattr(service, "askwithcontextstream"):
-        return await service.askwithcontextstream(
-            question=question,
-            projectid=project_id,
-            projectname=project_name,
-            extracontext=extra_context,
-            sqlitecontext=sqlite_context,
-            topk=top_k,
-            layerfilter=layer_filter,
-            extensionfilter=extension_filter,
-            querytype=query_type,
-            chathistory=chat_history,
-        )
-
-    if hasattr(service, "ask_with_context_stream"):
-        return await service.ask_with_context_stream(
-            question=question,
-            projectid=project_id,
-            projectname=project_name,
-            extracontext=extra_context,
-            sqlitecontext=sqlite_context,
-            topk=top_k,
-            layerfilter=layer_filter,
-            extensionfilter=extension_filter,
-            querytype=query_type,
-            chathistory=chat_history,
-        )
-
-    raise RuntimeError("RAGService ask stream method not found")
+    return await rag_service.ask_with_context_stream(
+        question=question,
+        project_id=project_id,
+        project_name=project_name,
+        extra_context=extra_context,
+        sqlite_context=sqlite_context,
+        top_k=top_k,
+        layer_filter=layer_filter,
+        extension_filter=extension_filter,
+        query_type=query_type,
+        chat_history=chat_history,
+        recent_entities=recent_entities,
+    )
 
 
-def summarize_methods(methods: list[dict]) -> str:
-    if not methods:
-        return ""
-    names = []
-    for m in methods[:10]:
-        name = (m.get("name") or "").strip()
-        if name:
-            names.append(name)
-    return ", ".join(names)
-
-
-def build_code_element_summary(project_id: str) -> dict:
-    elements = getcodeelements(project_id) or []
-
-    layer_counter: Counter = Counter()
-    ext_counter: Counter = Counter()
-    class_names: list[str] = []
-    files: list[str] = []
-    method_names: list[str] = []
-    table_names: list[str] = []
-
-    seen_classes = set()
-    seen_files = set()
-    seen_methods = set()
-    seen_tables = set()
-
-    for el in elements:
-        layer = (el.get("layertype") or el.get("layer_type") or "").strip().lower()
-        ext = (el.get("extension") or "").strip().lower()
-        rel = (el.get("relativepath") or el.get("relative_path") or "").strip()
-        cls = (el.get("classname") or el.get("class_name") or "").strip()
-
-        if layer:
-            layer_counter[layer] += 1
-        if ext:
-            ext_counter[ext] += 1
-        if rel and rel not in seen_files:
-            seen_files.add(rel)
-            files.append(rel)
-        if cls and cls not in seen_classes:
-            seen_classes.add(cls)
-            class_names.append(cls)
-
-        methods = el.get("methods") or []
-        for m in methods:
-            name = (m.get("name") or "").strip()
-            if name and name not in seen_methods:
-                seen_methods.add(name)
-                method_names.append(name)
-
-        tables = el.get("tablenames") or el.get("table_names") or []
-        if not tables:
-            raw_text = el.get("rawtext") or el.get("raw_text_preview") or el.get("rawtextpreview") or ""
-            tables = extract_tables_from_text(raw_text)
-        for table in tables:
-            t = (table or "").strip().upper()
-            if t and t not in seen_tables:
-                seen_tables.add(t)
-                table_names.append(t)
-
-    return {
-        "elements": elements,
-        "layer_counter": layer_counter,
-        "ext_counter": ext_counter,
-        "class_names": class_names,
-        "files": files,
-        "method_names": method_names,
-        "table_names": table_names,
-    }
-
-
-def build_project_fallback_answer(
-        *,
-        question: str,
-        project_id: str | None,
-        project_name: str | None,
-        stream_error: str | None = None,
-) -> str:
-    q = (question or "").strip()
-    selected_name = project_name or "선택 프로젝트"
-
-    if not project_id:
-        return (
-            "질문 처리 중 스트리밍 응답이 끊어졌습니다.\n\n"
-            "현재는 프로젝트가 특정되지 않아 코드 기반 분석 fallback을 만들 수 없습니다.\n"
-            "사이드바에서 프로젝트를 선택한 뒤 다시 질문해주세요.\n"
-            f"- 질문: {q}\n"
-            f"- 오류: {stream_error or 'unknown'}"
-        )
-
-    summary = getfileindexsummary(project_id) or {}
-    meta = build_code_element_summary(project_id)
-
-    total_files = int(summary.get("total", 0) or 0)
-    by_ext = summary.get("byextension", {}) or summary.get("by_extension", {}) or {}
-    files = meta["files"]
-    class_names = meta["class_names"]
-    method_names = meta["method_names"]
-    layer_counter: Counter = meta["layer_counter"]
-    table_names = meta["table_names"]
-
-    lines: list[str] = []
-    lines.append(f"{selected_name} 소스를 기준으로 답변합니다.")
-    lines.append("")
-    lines.append("현재 AI 스트리밍 응답이 중간에 끊어져서, 인덱싱된 코드 메타데이터 기반 fallback 설명으로 전환했습니다.")
-    if stream_error:
-        lines.append(f"- 스트림 오류: {stream_error}")
-    lines.append("")
-
-    lines.append("프로젝트 개요")
-    lines.append(f"- 총 파일 수: {total_files}")
-    if by_ext:
-        ext_text = ", ".join(f"{ext}:{cnt}" for ext, cnt in sorted(by_ext.items(), key=lambda x: (-x[1], x[0])))
-        lines.append(f"- 확장자 분포: {ext_text}")
-
-    if layer_counter:
-        layer_text = ", ".join(f"{layer}:{cnt}" for layer, cnt in layer_counter.most_common())
-        lines.append(f"- 계층 추정: {layer_text}")
-
-    if files:
-        lines.append("- 파일 목록:")
-        for path in files[:20]:
-            lines.append(f"  - {path}")
-        if len(files) > 20:
-            lines.append(f"  - ... {len(files) - 20}개 추가")
-
-    if class_names:
-        lines.append("")
-        lines.append("주요 클래스")
-        for cls in class_names[:10]:
-            lines.append(f"- {cls}")
-
-    if method_names:
-        lines.append("")
-        lines.append("주요 메서드")
-        for m in method_names[:15]:
-            lines.append(f"- {m}")
-
-    if table_names:
-        lines.append("")
-        lines.append("감지된 테이블")
-        for t in table_names[:15]:
-            lines.append(f"- {t}")
-
-    q_lower = q.lower()
-
-    if any(k in q_lower for k in ["설명", "무슨", "소스", "구조", "hello", "world", "java"]):
-        lines.append("")
-        lines.append("질문 해석")
-        if total_files == 1 and any((ext == "java" and cnt == 1) for ext, cnt in by_ext.items()):
-            lines.append("- 이 프로젝트는 단일 Java 파일 중심의 매우 작은 예제로 보입니다.")
-        else:
-            lines.append("- 이 프로젝트는 업로드된 파일 목록과 코드 요소 기준으로 구조를 요약할 수 있습니다.")
-
-        if class_names:
-            lines.append(f"- 대표 클래스: {class_names[0]}")
-        if "main" in [m.lower() for m in method_names]:
-            lines.append("- main 메서드가 존재하므로 실행 진입점 형태의 예제일 가능성이 높습니다.")
-
-        hello_candidates = []
-        for el in meta["elements"][:20]:
-            raw = (
-                    el.get("rawtext")
-                    or el.get("raw_text_preview")
-                    or el.get("rawtextpreview")
-                    or ""
-            )
-            if "hello" in raw.lower() or "world" in raw.lower():
-                rel = el.get("relativepath") or el.get("relative_path") or el.get("filename") or "unknown"
-                hello_candidates.append(rel)
-
-        if hello_candidates:
-            unique_hello = []
-            seen = set()
-            for item in hello_candidates:
-                if item not in seen:
-                    seen.add(item)
-                    unique_hello.append(item)
-            lines.append(f"- Hello/World 문자열이 감지된 파일: {', '.join(unique_hello[:5])}")
-
-        lines.append("- 따라서 이 소스는 콘솔에 문자열을 출력하는 기본 Java 학습용/테스트용 예제로 해석할 수 있습니다.")
-
-    if any(k in q_lower for k in ["파일", "목록", "개수", "count"]):
-        lines.append("")
-        lines.append("파일/개수 기준 답변")
-        lines.append(f"- 총 분석 대상 파일 수는 {total_files}개입니다.")
-        if files:
-            lines.append(f"- 첫 번째 파일은 {files[0]} 입니다.")
-
-    if any(k in q_lower for k in ["테이블", "db", "sql", "schema"]):
-        lines.append("")
-        if table_names:
-            lines.append("DB/테이블 기준 답변")
-            for t in table_names[:15]:
-                lines.append(f"- {t}")
-        else:
-            lines.append("DB/테이블 기준 답변")
-            lines.append("- 현재 인덱싱된 코드에서는 명시적인 DB 테이블이 감지되지 않았습니다.")
-
-    lines.append("")
-    lines.append("권장 조치")
-    lines.append("- 이 fallback 답변이 나온다면 Ollama 스트리밍 연결이 불안정한 상태일 가능성이 큽니다.")
-    lines.append("- 그래도 이제는 스트림 실패 시에도 메타데이터 기반 기본 설명은 항상 반환됩니다.")
-
-    return "\n".join(lines)
-
-
-def run_index_job(service: RAGService, job_id: str, targets: list[dict]):
+def run_index_job(rag_service: RAGService, job_id: str, targets: list[dict[str, Any]]) -> None:
     try:
-        updateindexjob(job_id, status="running", message="indexing started")
+        update_index_job(job_id, status="running", message="indexing started")
 
-        def progress(**kwargs):
-            updateindexjob(
+        def progress_callback(**kwargs):
+            update_index_job(
                 job_id,
                 status="running",
-                processedtargets=kwargs.get("processedtargets"),
-                successcount=kwargs.get("successcount"),
-                failedcount=kwargs.get("failedcount"),
-                totalchunks=kwargs.get("totalchunks"),
+                processed_targets=kwargs.get("processed_targets"),
+                success_count=kwargs.get("success_count"),
+                failed_count=kwargs.get("failed_count"),
+                total_chunks=kwargs.get("total_chunks"),
                 message=kwargs.get("message"),
                 error=kwargs.get("error"),
                 logs=kwargs.get("logs"),
             )
 
-        result = service.indexfiles(targets, progresscallback=progress)
-        final_status = "completed"
-        final_message = f"success={result.get('success', 0)}, failed={result.get('failed', 0)}"
+        result = rag_service.index_files(targets, progress_callback=progress_callback)
 
-        updateindexjob(
+        update_index_job(
             job_id,
-            status=final_status,
-            processedtargets=result.get("success", 0) + result.get("failed", 0),
-            successcount=result.get("success", 0),
-            failedcount=result.get("failed", 0),
-            totalchunks=result.get("totalchunks", 0),
-            message=final_message,
+            status="completed",
+            processed_targets=int(result.get("success", 0) or 0) + int(result.get("failed", 0) or 0),
+            success_count=int(result.get("success", 0) or 0),
+            failed_count=int(result.get("failed", 0) or 0),
+            total_chunks=int(result.get("total_chunks", 0) or 0),
+            message=f"success={result.get('success', 0)} failed={result.get('failed', 0)}",
             logs=result.get("logs", []),
             finished=True,
         )
-    except Exception as e:
+    except Exception as error:
         logger.exception("run_index_job failed job_id=%s", job_id)
-        updateindexjob(
+        update_index_job(
             job_id,
             status="failed",
             message="indexing failed",
-            error=str(e),
+            error=str(error),
             finished=True,
         )
 
@@ -630,14 +450,19 @@ def health():
 
 @app.get("/status")
 def status():
-    rag_initialized = getattr(app.state, "raginitialized", False)
-    init_error = getattr(app.state, "initerror", None)
+    rag_initialized = getattr(app.state, "rag_initialized", False)
+    init_error = getattr(app.state, "init_error", None)
     return build_system_status(settings, rag_initialized, init_error)
+
+
+@app.get("/")
+def root():
+    return PlainTextResponse("CodeMind backend is running.")
 
 
 @app.post("/upload")
 async def upload(
-        files: List[UploadFile] = File(...),
+        files: list[UploadFile] = File(...),
         x_user_id: str | None = Header(default=None),
 ):
     require_user(x_user_id)
@@ -646,57 +471,64 @@ async def upload(
         raise HTTPException(status_code=400, detail="files are required")
 
     if len(files) > settings.max_files_per_request:
-        raise HTTPException(status_code=400, detail=f"max {settings.max_files_per_request} files are allowed")
+        raise HTTPException(
+            status_code=400,
+            detail=f"max {settings.max_files_per_request} files are allowed",
+        )
 
-    ensure_dir(UPLOAD_DIR)
+    ensure_dir(upload_dir)
     saved_filenames: list[str] = []
 
-    for f in files:
-        if not f.filename or not f.filename.strip():
+    for upload_file in files:
+        if not upload_file.filename or not upload_file.filename.strip():
             raise HTTPException(status_code=400, detail="empty filename is not allowed")
-        if not is_allowed_upload_extension(f.filename):
-            raise HTTPException(status_code=400, detail=f"unsupported upload extension: {f.filename}")
 
-        safe_name = safe_filename(f.filename)
-        await save_upload_stream(f, UPLOAD_DIR / safe_name)
-        saved_filenames.append(safe_name)
+        if not is_allowed_upload_extension(upload_file.filename):
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported upload extension: {upload_file.filename}",
+            )
 
-    targets = await run_in_threadpool(process_uploads_and_collect, UPLOAD_DIR, saved_filenames)
+        sanitized_name = safe_filename(upload_file.filename)
+        destination = upload_dir / sanitized_name
+        await save_upload_stream(upload_file, destination)
+        saved_filenames.append(sanitized_name)
+
+    raw_targets = await run_in_threadpool(process_uploads_and_collect, upload_dir, saved_filenames)
 
     projects_created: dict[str, str] = {}
-    for target in targets:
+    normalized_targets: list[dict[str, Any]] = []
+
+    for target in raw_targets:
         project_id = getattr(target, "project_id", None) or getattr(target, "projectid", None)
         project_name = getattr(target, "project_name", None) or getattr(target, "projectname", None)
         saved_path = getattr(target, "saved_path", None) or getattr(target, "savedpath", None)
 
         if project_id and project_id not in projects_created:
-            projects_created[project_id] = project_name
+            projects_created[project_id] = project_name or ""
 
-        origin_path = Path(saved_path) if saved_path else (UPLOAD_DIR / f"{project_name}.zip")
-
-        try:
-            saveuploadedfile(project_id, project_name, str(origin_path))
-        except Exception as e:
-            logger.error("saveuploadedfile failed: %s", e)
-
-    normalized_targets = []
-    for t in targets:
         normalized_targets.append(
             {
-                "project_id": getattr(t, "project_id", None) or getattr(t, "projectid", None),
-                "project_name": getattr(t, "project_name", None) or getattr(t, "projectname", None),
-                "saved_path": getattr(t, "saved_path", None) or getattr(t, "savedpath", None),
-                "relative_path": getattr(t, "relative_path", None) or getattr(t, "relativepath", None),
-                "original_name": getattr(t, "original_name", None) or getattr(t, "originalname", None),
-                "filename": getattr(t, "original_name", None) or getattr(t, "originalname", None),
-                "extension": getattr(t, "extension", None),
-                "size": getattr(t, "size", 0),
-                "source_type": getattr(t, "source_type", None) or getattr(t, "sourcetype", None),
-                "root_container_name": getattr(t, "root_container_name", None) or getattr(t, "rootcontainername", None),
+                "project_id": project_id,
+                "project_name": project_name,
+                "saved_path": saved_path,
+                "relative_path": getattr(target, "relative_path", None) or getattr(target, "relativepath", None),
+                "original_name": getattr(target, "original_name", None) or getattr(target, "originalname", None),
+                "file_name": getattr(target, "original_name", None) or getattr(target, "originalname", None),
+                "extension": getattr(target, "extension", None),
+                "file_size": getattr(target, "size", 0),
+                "source_type": getattr(target, "source_type", None) or getattr(target, "sourcetype", None),
+                "root_container_name": getattr(target, "root_container_name", None) or getattr(target, "rootcontainername", None),
             }
         )
 
-    logger.info("upload complete: %d targets, %d projects", len(normalized_targets), len(projects_created))
+    for project_id, project_name in projects_created.items():
+        origin_path = upload_dir / f"{project_name}.zip"
+        try:
+            save_uploaded_file(project_id, project_name, str(origin_path))
+        except Exception as error:
+            logger.exception("save_uploaded_file failed project_id=%s error=%s", project_id, error)
+
     return {
         "targets": normalized_targets,
         "count": len(normalized_targets),
@@ -705,27 +537,30 @@ async def upload(
 
 
 @app.post("/index")
-async def index_now(request: Request, targets: List[dict] = Body(...)):
+async def index_now(
+        request: Request,
+        targets: list[dict[str, Any]] = Body(...),
+):
     if not targets:
         raise HTTPException(status_code=400, detail="targets are required")
 
-    service = get_rag_service(request)
-    normalized_targets = [normalize_target_item(t) for t in targets]
+    rag_service = get_rag_service(request)
+    normalized_targets = [normalize_target_item(target) for target in targets]
 
     try:
-        result = await run_in_threadpool(service.indexfiles, normalized_targets)
-        result["total_chunks"] = int(result.get("totalchunks", result.get("total_chunks", 0)) or 0)
+        result = await run_in_threadpool(rag_service.index_files, normalized_targets)
+        result["total_chunks"] = int(result.get("total_chunks", 0) or 0)
         return result
-    except Exception as e:
+    except Exception as error:
         logger.exception("index_now failed")
-        raise HTTPException(status_code=500, detail=f"index failed: {e}") from e
+        raise HTTPException(status_code=500, detail=f"index failed: {error}") from error
 
 
-@app.post("/index/jobs")
+@app.post("/index-jobs")
 async def create_job(
         request: Request,
         background_tasks: BackgroundTasks,
-        payload: dict = Body(...),
+        payload: dict[str, Any] = Body(...),
         x_user_id: str | None = Header(default=None),
 ):
     user_id = require_user(x_user_id)
@@ -734,23 +569,23 @@ async def create_job(
     if not targets:
         raise HTTPException(status_code=400, detail="targets are required")
 
-    normalized_targets = [normalize_target_item(t) for t in targets]
-    first = normalized_targets[0] if normalized_targets else {}
-    project_id = first.get("projectid")
-    project_name = first.get("projectname")
+    normalized_targets = [normalize_target_item(target) for target in targets]
+    first_target = normalized_targets[0]
+    project_id = first_target.get("project_id")
+    project_name = first_target.get("project_name")
 
     job_id = str(uuid.uuid4())
-    createindexjob(
-        jobid=job_id,
-        userid=user_id,
-        projectid=project_id,
-        projectname=project_name,
-        totaltargets=len(normalized_targets),
+    create_index_job(
+        job_id=job_id,
+        user_id=user_id,
+        project_id=project_id,
+        project_name=project_name,
+        total_targets=len(normalized_targets),
         message="queued",
     )
 
-    service = get_rag_service(request)
-    background_tasks.add_task(run_index_job, service, job_id, normalized_targets)
+    rag_service = get_rag_service(request)
+    background_tasks.add_task(run_index_job, rag_service, job_id, normalized_targets)
 
     return {
         "job_id": job_id,
@@ -761,319 +596,303 @@ async def create_job(
     }
 
 
-@app.get("/index/jobs")
-def list_jobs(
-        limit: int = 20,
+@app.get("/index-jobs")
+def get_index_jobs(
+        limit: int = Query(default=20, ge=1, le=100),
         x_user_id: str | None = Header(default=None),
 ):
     user_id = require_user(x_user_id)
-    jobs = listindexjobs(user_id, limit=limit)
-    normalized = [normalize_job_item(job) for job in jobs]
-    return {"jobs": normalized, "count": len(normalized)}
+    jobs = list_index_jobs(user_id, limit=limit)
+    return {
+        "jobs": [normalize_job_item(job) for job in jobs],
+        "count": len(jobs),
+    }
 
 
-@app.get("/index/jobs/{job_id}")
-def get_job(
+@app.get("/index-jobs/{job_id}")
+def get_index_job_detail(
         job_id: str,
         x_user_id: str | None = Header(default=None),
 ):
     user_id = require_user(x_user_id)
-    item = getindexjob(job_id, user_id)
-    if not item:
+    job = get_index_job(job_id, user_id)
+    if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    return normalize_job_item(item)
+    return normalize_job_item(job)
 
 
 @app.get("/projects")
-def list_projects():
+def get_projects():
     try:
-        projects = getallprojects()
-        normalized = [normalize_project_item(p) for p in projects]
-        return {"projects": normalized, "count": len(normalized)}
-    except Exception as e:
-        logger.exception("list_projects failed")
-        raise HTTPException(status_code=500, detail=f"projects failed: {e}") from e
+        projects = get_all_projects()
+        normalized = [normalize_project_item(project) for project in projects]
+        return {
+            "projects": normalized,
+            "count": len(normalized),
+        }
+    except Exception as error:
+        logger.exception("get_projects failed")
+        raise HTTPException(status_code=500, detail=f"projects failed: {error}") from error
 
 
 @app.get("/projects/{project_name}/files")
-def list_project_files(project_name: str, extension: str | None = None):
+def get_project_files(
+        project_name: str,
+        extension: str | None = Query(default=None),
+):
     try:
-        project_info = next(
-            (p for p in getallprojects() if (p.get("projectname") or p.get("project_name")) == project_name.strip()),
+        matched_project = next(
+            (
+                project
+                for project in get_all_projects()
+                if project.get("project_name") == project_name.strip()
+            ),
             None,
         )
-        if not project_info:
+
+        if not matched_project:
             raise HTTPException(status_code=404, detail=f"project not found: {project_name}")
 
-        pid = project_info.get("projectid") or p.get("project_id")
-        files = getfileindex(pid, extension)
+        project_id = matched_project.get("project_id")
+        files = get_file_index(project_id, extension)
 
         normalized_files = []
-        for f in files:
+        for item in files:
             normalized_files.append(
                 {
-                    "filename": f.get("filename"),
-                    "relative_path": f.get("relativepath") or f.get("relative_path"),
-                    "extension": f.get("extension"),
-                    "file_size": f.get("filesize") or f.get("file_size", 0),
-                    "indexed_at": f.get("indexedat") or f.get("indexed_at"),
+                    "file_name": item.get("file_name"),
+                    "relative_path": item.get("relative_path"),
+                    "extension": item.get("extension"),
+                    "file_size": int(item.get("file_size", 0) or 0),
+                    "indexed_at": item.get("indexed_at"),
                 }
             )
 
         return {
-            "project_id": pid,
+            "project_id": project_id,
             "project_name": project_name,
             "extension_filter": extension,
             "files": normalized_files,
             "count": len(normalized_files),
         }
+
     except HTTPException:
         raise
-    except Exception as e:
-        logger.exception("list_project_files failed")
-        raise HTTPException(status_code=500, detail=f"project files failed: {e}") from e
+    except Exception as error:
+        logger.exception("get_project_files failed")
+        raise HTTPException(status_code=500, detail=f"project files failed: {error}") from error
 
 
-@app.get("/admin/db/tables")
-def admin_db_tables(x_user_id: str | None = Header(default=None)):
-    require_user(x_user_id)
-    try:
-        tables = listdbtables()
-        normalized = [normalize_table_item(t) for t in tables]
-        return {"tables": normalized, "count": len(normalized)}
-    except Exception as e:
-        logger.exception("admin_db_tables failed")
-        raise HTTPException(status_code=500, detail=f"db tables failed: {e}") from e
-
-
-@app.get("/admin/db/rows")
-def admin_db_rows(
-        table_name: str = Query(...),
-        limit: int = Query(200),
-        project_id: str | None = Query(default=None),
-        x_user_id: str | None = Header(default=None),
-):
-    require_user(x_user_id)
-    try:
-        raw_rows = gettablerowsforadmin(tablename=table_name, limit=limit)
-
-        rows = raw_rows
-        if project_id:
-            filtered = []
-            for row in raw_rows:
-                row_project_id = row.get("projectid") or row.get("project_id")
-                if row_project_id == project_id:
-                    filtered.append(row)
-            rows = filtered
-
-        columns = list(rows[0].keys()) if rows else []
-        return {
-            "table_name": table_name,
-            "project_id": project_id or "",
-            "limit": max(1, min(int(limit or 200), 1000)),
-            "total_count": len(raw_rows),
-            "returned_count": len(rows),
-            "columns": columns,
-            "rows": rows,
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except Exception as e:
-        logger.exception("admin_db_rows failed")
-        raise HTTPException(status_code=500, detail=f"db rows failed: {e}") from e
-
-
-@app.get("/history")
-def list_history(
-        limit: int = 100,
-        x_user_id: str | None = Header(default=None),
-):
-    user_id = require_user(x_user_id)
-    try:
-        rows = gethistory(user_id, limit=limit)
-        normalized = []
-        for row in rows:
-            normalized.append(
-                {
-                    "id": row.get("id"),
-                    "question": row.get("question", ""),
-                    "answer": row.get("answer", ""),
-                    "created_at": row.get("createdat") or row.get("created_at"),
-                }
-            )
-        return {"history": normalized, "count": len(normalized)}
-    except Exception as e:
-        logger.exception("list_history failed")
-        raise HTTPException(status_code=500, detail=f"history failed: {e}") from e
-
-
-@app.post("/history")
-def create_history(
-        payload: dict = Body(...),
-        x_user_id: str | None = Header(default=None),
-):
-    user_id = require_user(x_user_id)
-    question = (payload.get("question") or "").strip()
-    answer = (payload.get("answer") or "").strip()
-    if not question:
-        raise HTTPException(status_code=400, detail="question is required")
-    if not answer:
-        raise HTTPException(status_code=400, detail="answer is required")
-
-    try:
-        history_id = savehistory(user_id, question, answer)
-        return {"id": history_id, "question": question, "answer": answer}
-    except Exception as e:
-        logger.exception("create_history failed")
-        raise HTTPException(status_code=500, detail=f"save history failed: {e}") from e
-
-
-@app.delete("/history")
-def clear_history(x_user_id: str | None = Header(default=None)):
-    user_id = require_user(x_user_id)
-    try:
-        deleted = deletehistory(user_id)
-        return {"deleted_count": deleted}
-    except Exception as e:
-        logger.exception("clear_history failed")
-        raise HTTPException(status_code=500, detail=f"delete history failed: {e}") from e
-
-
-@app.delete("/reset")
-def reset_all(
-        confirm_text: str,
-        request: Request,
-        x_user_id: str | None = Header(default=None),
-):
-    require_user(x_user_id)
-
-    if confirm_text != "RESET":
-        raise HTTPException(status_code=400, detail="confirm_text must be RESET")
-
-    try:
-        result = purgeallruntimedata()
-
-        rag_reset = {
-            "attempted": False,
-            "success": False,
-            "message": "",
-        }
-
-        try:
-            service = get_rag_service(request)
-            if hasattr(service, "reset"):
-                rag_reset["attempted"] = True
-                service.reset()
-                rag_reset["success"] = True
-                rag_reset["message"] = "rag reset completed"
-            else:
-                rag_reset["message"] = "rag reset skipped: reset() not implemented"
-        except Exception as rag_error:
-            logger.exception("rag reset failed")
-            rag_reset["attempted"] = True
-            rag_reset["success"] = False
-            rag_reset["message"] = f"rag reset failed: {rag_error}"
-
-        return {
-            "status": "ok",
-            "result": result,
-            "rag_reset": rag_reset,
-        }
-    except Exception as e:
-        logger.exception("reset_all failed")
-        raise HTTPException(status_code=500, detail=f"reset failed: {e}") from e
-
-
-@app.get("/ask")
+@app.post("/ask")
 async def ask(
         request: Request,
-        question: str,
-        project_name: str | None = None,
-        top_k: int = 5,
-        extra_context: str = "",
+        payload: dict[str, Any] = Body(...),
         x_user_id: str | None = Header(default=None),
 ):
     user_id = require_user(x_user_id)
 
-    if not question or not question.strip():
+    question = (payload.get("question") or "").strip()
+    project_name = payload.get("project_name")
+    project_id = payload.get("project_id")
+    extra_context = payload.get("extra_context", "")
+    top_k = int(payload.get("top_k") or settings.top_k)
+
+    if not question:
         raise HTTPException(status_code=400, detail="question is required")
 
-    if top_k < 1 or top_k > 20:
-        top_k = settings.top_k
-
-    all_projects = getallprojects()
-    project_id = None
     selected_project_name = project_name
-
-    if project_name:
-        for proj in all_projects:
-            pname = proj.get("projectname") or proj.get("project_name")
-            pid = proj.get("projectid") or proj.get("project_id")
-            if pname == project_name.strip():
-                project_id = pid
-                selected_project_name = pname
+    if project_name and not project_id:
+        for project in get_all_projects():
+            if project.get("project_name") == project_name.strip():
+                project_id = project.get("project_id")
+                selected_project_name = project.get("project_name")
                 break
+
         if not project_id:
             raise HTTPException(status_code=400, detail=f"unknown project_name: {project_name}")
 
     history_limit = max(1, min(settings.chat_history_turns, 20))
-    chat_history = list(reversed(gethistory(user_id, limit=history_limit)))
+    chat_history = list(reversed(get_history(user_id, limit=history_limit)))
+    recent_entities = get_recent_entities(user_id, limit=20, project_id=project_id)
 
-    intent = analyzer.analyze(question)
-    service = get_rag_service(request)
+    intent = query_analyzer.analyze(question)
+    rag_service = get_rag_service(request)
 
     structure_context = ""
-    if getattr(intent, "querytype", None) == "diagram" and project_id:
-        summary = getfileindexsummary(project_id)
+    if intent.query_type != "diagram" and project_id:
+        summary = get_file_index_summary(project_id)
         if summary.get("total", 0) > 0:
-            structure_context = build_listing_context(summary, None)
+            structure_context = build_listing_context_summary(summary, intent.extension_filter)
 
     sqlite_context = ""
     if project_id and detect_meta_request(question):
-        sqlite_context = build_sqlite_context(project_id, selected_project_name, question)
+        sqlite_context = build_sqlite_context(project_id, selected_project_name or "", question)
+
+    generator, _hits = await call_ask_with_context_stream(
+        rag_service,
+        question=question,
+        project_id=project_id,
+        project_name=selected_project_name,
+        extra_context=structure_context or extra_context,
+        sqlite_context=sqlite_context,
+        top_k=top_k,
+        layer_filter=intent.layer_filter,
+        extension_filter=intent.extension_filter,
+        query_type=intent.query_type,
+        chat_history=chat_history,
+        recent_entities=recent_entities,
+    )
+
+    async def safe_stream():
+        collected_chunks: list[str] = []
+        try:
+            async for chunk in generator:
+                collected_chunks.append(chunk)
+                yield chunk
+        finally:
+            answer = "".join(collected_chunks).strip()
+            if answer:
+                try:
+                    stored_question = question
+                    if selected_project_name:
+                        stored_question = f"[{selected_project_name}] {question}"
+                    save_history(user_id, stored_question, answer)
+                except Exception:
+                    logger.exception("save_history failed")
+
+                try:
+                    entities = []
+                    if intent.entity_hint:
+                        entities.append(
+                            {
+                                "entity_name": intent.entity_hint,
+                                "entity_type": "hint",
+                            }
+                        )
+                    for keyword in intent.keywords[:8]:
+                        entities.append(
+                            {
+                                "entity_name": keyword,
+                                "entity_type": "keyword",
+                            }
+                        )
+                    if entities:
+                        save_turn_entities(user_id, entities, project_id=project_id)
+                except Exception:
+                    logger.exception("save_turn_entities failed")
+
+    return StreamingResponse(safe_stream(), media_type="text/plain; charset=utf-8")
+
+
+@app.get("/history")
+def history(
+        limit: int = Query(default=20, ge=1, le=300),
+        x_user_id: str | None = Header(default=None),
+):
+    user_id = require_user(x_user_id)
+    rows = get_history(user_id, limit=limit)
+    return {
+        "history": rows,
+        "count": len(rows),
+    }
+
+
+@app.delete("/history")
+def clear_history(
+        x_user_id: str | None = Header(default=None),
+):
+    user_id = require_user(x_user_id)
+    deleted = delete_history(user_id)
+    return {"deleted": deleted}
+
+
+@app.get("/db/tables")
+def db_tables():
+    rows = list_db_tables()
+    return {
+        "tables": [normalize_table_item(row) for row in rows],
+        "count": len(rows),
+    }
+
+
+@app.get("/db/tables/{table_name}")
+def db_table_rows(
+        table_name: str,
+        limit: int = Query(default=200, ge=1, le=1000),
+):
+    try:
+        rows = get_table_rows_for_admin(table_name, limit)
+        return {
+            "table_name": table_name,
+            "rows": rows,
+            "count": len(rows),
+        }
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/admin/purge")
+def purge_runtime_data():
+    return purge_all_runtime_data()
+
+
+@app.delete("/reset")
+def reset_all_data(
+        confirm_text: str = Query(default=""),
+):
+    if confirm_text != "RESET":
+        raise HTTPException(status_code=400, detail="confirm_text=RESET is required")
 
     try:
-        gen, _ = await call_ask_with_context_stream(
-            service,
-            question=question.strip(),
-            project_id=project_id,
-            project_name=selected_project_name,
-            extra_context=structure_context or extra_context,
-            sqlite_context=sqlite_context,
-            top_k=int(top_k),
-            layer_filter=getattr(intent, "layerfilter", None),
-            extension_filter=getattr(intent, "extensionfilter", None),
-            query_type=getattr(intent, "querytype", "qa"),
-            chat_history=chat_history,
-        )
+        result = purge_all_runtime_data()
 
-        async def safe_stream():
-            collected: list[str] = []
+        rag_service = getattr(app.state, "rag_service", None)
+        if rag_service is not None:
             try:
-                async for chunk in gen:
-                    if chunk:
-                        collected.append(chunk)
-                        yield chunk
-            except Exception as stream_error:
-                logger.exception("ask stream failed")
-                fallback_text = build_project_fallback_answer(
-                    question=question,
-                    project_id=project_id,
-                    project_name=selected_project_name,
-                    stream_error=str(stream_error),
+                rag_service.qdrant_service.recreate_collection(
+                    rag_service.embedding_service.dimension
                 )
-                if collected:
-                    yield "\n\n[스트림이 중간에 끊겨 fallback 설명을 이어서 제공합니다]\n\n"
-                yield fallback_text
+            except Exception as error:
+                logger.exception("qdrant reset failed: %s", error)
+                result["qdrant_reset_error"] = str(error)
 
-        return StreamingResponse(safe_stream(), media_type="text/plain")
+        for path in upload_dir.glob("*"):
+            try:
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+            except Exception:
+                logger.exception("failed to remove upload file: %s", path)
 
-    except Exception as e:
-        logger.exception("ask preparation failed")
-        fallback_text = build_project_fallback_answer(
-            question=question,
-            project_id=project_id,
-            project_name=selected_project_name,
-            stream_error=str(e),
-        )
-        return PlainTextResponse(fallback_text, status_code=200)
+        for path in extract_dir.glob("*"):
+            try:
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+            except Exception:
+                logger.exception("failed to remove extracted file: %s", path)
+
+        result["reset"] = True
+        return result
+
+    except Exception as error:
+        logger.exception("reset_all_data failed")
+        raise HTTPException(status_code=500, detail=f"reset failed: {error}") from error
+
+
+@app.get("/ask")
+async def ask_get(
+        request: Request,
+        question: str,
+        project_name: str | None = Query(default=None),
+        project_id: str | None = Query(default=None),
+        extra_context: str = Query(default=""),
+        top_k: int = Query(default=5),
+        x_user_id: str | None = Header(default=None),
+):
+    payload = {
+        "question": question,
+        "project_name": project_name,
+        "project_id": project_id,
+        "extra_context": extra_context,
+        "top_k": top_k,
+    }
+    return await ask(request=request, payload=payload, x_user_id=x_user_id)

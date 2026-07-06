@@ -1,4 +1,5 @@
-import re
+from __future__ import annotations
+
 from typing import Any
 
 from config import Settings
@@ -6,99 +7,100 @@ from config import Settings
 
 class ChunkService:
     def __init__(self, settings: Settings) -> None:
-        self.settings = settings
+        self.chunk_size = max(100, int(settings.chunk_size))
+        self.chunk_overlap = max(0, int(settings.chunk_overlap))
 
-    def split_text(self, text: str, file_metadata: dict[str, Any]) -> list[dict[str, Any]]:
-        ext = file_metadata.get("extension", "")
-        segments = self._split_by_semantic_unit(text, ext)
+    def split_text(self, text: str, **meta: Any) -> list[dict[str, Any]]:
+        text = (text or "").strip()
+        if not text:
+            return []
 
-        size = self.settings.chunk_size
-        overlap = self.settings.chunk_overlap
-        step = max(1, size - overlap)
+        lines = text.splitlines()
+        if not lines:
+            return []
 
         chunks: list[dict[str, Any]] = []
-        idx = 0
+        current_lines: list[str] = []
+        current_length = 0
+        chunk_index = 0
+        start_line = 1
 
-        for seg in segments:
-            seg = seg.strip()
-            if not seg:
-                continue
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            line_len = len(line) + 1
 
-            if len(seg) <= size:
-                chunk = self._make_chunk(seg, idx, file_metadata)
-                if chunk:
-                    chunks.append(chunk)
-                    idx += 1
-                continue
+            if current_lines and current_length + line_len > self.chunk_size:
+                chunk_text = "\n".join(current_lines).strip()
+                if chunk_text:
+                    chunks.append(
+                        {
+                            **meta,
+                            "text": chunk_text,
+                            "chunk_index": chunk_index,
+                            "start_line": start_line,
+                            "end_line": i,
+                            "chunk_type": "text",
+                        }
+                    )
+                    chunk_index += 1
 
-            start = 0
-            while start < len(seg):
-                end = min(start + size, len(seg))
-                piece = seg[start:end]
-                chunk = self._make_chunk(piece, idx, file_metadata)
-                if chunk:
-                    chunks.append(chunk)
-                    idx += 1
-                if end >= len(seg):
-                    break
-                start += step
+                if self.chunk_overlap > 0 and current_lines:
+                    overlap_lines: list[str] = []
+                    overlap_len = 0
+                    for old_line in reversed(current_lines):
+                        candidate_len = len(old_line) + 1
+                        if overlap_lines and overlap_len + candidate_len > self.chunk_overlap:
+                            break
+                        overlap_lines.insert(0, old_line)
+                        overlap_len += candidate_len
+
+                    current_lines = overlap_lines
+                    current_length = sum(len(x) + 1 for x in current_lines)
+                    start_line = max(1, i - len(current_lines) + 1)
+                else:
+                    current_lines = []
+                    current_length = 0
+                    start_line = i + 1
+
+            current_lines.append(line)
+            current_length += line_len
+            i += 1
+
+        if current_lines:
+            chunk_text = "\n".join(current_lines).strip()
+            if chunk_text:
+                chunks.append(
+                    {
+                        **meta,
+                        "text": chunk_text,
+                        "chunk_index": chunk_index,
+                        "start_line": start_line,
+                        "end_line": len(lines),
+                        "chunk_type": "text",
+                    }
+                )
 
         return chunks
 
-    def _split_by_semantic_unit(self, text: str, ext: str) -> list[str]:
-        if ext == "xml":
-            return self._split_xml(text)
-        if ext == "sql":
-            return self._split_sql(text)
-        if ext in ("java", "py", "js", "ts"):
-            return self._split_code_blocks(text)
-        return [text]
+    def chunk_parsed_file(self, parsed: dict[str, Any]) -> list[dict[str, Any]]:
+        if not parsed:
+            return []
 
-    def _split_xml(self, text: str) -> list[str]:
-        tags = ["select", "insert", "update", "delete", "resultMap", "sql"]
-        pattern = r"(<(?:" + "|".join(tags) + r")\b[^>]*>.*?</(?:" + "|".join(tags) + r")>)"
-
-        parts = re.split(pattern, text, flags=re.DOTALL | re.IGNORECASE)
-        header = parts[0].strip() if parts else ""
-
-        segments: list[str] = []
-        if header:
-            segments.append(header)
-
-        for part in parts[1:]:
-            s = part.strip()
-            if s:
-                segments.append(f"{header[:300]}\n{s}" if header else s)
-
-        return segments if segments else [text]
-
-    def _split_sql(self, text: str) -> list[str]:
-        parts = re.split(r";\s*(?:\n|$)", text)
-        return [p.strip() + ";" for p in parts if p.strip()]
-
-    def _split_code_blocks(self, text: str) -> list[str]:
-        parts = re.split(r"\n{2,}", text)
-        return [p.strip() for p in parts if p.strip()]
-
-    def _make_chunk(self, text: str, idx: int, meta: dict[str, Any]) -> dict[str, Any] | None:
-        if not text or not text.strip():
-            return None
-
-        return {
-            "project_id": meta.get("project_id", ""),
-            "project_name": meta.get("project_name", ""),
-            "text": text.strip(),
-            "file_name": meta.get("file_name", ""),
-            "extension": meta.get("extension", ""),
-            "relative_path": meta.get("relative_path", ""),
-            "saved_path": meta.get("saved_path", ""),
-            "file_path": meta.get("file_path", meta.get("saved_path", "")),
-            "chunk_index": idx,
-            "file_size": meta.get("file_size", 0),
-            "source_type": meta.get("source_type", ""),
-            "root_container_name": meta.get("root_container_name", ""),
-            "layer_type": meta.get("layer_type", ""),
-            "class_name": meta.get("class_name", ""),
-            "package": meta.get("package", ""),
-            "content_type": meta.get("content_type", ""),
-        }
+        return self.split_text(
+            parsed.get("raw_text", ""),
+            project_id=parsed.get("project_id", ""),
+            project_name=parsed.get("project_name", ""),
+            file_name=parsed.get("file_name", ""),
+            extension=parsed.get("extension", ""),
+            relative_path=parsed.get("relative_path", ""),
+            saved_path=parsed.get("saved_path", ""),
+            file_path=parsed.get("file_path", parsed.get("saved_path", "")),
+            file_size=parsed.get("file_size", 0),
+            source_type=parsed.get("source_type", ""),
+            root_container_name=parsed.get("root_container_name", ""),
+            layer_type=parsed.get("layer_type", ""),
+            class_name=parsed.get("class_name", ""),
+            package=parsed.get("package", ""),
+            content_type=parsed.get("content_type", ""),
+        )

@@ -8,13 +8,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 LAYER_PATTERNS: list[tuple[str, str]] = [
-    (r"@RestController|@Controller", "controller"),
-    (r"@Service", "service"),
-    (r"@Repository", "repository"),
-    (r"@Mapper", "mapper"),
-    (r"DAO", "repository"),
-    (r"Controller", "controller"),
-    (r"ServiceImpl?", "service"),
+    (r"@RestController|Controller", "controller"),
+    (r"@Service\b|ServiceImpl\b|Service\b", "service"),
+    (r"@Repository\b|Repository\b|DAO\b", "repository"),
+    (r"@Mapper\b|Mapper\b", "mapper"),
 ]
 
 CONTENT_TYPE_PATTERNS: list[tuple[str, str]] = [
@@ -33,128 +30,130 @@ CONTENT_TYPE_PATTERNS: list[tuple[str, str]] = [
 
 def read_text_file(path: str) -> str:
     file_path = Path(path)
-    for enc in ("utf-8", "cp949", "euc-kr", "latin-1"):
+    for encoding in ("utf-8", "cp949", "euc-kr", "latin-1"):
         try:
-            return file_path.read_text(encoding=enc)
+            return file_path.read_text(encoding=encoding)
         except UnicodeDecodeError:
             continue
-    raise ValueError(f"텍스트 파일을 읽을 수 없습니다: {path}")
+    raise ValueError(f"cannot decode file: {path}")
 
 
-def _detect_layer(text: str, ext: str) -> str:
+def detect_layer(text: str, extension: str) -> str:
     for pattern, layer in LAYER_PATTERNS:
-        if re.search(pattern, text, re.I):
+        if re.search(pattern, text, re.IGNORECASE):
             return layer
-    if ext == "xml":
+
+    if extension == "xml":
         return "mapper"
-    if ext == "sql":
+    if extension == "sql":
         return "ddl"
-    if ext in {"yml", "yaml", "json", "ini", "toml"}:
+    if extension in {"yml", "yaml", "json", "ini", "toml"}:
         return "config"
     return ""
 
 
-def _detect_content_type(text: str) -> str:
+def detect_content_type(text: str) -> str:
     for pattern, content_type in CONTENT_TYPE_PATTERNS:
-        if re.search(pattern, text, re.I):
+        if re.search(pattern, text, re.IGNORECASE):
             return content_type
     return ""
 
 
-def _extract_class_name(text: str, ext: str) -> str:
-    if ext == "java":
-        m = re.search(r"class\s+([A-Za-z_][A-Za-z0-9_]*)", text)
-        if m:
-            return m.group(1)
-        m = re.search(r"interface\s+([A-Za-z_][A-Za-z0-9_]*)", text)
-        return m.group(1) if m else ""
-    if ext == "py":
-        m = re.search(r"^class\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.M)
-        return m.group(1) if m else ""
-    if ext == "xml":
-        m = re.search(r'namespace="([^"]+)"', text, re.I)
-        return m.group(1).split(".")[-1] if m else ""
+def extract_class_name(text: str, extension: str) -> str:
+    if extension == "java":
+        match = re.search(r"\bclass\s+([A-Za-z_][A-Za-z0-9_]*)", text)
+        if match:
+            return match.group(1)
+        match = re.search(r"\binterface\s+([A-Za-z_][A-Za-z0-9_]*)", text)
+        return match.group(1) if match else ""
+
+    if extension == "py":
+        match = re.search(r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)", text, re.MULTILINE)
+        return match.group(1) if match else ""
+
+    if extension == "xml":
+        match = re.search(r'namespace\s*=\s*"([^"]+)"', text, re.IGNORECASE)
+        if match:
+            return match.group(1).split(".")[-1]
     return ""
 
 
-def _extract_package(text: str, ext: str) -> str:
-    if ext == "java":
-        m = re.search(r"^package\s+([\w.]+)\s*;", text, re.M)
-        return m.group(1) if m else ""
+def extract_package(text: str, extension: str) -> str:
+    if extension == "java":
+        match = re.search(r"^\s*package\s+([A-Za-z0-9_.]+)\s*;", text, re.MULTILINE)
+        return match.group(1) if match else ""
     return ""
 
 
-def _extract_imports(text: str, ext: str) -> list[str]:
-    if ext == "java":
-        return re.findall(r"^import\s+([\w.]+)\s*;", text, re.M)
-    if ext == "py":
-        imports = re.findall(r"^import\s+([\w.]+)", text, re.M)
-        from_imports = re.findall(r"^from\s+([\w.]+)\s+import\s+", text, re.M)
-        return imports + from_imports
+def extract_imports(text: str, extension: str) -> list[str]:
+    if extension == "java":
+        return re.findall(r"^\s*import\s+([A-Za-z0-9_.*]+)\s*;", text, re.MULTILINE)
+
+    if extension == "py":
+        imports = re.findall(r"^\s*import\s+([A-Za-z0-9_.,\s]+)", text, re.MULTILINE)
+        from_imports = re.findall(r"^\s*from\s+([A-Za-z0-9_.,\s]+)\s+import\s+([A-Za-z0-9_.*,\s]+)", text, re.MULTILINE)
+        result = list(imports)
+        result.extend([f"{module} import {names}" for module, names in from_imports])
+        return result
+
     return []
 
 
-def _extract_methods(text: str, ext: str) -> list[dict[str, Any]]:
+def extract_methods(text: str, extension: str) -> list[dict[str, Any]]:
     methods: list[dict[str, Any]] = []
 
-    if ext == "java":
+    if extension == "java":
         pattern = re.compile(
-            r"(?:public|private|protected)?\s*(?:static\s+)?[\w<>\[\], ?]+\s+"
-            r"([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)",
-            re.M,
+            r"^\s*(?:public|private|protected)?\s*(?:static\s+)?[A-Za-z0-9_<>\[\], ?]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)",
+            re.MULTILINE,
         )
-        for m in pattern.finditer(text):
+        for match in pattern.finditer(text):
             methods.append(
                 {
-                    "name": m.group(1),
-                    "signature": m.group(0).strip(),
-                    "params": m.group(2).strip(),
+                    "name": match.group(1),
+                    "signature": match.group(0).strip(),
+                    "params": match.group(2).strip(),
                 }
             )
 
-    elif ext == "py":
-        pattern = re.compile(r"^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)", re.M)
-        for m in pattern.finditer(text):
+    elif extension == "py":
+        pattern = re.compile(r"^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)", re.MULTILINE)
+        for match in pattern.finditer(text):
             methods.append(
                 {
-                    "name": m.group(1),
-                    "signature": m.group(0).strip(),
-                    "params": m.group(2).strip(),
+                    "name": match.group(1),
+                    "signature": match.group(0).strip(),
+                    "params": match.group(2).strip(),
                 }
             )
 
     return methods
 
 
-def _extract_xml_statement_ids(text: str) -> list[dict[str, str]]:
+def extract_xml_statement_ids(text: str) -> list[dict[str, str]]:
     statements: list[dict[str, str]] = []
     for tag in ("select", "insert", "update", "delete"):
-        pattern = re.compile(rf"<{tag}\b[^>]*id=\"([^\"]+)\"", re.I)
-        for m in pattern.finditer(text):
-            statements.append(
-                {
-                    "tag": tag,
-                    "id": m.group(1),
-                }
-            )
+        pattern = re.compile(rf"<{tag}\b[^>]*\bid\s*=\s*\"([^\"]+)\"", re.IGNORECASE)
+        for match in pattern.finditer(text):
+            statements.append({"tag": tag, "id": match.group(1)})
     return statements
 
 
-def _extract_table_names(text: str, ext: str) -> list[str]:
+def extract_table_names(text: str, extension: str) -> list[str]:
     found: list[str] = []
+    upper_text = text.upper()
+
     patterns = [
-        r"\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"\bJOIN\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"\bUPDATE\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"\bINSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"\bDELETE\s+FROM\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)",
+        r"\bFROM\s+([A-Z_][A-Z0-9_]*)",
+        r"\bJOIN\s+([A-Z_][A-Z0-9_]*)",
+        r"\bUPDATE\s+([A-Z_][A-Z0-9_]*)",
+        r"\bINTO\s+([A-Z_][A-Z0-9_]*)",
+        r"\bTABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Z_][A-Z0-9_]*)",
     ]
 
-    upper_text = text.upper()
     for pattern in patterns:
-        for m in re.finditer(pattern, upper_text, re.I):
-            found.append(m.group(1))
+        for match in re.finditer(pattern, upper_text, re.IGNORECASE):
+            found.append(match.group(1))
 
     deduped: list[str] = []
     seen = set()
@@ -162,6 +161,7 @@ def _extract_table_names(text: str, ext: str) -> list[str]:
         if name not in seen:
             seen.add(name)
             deduped.append(name)
+
     return deduped
 
 
@@ -180,11 +180,11 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
         if not raw_text.strip():
             return {}
 
-        ext = str(file_info.get("extension", "")).lower()
-        layer_type = _detect_layer(raw_text, ext)
-        content_type = _detect_content_type(raw_text)
-        class_name = _extract_class_name(raw_text, ext)
-        package = _extract_package(raw_text, ext)
+        extension = str(file_info.get("extension", "")).lower().lstrip(".")
+        layer_type = detect_layer(raw_text, extension)
+        content_type = detect_content_type(raw_text)
+        class_name = extract_class_name(raw_text, extension)
+        package = extract_package(raw_text, extension)
 
         return {
             "raw_text": raw_text,
@@ -194,7 +194,7 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
                 "file_name",
                 file_info.get("filename", file_info.get("original_name", file_info.get("originalname", ""))),
             ),
-            "extension": ext,
+            "extension": extension,
             "relative_path": file_info.get("relative_path", file_info.get("relativepath", "")),
             "saved_path": saved_path,
             "file_path": saved_path,
@@ -209,16 +209,11 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
             "class_name": class_name,
             "package": package,
         }
-
-    except KeyError as e:
-        logger.error("parse_text_file: required key missing - %s | file_info=%s", e, file_info)
+    except KeyError as error:
+        logger.error("parse_text_file required key missing - %s file_info=%s", error, file_info)
         return {}
-    except Exception as e:
-        logger.error(
-            "parse_text_file: failed - %s | path=%s",
-            e,
-            file_info.get("saved_path", file_info.get("savedpath")),
-        )
+    except Exception as error:
+        logger.error("parse_text_file failed - %s path=%s", error, file_info.get("saved_path", file_info.get("savedpath", "")))
         return {}
 
 
@@ -228,7 +223,7 @@ def extract_static_analysis(file_info: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     raw_text = parsed["raw_text"]
-    ext = parsed["extension"]
+    extension = parsed["extension"]
 
     return {
         "project_id": parsed.get("project_id", ""),
@@ -236,30 +231,14 @@ def extract_static_analysis(file_info: dict[str, Any]) -> dict[str, Any]:
         "file_name": parsed.get("file_name", ""),
         "relative_path": parsed.get("relative_path", ""),
         "saved_path": parsed.get("saved_path", ""),
-        "extension": ext,
+        "extension": extension,
         "layer_type": parsed.get("layer_type", ""),
         "content_type": parsed.get("content_type", ""),
         "class_name": parsed.get("class_name", ""),
         "package": parsed.get("package", ""),
-        "imports": _extract_imports(raw_text, ext),
-        "methods": _extract_methods(raw_text, ext),
-        "xml_statements": _extract_xml_statement_ids(raw_text) if ext == "xml" else [],
-        "table_names": _extract_table_names(raw_text, ext),
+        "imports": extract_imports(raw_text, extension),
+        "methods": extract_methods(raw_text, extension),
+        "xml_statements": extract_xml_statement_ids(raw_text) if extension == "xml" else [],
+        "table_names": extract_table_names(raw_text, extension),
         "raw_text": raw_text,
     }
-
-
-# ------------------------------------------------------------------
-# backward-compatible aliases
-# ------------------------------------------------------------------
-
-def readtextfile(path: str) -> str:
-    return read_text_file(path)
-
-
-def parsetextfile(file_info: dict[str, Any]) -> dict[str, Any]:
-    return parse_text_file(file_info)
-
-
-def extractstaticanalysis(file_info: dict[str, Any]) -> dict[str, Any]:
-    return extract_static_analysis(file_info)
