@@ -20,7 +20,7 @@ st.set_page_config(
 
 def init_session_state():
     defaults = {
-        "user_id": "local-user",
+        "user_id": None,          # 로그인 전에는 None
         "projects": [],
         "projects_error": None,
         "system_status": None,
@@ -48,14 +48,91 @@ def init_session_state():
         if key not in st.session_state:
             st.session_state[key] = value
 
-
+# ─────────────────────────────────────────────
+# session_state 초기화
+# ─────────────────────────────────────────────
 init_session_state()
+
+
+# ─────────────────────────────────────────────
+# 로그인 게이트
+# ─────────────────────────────────────────────
+def verify_user_id(user_id: str) -> bool:
+    """백엔드 /users/verify 로 user_id 존재 여부를 확인 후 없다면 생성합니다."""
+    try:
+        r = requests.get(
+            f"{BACKEND_URL}/users/verify",
+            params={"user_id": user_id},
+            timeout=10,
+        )
+        r.raise_for_status()
+        return r.json().get("exists", False)
+    except Exception as e:
+        raise RuntimeError(f"사용자 조회 중 오류가 발생했습니다: {e}") from e
+
+
+def render_login_page():
+    """user_id 입력 화면을 렌더링합니다. 유효한 ID를 입력하면 session에 저장합니다."""
+    st.markdown(
+        """
+        <style>
+        .login-box {
+            max-width: 420px;
+            margin: 8rem auto 0 auto;
+            padding: 2.5rem 2rem;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            background: #fafafa;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.07);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_l, col_c, col_r = st.columns([1, 2, 1])
+    with col_c:
+        st.markdown("## 🧠 IT-Smart CodeMind")
+        st.markdown("##### 사용자 ID를 입력하세요")
+        st.caption("시스템에 등록된 사용자가 아닌 경우 신규 등록됩니다.")
+        st.divider()
+
+        with st.form("login_form", clear_on_submit=False):
+            user_id_input = st.text_input(
+                "User ID",
+                placeholder="예: 1234",
+                max_chars=100,
+            )
+            submitted = st.form_submit_button("로그인", use_container_width=True, type="primary")
+
+        if submitted:
+            uid = (user_id_input or "").strip()
+            if not uid:
+                st.error("User ID를 입력해주세요.")
+            else:
+                with st.spinner("사용자 확인 중..."):
+                    try:
+                        exists = verify_user_id(uid)
+                    except RuntimeError as e:
+                        st.error(str(e))
+                        return
+
+                if exists:
+                    st.success(f"'{uid}' 로 로그인되었습니다.")
+                    st.session_state.user_id = uid
+                    st.rerun()
+                else:
+                    st.success(f"'{uid}' 가 생성되었습니다.")
+                    st.session_state.user_id = uid
+                    st.rerun()
 
 
 def get_headers() -> dict[str, str]:
     return {"X-User-Id": st.session_state.user_id}
 
-
+# ─────────────────────────────────────────────
+# API 호출 헬퍼
+# ─────────────────────────────────────────────
 def api_get(path: str, params: dict | None = None, timeout: int = 30, stream: bool = False):
     return requests.get(
         f"{BACKEND_URL}{path}",
@@ -85,7 +162,9 @@ def api_delete(path: str, params: dict | None = None, timeout: int = 30):
         timeout=timeout,
     )
 
-
+# ─────────────────────────────────────────────
+# Mermaid 코드 추출 및 렌더링
+# ─────────────────────────────────────────────
 def extract_mermaid_blocks(text: str) -> list[str]:
     if not text:
         return []
@@ -195,33 +274,30 @@ def normalize_project_name(name: str | None) -> str:
 def current_project_name() -> str:
     return st.session_state.get("chat_project_select", "전체")
 
+# TODO : 미사용 메서드 제거 필요
+# def dedupe_projects(projects: list[dict]) -> list[dict]:
+#     by_project_id: dict[str, dict] = {}
+#     for p in projects:
+#         pid = (p.get("project_id") or "").strip()
+#         if not pid:
+#             continue
+#         existing = by_project_id.get(pid)
+#         if not existing:
+#             by_project_id[pid] = p
+#             continue
 
-def dedupe_projects(projects: list[dict]) -> list[dict]:
-    by_project_id: dict[str, dict] = {}
+#         old_uploaded = existing.get("uploaded_at") or ""
+#         new_uploaded = p.get("uploaded_at") or ""
+#         if new_uploaded >= old_uploaded:
+#             by_project_id[pid] = p
 
-    for project in projects:
-        project_id = (project.get("project_id") or "").strip()
-        if not project_id:
-            continue
+#     unique_by_name: dict[str, dict] = {}
+#     for p in sorted(by_project_id.values(), key=lambda x: x.get("uploaded_at") or "", reverse=True):
+#         pname = normalize_project_name(p.get("project_name"))
+#         if pname not in unique_by_name:
+#             unique_by_name[pname] = p
 
-        existing = by_project_id.get(project_id)
-        if not existing:
-            by_project_id[project_id] = project
-            continue
-
-        old_uploaded_at = existing.get("uploaded_at") or ""
-        new_uploaded_at = project.get("uploaded_at") or ""
-
-        if new_uploaded_at >= old_uploaded_at:
-            by_project_id[project_id] = project
-
-    unique_by_name: dict[str, dict] = {}
-    for project in sorted(by_project_id.values(), key=lambda item: item.get("uploaded_at") or "", reverse=True):
-        project_name = normalize_project_name(project.get("project_name"))
-        if project_name not in unique_by_name:
-            unique_by_name[project_name] = project
-
-    return list(unique_by_name.values())
+#     return list(unique_by_name.values())
 
 
 def fetch_system_status(force: bool = False):
@@ -249,7 +325,7 @@ def fetch_projects(force: bool = False):
         response.raise_for_status()
         data = response.json()
         raw_projects = data.get("projects", [])
-        st.session_state.projects = dedupe_projects(raw_projects)
+        st.session_state.projects = raw_projects
         st.session_state.projects_error = None
 
         valid_names = {"전체"} | {
@@ -880,19 +956,27 @@ def render_chat_area():
 
 
 def bootstrap():
-    fetch_system_status(force=True)
-    fetch_projects(force=True)
-    fetch_index_jobs(force=True)
-    fetch_history(force=True)
-    rebuild_project_histories_from_server()
-    refresh_active_job()
+    fetch_system_status(force=True) # 시스템 상태
+    fetch_projects(force=True)      # 프로젝트 목록
+    fetch_index_jobs(force=True)    # 인덱스 작업 목록
+    fetch_history(force=True)       # 히스토리 목록
+    rebuild_project_histories_from_server()  # 히스토리 기반 프로젝트별 대화 기록
+    refresh_active_job()            # 현재 진행 중인 인덱싱 작업 상태를 갱신
 
+
+# ─────────────────────────────────────────────
+# 진입점: 로그인 여부 확인 후 분기
+# ─────────────────────────────────────────────
+
+if not st.session_state.get("user_id"):
+    render_login_page()
+    st.stop()
 
 bootstrap()
 process_pending_upload()
 
 st.title("🧠 IT-Smart CodeMind")
-st.caption("자동 업로드/자동 인덱싱 · 프로젝트 선택형 대화")
+st.caption(f"자동 업로드/자동 인덱싱 · 프로젝트 선택형 대화 · 사용자: {st.session_state.user_id}")
 
 with st.sidebar:
     render_system_status()

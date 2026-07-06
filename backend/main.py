@@ -37,6 +37,7 @@ from database.history_repository import (
     save_uploaded_file,
     update_index_job,
     upsert_user,
+    user_exists,
 )
 from database.init_db import init_db
 from health_service import build_system_status
@@ -448,6 +449,18 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/users/verify")
+def verify_user(user_id: str = Query(...)):
+    """사용자 ID가 SQLite users 테이블에 존재하는지 확인합니다."""
+    if not user_id or not user_id.strip():
+        raise HTTPException(status_code=400, detail="user_id is required")
+    uid = user_id.strip()
+    exists = user_exists(uid)
+    if not exists:
+        user_exists(uid)
+    return {"user_id": uid, "exists": exists}
+
+
 @app.get("/status")
 def status():
     rag_initialized = getattr(app.state, "rag_initialized", False)
@@ -535,25 +548,22 @@ async def upload(
         "projects": len(projects_created),
     }
 
+# TODO : 미사용 엔드포인트 제거 필요
+# @app.post("/index")
+# async def index_now(request: Request, targets: List[dict] = Body(...)):
+#     if not targets:
+#         raise HTTPException(status_code=400, detail="targets are required")
 
-@app.post("/index")
-async def index_now(
-        request: Request,
-        targets: list[dict[str, Any]] = Body(...),
-):
-    if not targets:
-        raise HTTPException(status_code=400, detail="targets are required")
+#     service = get_rag_service(request)
+#     normalized_targets = [normalize_target_item(t) for t in targets]
 
-    rag_service = get_rag_service(request)
-    normalized_targets = [normalize_target_item(target) for target in targets]
-
-    try:
-        result = await run_in_threadpool(rag_service.index_files, normalized_targets)
-        result["total_chunks"] = int(result.get("total_chunks", 0) or 0)
-        return result
-    except Exception as error:
-        logger.exception("index_now failed")
-        raise HTTPException(status_code=500, detail=f"index failed: {error}") from error
+#     try:
+#         result = await run_in_threadpool(service.indexfiles, normalized_targets)
+#         result["total_chunks"] = int(result.get("totalchunks", result.get("total_chunks", 0)) or 0)
+#         return result
+#     except Exception as e:
+#         logger.exception("index_now failed")
+#         raise HTTPException(status_code=500, detail=f"index failed: {e}") from e
 
 
 @app.post("/index-jobs")
