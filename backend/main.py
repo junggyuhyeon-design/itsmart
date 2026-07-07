@@ -334,6 +334,10 @@ def detect_meta_request(question: str) -> bool:
         "레이어",
         "테이블",
         "db",
+        "소스",
+        "파일",
+        "설명",
+        "프로젝트",
     ]
     return any(keyword in lowered for keyword in keywords)
 
@@ -377,6 +381,7 @@ async def call_ask_with_context_stream(
         rag_service: RAGService,
         *,
         question: str,
+        retrieval_question: str | None,
         project_id: str | None,
         project_name: str | None,
         extra_context: str,
@@ -390,6 +395,7 @@ async def call_ask_with_context_stream(
 ):
     return await rag_service.ask_with_context_stream(
         question=question,
+        retrieval_question=retrieval_question,
         project_id=project_id,
         project_name=project_name,
         extra_context=extra_context,
@@ -429,7 +435,12 @@ def run_index_job(rag_service: RAGService, job_id: str, targets: list[dict[str, 
             success_count=int(result.get("success", 0) or 0),
             failed_count=int(result.get("failed", 0) or 0),
             total_chunks=int(result.get("total_chunks", 0) or 0),
-            message=f"success={result.get('success', 0)} failed={result.get('failed', 0)}",
+            message=(
+                f"success={result.get('success', 0)} "
+                f"failed={result.get('failed', 0)} "
+                f"indexed_files={result.get('indexed_files', 0)} "
+                f"code_elements={result.get('code_elements', 0)}"
+            ),
             logs=result.get("logs", []),
             finished=True,
         )
@@ -491,6 +502,7 @@ async def upload(
 
     ensure_dir(upload_dir)
     saved_filenames: list[str] = []
+    upload_name_map: dict[str, str] = {}
 
     for upload_file in files:
         if not upload_file.filename or not upload_file.filename.strip():
@@ -506,19 +518,25 @@ async def upload(
         destination = upload_dir / sanitized_name
         await save_upload_stream(upload_file, destination)
         saved_filenames.append(sanitized_name)
+        upload_name_map[sanitized_name] = str(destination)
 
     raw_targets = await run_in_threadpool(process_uploads_and_collect, upload_dir, saved_filenames)
 
-    projects_created: dict[str, str] = {}
+    projects_created: dict[str, dict[str, str]] = {}
     normalized_targets: list[dict[str, Any]] = []
 
     for target in raw_targets:
         project_id = getattr(target, "project_id", None) or getattr(target, "projectid", None)
         project_name = getattr(target, "project_name", None) or getattr(target, "projectname", None)
         saved_path = getattr(target, "saved_path", None) or getattr(target, "savedpath", None)
+        root_container_name = getattr(target, "root_container_name", None) or getattr(target, "rootcontainername", None)
 
         if project_id and project_id not in projects_created:
-            projects_created[project_id] = project_name or ""
+            origin_saved_path = upload_name_map.get(root_container_name or "", "")
+            projects_created[project_id] = {
+                "project_name": project_name or "",
+                "saved_path": origin_saved_path,
+            }
 
         normalized_targets.append(
             {
@@ -531,14 +549,13 @@ async def upload(
                 "extension": getattr(target, "extension", None),
                 "file_size": getattr(target, "size", 0),
                 "source_type": getattr(target, "source_type", None) or getattr(target, "sourcetype", None),
-                "root_container_name": getattr(target, "root_container_name", None) or getattr(target, "rootcontainername", None),
+                "root_container_name": root_container_name,
             }
         )
 
-    for project_id, project_name in projects_created.items():
-        origin_path = upload_dir / f"{project_name}.zip"
+    for project_id, project_info in projects_created.items():
         try:
-            save_uploaded_file(project_id, project_name, str(origin_path))
+            save_uploaded_file(project_id, project_info["project_name"], project_info["saved_path"])
         except Exception as error:
             logger.exception("save_uploaded_file failed project_id=%s error=%s", project_id, error)
 
@@ -548,22 +565,27 @@ async def upload(
         "projects": len(projects_created),
     }
 
-# TODO : 미사용 엔드포인트 제거 필요
-# @app.post("/index")
-# async def index_now(request: Request, targets: List[dict] = Body(...)):
-#     if not targets:
-#         raise HTTPException(status_code=400, detail="targets are required")
 
-#     service = get_rag_service(request)
-#     normalized_targets = [normalize_target_item(t) for t in targets]
+@app.post("/index")
+async def index_now(
+        request: Request,
+        targets: list[dict[str, Any]] = Body(...),
+):
+    if not targets:
+        raise HTTPException(status_code=400, detail="targets are required")
 
-#     try:
-#         result = await run_in_threadpool(service.indexfiles, normalized_targets)
-#         result["total_chunks"] = int(result.get("totalchunks", result.get("total_chunks", 0)) or 0)
-#         return result
-#     except Exception as e:
-#         logger.exception("index_now failed")
-#         raise HTTPException(status_code=500, detail=f"index failed: {e}") from e
+    rag_service = get_rag_service(request)
+    normalized_targets = [normalize_target_item(target) for target in targets]
+
+    try:
+        result = await run_in_threadpool(rag_service.index_files, normalized_targets)
+        result["total_chunks"] = int(result.get("total_chunks", 0) or 0)
+        result["indexed_files"] = int(result.get("indexed_files", 0) or 0)
+        result["code_elements"] = int(result.get("code_elements", 0) or 0)
+        return result
+    except Exception as error:
+        logger.exception("index_now failed")
+        raise HTTPException(status_code=500, detail=f"index failed: {error}") from error
 
 
 @app.post("/index-jobs")
@@ -728,6 +750,8 @@ async def ask(
     intent = query_analyzer.analyze(question)
     rag_service = get_rag_service(request)
 
+    retrieval_question = (intent.search_query or question).strip()
+
     structure_context = ""
     if intent.query_type != "diagram" and project_id:
         summary = get_file_index_summary(project_id)
@@ -738,9 +762,10 @@ async def ask(
     if project_id and detect_meta_request(question):
         sqlite_context = build_sqlite_context(project_id, selected_project_name or "", question)
 
-    generator, _hits = await call_ask_with_context_stream(
-        rag_service,
+    generator, hits = await call_ask_with_context_stream(
+        rag_service=rag_service,
         question=question,
+        retrieval_question=retrieval_question,
         project_id=project_id,
         project_name=selected_project_name,
         extra_context=structure_context or extra_context,
@@ -763,10 +788,12 @@ async def ask(
             answer = "".join(collected_chunks).strip()
             if answer:
                 try:
-                    stored_question = question
-                    if selected_project_name:
-                        stored_question = f"[{selected_project_name}] {question}"
-                    save_history(user_id, stored_question, answer)
+                    save_history(
+                        user_id=user_id,
+                        question=question,
+                        answer=answer,
+                        project_id=project_id,
+                    )
                 except Exception:
                     logger.exception("save_history failed")
 

@@ -31,6 +31,7 @@ def init_session_state():
         "history_error": None,
         "latest_project_name": None,
         "chat_project_select": "전체",
+        "chat_project_id": None,
         "active_job_id": None,
         "active_job_detail": None,
         "uploading": False,
@@ -274,30 +275,50 @@ def normalize_project_name(name: str | None) -> str:
 def current_project_name() -> str:
     return st.session_state.get("chat_project_select", "전체")
 
-# TODO : 미사용 메서드 제거 필요
-# def dedupe_projects(projects: list[dict]) -> list[dict]:
-#     by_project_id: dict[str, dict] = {}
-#     for p in projects:
-#         pid = (p.get("project_id") or "").strip()
-#         if not pid:
-#             continue
-#         existing = by_project_id.get(pid)
-#         if not existing:
-#             by_project_id[pid] = p
-#             continue
 
-#         old_uploaded = existing.get("uploaded_at") or ""
-#         new_uploaded = p.get("uploaded_at") or ""
-#         if new_uploaded >= old_uploaded:
-#             by_project_id[pid] = p
+def current_project_id() -> str | None:
+    return st.session_state.get("chat_project_id")
 
-#     unique_by_name: dict[str, dict] = {}
-#     for p in sorted(by_project_id.values(), key=lambda x: x.get("uploaded_at") or "", reverse=True):
-#         pname = normalize_project_name(p.get("project_name"))
-#         if pname not in unique_by_name:
-#             unique_by_name[pname] = p
 
-#     return list(unique_by_name.values())
+def project_key(project_id: str | None) -> str:
+    return (project_id or "").strip() or "__global__"
+
+
+def project_name_by_id(project_id: str | None) -> str:
+    if not project_id:
+        return "전체"
+
+    for project in st.session_state.get("projects", []):
+        if (project.get("project_id") or "").strip() == project_id:
+            return normalize_project_name(project.get("project_name"))
+
+    return normalize_project_name(project_id)
+
+
+def dedupe_projects(projects: list[dict]) -> list[dict]:
+    by_project_id: dict[str, dict] = {}
+
+    for project in projects:
+        project_id = (project.get("project_id") or "").strip()
+        if not project_id:
+            continue
+
+        existing = by_project_id.get(project_id)
+        if not existing:
+            by_project_id[project_id] = project
+            continue
+
+        old_uploaded_at = existing.get("uploaded_at") or ""
+        new_uploaded_at = project.get("uploaded_at") or ""
+
+        if new_uploaded_at >= old_uploaded_at:
+            by_project_id[project_id] = project
+
+    return sorted(
+        by_project_id.values(),
+        key=lambda item: item.get("uploaded_at") or "",
+        reverse=True,
+    )
 
 
 def fetch_system_status(force: bool = False):
@@ -325,15 +346,17 @@ def fetch_projects(force: bool = False):
         response.raise_for_status()
         data = response.json()
         raw_projects = data.get("projects", [])
-        st.session_state.projects = raw_projects
+        st.session_state.projects = dedupe_projects(raw_projects)
         st.session_state.projects_error = None
 
-        valid_names = {"전체"} | {
-            normalize_project_name(project.get("project_name"))
+        valid_ids = {None, ""} | {
+            (project.get("project_id") or "").strip()
             for project in st.session_state.projects
         }
-        if st.session_state.chat_project_select not in valid_names:
+
+        if (st.session_state.chat_project_id or "") not in valid_ids:
             st.session_state.chat_project_select = "전체"
+            st.session_state.chat_project_id = None
 
     except Exception as error:
         st.session_state.projects = []
@@ -403,30 +426,25 @@ def rebuild_project_histories_from_server():
         answer = (item.get("answer") or "").strip()
         created_at = item.get("created_at")
         ts = parse_created_at_to_ts(created_at)
+        key = project_key(item.get("project_id"))
 
-        project_name = "전체"
-        stripped_question = question
+        if key not in project_histories:
+            project_histories[key] = []
 
-        if question.startswith("[") and "]" in question:
-            try:
-                project_name = question[1:question.index("]")].strip() or "전체"
-                stripped_question = question[question.index("]") + 1:].strip()
-            except Exception:
-                project_name = "전체"
-                stripped_question = question
-
-        if project_name not in project_histories:
-            project_histories[project_name] = []
-
-        if stripped_question:
-            project_histories[project_name].append(
-                {"role": "user", "content": stripped_question, "ts": ts}
+        if question:
+            project_histories[key].append(
+                {"role": "user", "content": question, "ts": ts}
             )
 
         if answer:
-            project_histories[project_name].append(
+            project_histories[key].append(
                 {"role": "assistant", "content": answer, "ts": ts}
             )
+
+    all_messages: list[dict] = []
+    for items in project_histories.values():
+        all_messages.extend(items)
+    project_histories["__all__"] = sorted(all_messages, key=lambda item: item["ts"])
 
     st.session_state.project_histories = project_histories
 
@@ -449,8 +467,11 @@ def build_project_job_map(projects: list[dict], jobs: list[dict]) -> dict[str, d
     result = {}
 
     for project in projects:
-        project_name = normalize_project_name(project.get("project_name"))
-        matched = [job for job in jobs if normalize_project_name(job.get("project_name")) == project_name]
+        project_id = (project.get("project_id") or "").strip()
+        if not project_id:
+            continue
+
+        matched = [job for job in jobs if (job.get("project_id") or "").strip() == project_id]
         if not matched:
             continue
 
@@ -461,7 +482,7 @@ def build_project_job_map(projects: list[dict], jobs: list[dict]) -> dict[str, d
             ),
             reverse=True,
         )
-        result[project_name] = matched[0]
+        result[project_id] = matched[0]
 
     return result
 
@@ -498,10 +519,12 @@ def project_selectable(job: dict | None) -> bool:
 
 
 def get_visible_chat_messages() -> list[dict]:
-    selected = current_project_name()
-    if selected == "전체":
-        return []
-    return st.session_state.project_histories.get(selected, [])
+    selected_project_id = current_project_id()
+
+    if not selected_project_id:
+        return st.session_state.project_histories.get("__all__", [])
+
+    return st.session_state.project_histories.get(project_key(selected_project_id), [])
 
 
 def reset_local_state_after_reset():
@@ -513,6 +536,7 @@ def reset_local_state_after_reset():
     st.session_state.history_error = None
     st.session_state.latest_project_name = None
     st.session_state.chat_project_select = "전체"
+    st.session_state.chat_project_id = None
     st.session_state.active_job_id = None
     st.session_state.active_job_detail = None
     st.session_state.uploading = False
@@ -571,19 +595,22 @@ def render_sidebar_projects():
 
     if st.sidebar.button("전체 보기", key="all_projects_btn", use_container_width=True):
         st.session_state.chat_project_select = "전체"
+        st.session_state.chat_project_id = None
+        fetch_history(force=True)
+        rebuild_project_histories_from_server()
         st.rerun()
 
-    current = current_project_name()
+    current_project_id_value = current_project_id()
 
     for project in projects:
         project_name = normalize_project_name(project.get("project_name"))
-        project_id = (project.get("project_id") or "").strip() or project_name
-        job = project_job_map.get(project_name)
+        project_id = (project.get("project_id") or "").strip()
+        job = project_job_map.get(project_id)
 
         disabled = not project_selectable(job)
         status_label = get_project_status_label(job)
         progress = calc_job_progress(job) if job else None
-        selected = current == project_name
+        selected = current_project_id_value == project_id
 
         label = f"📁 {project_name}"
         if selected:
@@ -596,6 +623,7 @@ def render_sidebar_projects():
                 disabled=disabled,
         ):
             st.session_state.chat_project_select = project_name
+            st.session_state.chat_project_id = project_id
             fetch_history(force=True)
             rebuild_project_histories_from_server()
             st.rerun()
@@ -817,22 +845,16 @@ def render_upload_area():
             st.rerun()
 
 
-def save_server_history(project_name: str, question: str, answer: str):
-    try:
-        stored_question = f"[{project_name}] {question}"
-        api_post("/history", json_data={"question": stored_question, "answer": answer}, timeout=20)
-    except Exception:
-        pass
-
-
-def ask_backend(question: str, project_name: str | None) -> str:
+def ask_backend(question: str, project_name: str | None, project_id: str | None) -> str:
     params = {
         "question": question,
         "top_k": 5,
         "extra_context": "",
     }
 
-    if project_name and project_name != "전체":
+    if project_id:
+        params["project_id"] = project_id
+    elif project_name and project_name != "전체":
         params["project_name"] = project_name
 
     chunks = []
@@ -859,7 +881,9 @@ def ask_backend(question: str, project_name: str | None) -> str:
         "extra_context": "",
     }
 
-    if project_name and project_name != "전체":
+    if project_id:
+        payload["project_id"] = project_id
+    elif project_name and project_name != "전체":
         payload["project_name"] = project_name
 
     chunks = []
@@ -884,6 +908,7 @@ def ask_backend(question: str, project_name: str | None) -> str:
             "프론트에서 /ask 스트리밍 처리 중 예외가 발생했습니다.\n\n"
             f"- 질문: {question}\n"
             f"- 선택 프로젝트: {project_name or '전체'}\n"
+            f"- 프로젝트 ID: {project_id or '없음'}\n"
             f"- 원본 오류: {error}\n\n"
             "이 오류가 계속 뜨면 백엔드 /ask와 Ollama 연결 상태를 점검하세요."
         )
@@ -892,12 +917,12 @@ def ask_backend(question: str, project_name: str | None) -> str:
 def render_chat_area():
     st.subheader("질문")
     selected_project = current_project_name()
+    selected_project_id = current_project_id()
 
-    if selected_project == "전체":
-        st.info("사이드바에서 프로젝트를 선택한 뒤 질문하세요. 선택한 프로젝트의 대화만 표시됩니다.")
-        return
-
-    st.caption(f"현재 프로젝트 공간: {selected_project}")
+    if selected_project_id:
+        st.caption(f"현재 프로젝트 공간: {project_name_by_id(selected_project_id)}")
+    else:
+        st.info("전체 보기에서는 모든 프로젝트 대화가 표시됩니다.")
 
     visible_messages = get_visible_chat_messages()
     for message in visible_messages:
@@ -907,10 +932,14 @@ def render_chat_area():
             else:
                 st.markdown(message["content"])
 
+    if not selected_project_id:
+        st.info("사이드바에서 프로젝트를 선택한 뒤 질문하세요. 전체 보기에서는 질문 입력이 비활성화됩니다.")
+        return
+
     jobs = fetch_index_jobs(force=True)
     projects = fetch_projects(force=True)
     job_map = build_project_job_map(projects, jobs)
-    job = job_map.get(selected_project)
+    job = job_map.get(selected_project_id)
     project_locked = not project_selectable(job)
 
     disabled_reason = None
@@ -937,19 +966,20 @@ def render_chat_area():
 
     with st.chat_message("assistant"):
         with st.spinner("답변 생성 중..."):
-            answer = ask_backend(question, selected_project)
+            answer = ask_backend(question, selected_project, selected_project_id)
         render_answer(answer)
 
     local_ts = time.time()
-    st.session_state.project_histories.setdefault(selected_project, [])
-    st.session_state.project_histories[selected_project].append(
+    key = project_key(selected_project_id)
+
+    st.session_state.project_histories.setdefault(key, [])
+    st.session_state.project_histories[key].append(
         {"role": "user", "content": question, "ts": local_ts}
     )
-    st.session_state.project_histories[selected_project].append(
+    st.session_state.project_histories[key].append(
         {"role": "assistant", "content": answer, "ts": local_ts}
     )
 
-    save_server_history(selected_project, question, answer)
     fetch_history(force=True)
     rebuild_project_histories_from_server()
     st.rerun()

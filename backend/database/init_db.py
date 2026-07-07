@@ -27,6 +27,13 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_def: str) -> None:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    existing_columns = {row["name"] for row in rows}
+    if column_name not in existing_columns:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
+
+
 def init_db() -> None:
     with get_connection() as conn:
         conn.execute(
@@ -44,16 +51,27 @@ def init_db() -> None:
                 user_id TEXT NOT NULL,
                 question TEXT NOT NULL,
                 answer TEXT NOT NULL,
+                project_id TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+
+        ensure_column(conn, "chat_history", "project_id", "TEXT")
+
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_chat_history_user_created
             ON chat_history(user_id, created_at DESC)
             """
         )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_history_user_project_created
+            ON chat_history(user_id, project_id, created_at DESC)
+            """
+        )
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS uploaded_files (

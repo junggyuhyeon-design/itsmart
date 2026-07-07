@@ -5,7 +5,14 @@ import logging
 from typing import Any
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, PointStruct, VectorParams
+from qdrant_client.http.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 
 from config import Settings
 
@@ -26,7 +33,10 @@ class QdrantService:
     def collection_exists(self) -> bool:
         try:
             collections = self.client.get_collections().collections
-            return any(collection.name == self.settings.qdrant_collection for collection in collections)
+            return any(
+                collection.name == self.settings.qdrant_collection
+                for collection in collections
+            )
         except Exception:
             return False
 
@@ -34,16 +44,23 @@ class QdrantService:
         if not self.collection_exists():
             self.client.create_collection(
                 collection_name=self.settings.qdrant_collection,
-                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+                vectors_config=VectorParams(
+                    size=vector_size,
+                    distance=Distance.COSINE,
+                ),
             )
             logger.info("Qdrant collection created: %s", self.settings.qdrant_collection)
 
     def recreate_collection(self, vector_size: int) -> None:
         if self.collection_exists():
             self.client.delete_collection(self.settings.qdrant_collection)
+
         self.client.create_collection(
             collection_name=self.settings.qdrant_collection,
-            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+            vectors_config=VectorParams(
+                size=vector_size,
+                distance=Distance.COSINE,
+            ),
         )
 
     def upsert_chunks(self, chunks: list[dict[str, Any]], vectors: list[list[float]]) -> int:
@@ -51,9 +68,10 @@ class QdrantService:
             return 0
 
         points: list[PointStruct] = []
+
         for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
             point_id = hashlib.md5(
-                f"{chunk.get('project_id','')}|{chunk.get('relative_path','')}|{chunk.get('chunk_index', index)}".encode()
+                f"{chunk.get('project_id', '')}|{chunk.get('relative_path', '')}|{chunk.get('chunk_index', index)}".encode()
             ).hexdigest()
 
             payload = {
@@ -78,7 +96,13 @@ class QdrantService:
                 "chunk_type": chunk.get("chunk_type", "text"),
             }
 
-            points.append(PointStruct(id=point_id, vector=vector, payload=payload))
+            points.append(
+                PointStruct(
+                    id=point_id,
+                    vector=vector,
+                    payload=payload,
+                )
+            )
 
 
         self.client.upsert( # id 를 기준으로 upsert 수행, 동일한 id가 존재하면 덮어쓰기
@@ -97,12 +121,30 @@ class QdrantService:
             extension_filter: str | None = None,
     ) -> list[dict[str, Any]]:
         must = []
+
         if project_id:
-            must.append(FieldCondition(key="project_id", match=MatchValue(value=project_id)))
+            must.append(
+                FieldCondition(
+                    key="project_id",
+                    match=MatchValue(value=project_id),
+                )
+            )
+
         if layer_filter:
-            must.append(FieldCondition(key="layer_type", match=MatchValue(value=layer_filter)))
+            must.append(
+                FieldCondition(
+                    key="layer_type",
+                    match=MatchValue(value=layer_filter),
+                )
+            )
+
         if extension_filter:
-            must.append(FieldCondition(key="extension", match=MatchValue(value=extension_filter)))
+            must.append(
+                FieldCondition(
+                    key="extension",
+                    match=MatchValue(value=extension_filter),
+                )
+            )
 
         query_filter = Filter(must=must) if must else None
 
