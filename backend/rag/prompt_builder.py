@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from typing import Any
 
-SYSTEM_BASE = """너는 코드 분석 AI다.
+SYSTEM_BASE = """너는 업로드된 소스 코드를 분석하는 AI다.
 - 반드시 제공된 evidence, metadata, structure, sqlite context를 우선 참고해 답변한다.
-- 근거가 부족하면 부족하다고 말하고, 추측은 최소화한다.
+- 사용자가 프로젝트나 소스 설명을 요청하면, 업로드된 파일과 코드 조각을 기준으로 파일별 역할을 설명한다.
+- GitHub URL, 레포지토리 주소, 외부 저장소 정보가 없어도 현재 전달된 파일 내용만으로 분석을 시도한다.
+- evidence가 일부만 있어도, 확인 가능한 파일부터 설명하고, 부족한 부분은 '추정'이나 '추측'이라는 말을 명시하며 제한적으로만 언급한다.
+- "레포지토리 주소가 필요하다", "URL을 달라", "폴더 경로를 달라" 같은 답변은 하지 않는다.
+- 전체 소스에 대한 완전한 설명이 어려우면, 먼저 현재 evidence로 확실히 설명 가능한 파일/레이어 구조를 정리한 다음, 어떤 부분이 부족한지만 짧게 알려준다.
 - 가능하면 한국어로 자세히 설명한다.
-- Java, XML, SQL, Markdown 파일도 문맥에 맞게 설명한다.
+- Java, XML, SQL, Markdown, 설정 파일도 문맥에 맞게 설명한다.
 """
 
 SYSTEM_DIAGRAM = """너는 Mermaid 다이어그램 생성 AI다.
@@ -47,11 +51,15 @@ SYSTEM_PROMPTS = {
 
 
 class PromptBuilder:
-    def trim_history(self, chat_history: list[dict[str, Any]], max_history_chars: int = 4000) -> list[dict[str, Any]]:
+    def trim_history(
+            self,
+            chat_history: list[dict[str, Any]],
+            max_history_chars: int = 4000,
+    ) -> list[dict[str, Any]]:
         if not chat_history:
             return []
 
-        selected = []
+        selected: list[dict[str, Any]] = []
         total = 0
 
         for row in reversed(chat_history):
@@ -74,7 +82,7 @@ class PromptBuilder:
             return ""
 
         seen = set()
-        lines = []
+        lines: list[str] = []
 
         for hit in hits:
             key = hit.get("relative_path") or hit.get("file_name") or hit.get("filename") or ""
@@ -82,7 +90,7 @@ class PromptBuilder:
                 continue
             seen.add(key)
 
-            meta_parts = []
+            meta_parts: list[str] = []
             if hit.get("layer_type"):
                 meta_parts.append(f"layer={hit['layer_type']}")
             if hit.get("class_name"):
@@ -116,7 +124,8 @@ class PromptBuilder:
             "yaml": "yaml",
         }
 
-        lines = []
+        lines: list[str] = []
+
         for index, hit in enumerate(hits, start=1):
             text = (hit.get("text") or "").strip()
             if not text:
@@ -157,14 +166,30 @@ class PromptBuilder:
             if row["answer"]:
                 messages.append({"role": "assistant", "content": row["answer"]})
 
-        parts = []
+        parts: list[str] = []
+
+        lowered_question = (question or "").lower()
+        wants_structure = any(
+            token in lowered_question
+            for token in ["소스", "파일", "구조", "설명", "프로젝트", "source", "file", "structure"]
+        )
+
+        if wants_structure:
+            parts.append(
+                "[instruction]\n"
+                "소스/파일/구조/프로젝트 설명 요청일 때는, "
+                "현재 evidence와 metadata, structure에 포함된 정보만으로도 "
+                "파일명, 경로, 레이어(Controller/Service/Repository 등), 확장자 기준의 "
+                "구조 요약을 먼저 제시한 후, 부족한 부분을 언급한다."
+            )
 
         if project_name:
             parts.append(f"[project]\n{project_name}")
 
         if recent_entities:
-            entity_lines = []
+            entity_lines: list[str] = []
             seen = set()
+
             for entity in recent_entities[:12]:
                 key = (
                     entity.get("entity_type", ""),
@@ -198,5 +223,6 @@ class PromptBuilder:
             parts.append("[evidence]\n" + chunk_context)
 
         parts.append("[question]\n" + question.strip())
+
         messages.append({"role": "user", "content": "\n\n".join(parts)})
         return messages

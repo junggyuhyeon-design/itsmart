@@ -10,7 +10,7 @@ class ChunkService:
         self.chunk_size = max(100, int(settings.chunk_size))
         self.chunk_overlap = max(0, int(settings.chunk_overlap))
 
-    def split_text(self, text: str, **meta: Any) -> list[dict[str, Any]]:
+    def split_text(self, text: str, meta: dict[str, Any]) -> list[dict[str, Any]]:
         text = (text or "").strip()
         if not text:
             return []
@@ -24,8 +24,8 @@ class ChunkService:
         current_length = 0
         chunk_index = 0
         start_line = 1
-
         i = 0
+
         while i < len(lines):
             line = lines[i]
             line_len = len(line) + 1
@@ -48,6 +48,7 @@ class ChunkService:
                 if self.chunk_overlap > 0 and current_lines:
                     overlap_lines: list[str] = []
                     overlap_len = 0
+
                     for old_line in reversed(current_lines):
                         candidate_len = len(old_line) + 1
                         if overlap_lines and overlap_len + candidate_len > self.chunk_overlap:
@@ -87,20 +88,28 @@ class ChunkService:
         if not parsed:
             return []
 
-        return self.split_text(
-            parsed.get("raw_text", ""),
-            project_id=parsed.get("project_id", ""),
-            project_name=parsed.get("project_name", ""),
-            file_name=parsed.get("file_name", ""),
-            extension=parsed.get("extension", ""),
-            relative_path=parsed.get("relative_path", ""),
-            saved_path=parsed.get("saved_path", ""),
-            file_path=parsed.get("file_path", parsed.get("saved_path", "")),
-            file_size=parsed.get("file_size", 0),
-            source_type=parsed.get("source_type", ""),
-            root_container_name=parsed.get("root_container_name", ""),
-            layer_type=parsed.get("layer_type", ""),
-            class_name=parsed.get("class_name", ""),
-            package=parsed.get("package", ""),
-            content_type=parsed.get("content_type", ""),
-        )
+        meta = {
+            "project_id": parsed.get("project_id", parsed.get("projectid", "")),
+            "project_name": parsed.get("project_name", parsed.get("projectname", "")),
+            "file_name": parsed.get("file_name", parsed.get("filename", "")),
+            "extension": parsed.get("extension", ""),
+            "language": parsed.get("language", ""),
+            "mime_type": parsed.get("mime_type", parsed.get("mimetype", "")),
+            "relative_path": parsed.get("relative_path", parsed.get("relativepath", "")),
+            "saved_path": parsed.get("saved_path", parsed.get("savedpath", "")),
+            "file_path": parsed.get("file_path", parsed.get("filepath", parsed.get("saved_path", parsed.get("savedpath", "")))),
+            "file_size": parsed.get("file_size", parsed.get("filesize", 0)),
+            "source_type": parsed.get("source_type", parsed.get("sourcetype", "")),
+            "root_container_name": parsed.get("root_container_name", parsed.get("rootcontainername", "")),
+            "layer_type": parsed.get("layer_type", parsed.get("layertype", "")),
+            "class_name": parsed.get("class_name", parsed.get("classname", "")),
+            "package": parsed.get("package", ""),
+            "content_type": parsed.get("content_type", parsed.get("contenttype", "")),
+            "xml_namespace": parsed.get("xml_namespace", ""),
+            "xml_sql_fragments": parsed.get("xml_sql_fragments", []),
+            "table_names": parsed.get("table_names", []),
+            "template_meta": parsed.get("template_meta", {}),
+            "sql_meta": parsed.get("sql_meta", {}),
+        }
+
+        return self.split_text(parsed.get("raw_text", ""), meta)

@@ -66,11 +66,19 @@ def user_exists(user_id: str) -> bool:
         return False
 
 
-def save_history(user_id: str, question: str, answer: str) -> int:
+def save_history(
+        user_id: str,
+        question: str,
+        answer: str,
+        project_id: str | None = None,
+) -> int:
     with get_connection() as conn:
         cur = conn.execute(
-            "INSERT INTO chat_history (user_id, question, answer) VALUES (?, ?, ?)",
-            (user_id, question, answer),
+            """
+            INSERT INTO chat_history (user_id, question, answer, project_id)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, question, answer, project_id),
         )
         return int(cur.lastrowid)
 
@@ -80,7 +88,7 @@ def get_history(user_id: str, limit: int) -> list[dict[str, Any]]:
         with get_connection() as conn:
             rows = conn.execute(
                 """
-                SELECT id, question, answer, created_at
+                SELECT id, question, answer, project_id, created_at
                 FROM chat_history
                 WHERE user_id = ?
                 ORDER BY created_at DESC, id DESC
@@ -91,6 +99,37 @@ def get_history(user_id: str, limit: int) -> list[dict[str, Any]]:
             return [dict(row) for row in rows]
     except Exception:
         logger.exception("get_history failed user_id=%s", user_id)
+        return []
+
+
+def get_history_by_project(user_id: str, project_id: str | None, limit: int) -> list[dict[str, Any]]:
+    try:
+        with get_connection() as conn:
+            if project_id:
+                rows = conn.execute(
+                    """
+                    SELECT id, question, answer, project_id, created_at
+                    FROM chat_history
+                    WHERE user_id = ? AND project_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (user_id, project_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, question, answer, project_id, created_at
+                    FROM chat_history
+                    WHERE user_id = ? AND (project_id IS NULL OR project_id = '')
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (user_id, limit),
+                ).fetchall()
+            return [dict(row) for row in rows]
+    except Exception:
+        logger.exception("get_history_by_project failed user_id=%s project_id=%s", user_id, project_id)
         return []
 
 
