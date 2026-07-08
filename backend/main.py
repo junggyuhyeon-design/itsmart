@@ -311,7 +311,7 @@ def build_table_listing(project_id: str, project_name: str) -> str:
     for element in code_elements:
         tables = element.get("table_names") or []
         if not tables:
-            raw_text = element.get("raw_text") or element.get("raw_text_preview") or ""
+            raw_text = element.get("raw_text_preview") or ""
             tables = extract_tables_from_text(raw_text)
 
         relative_path = element.get("relative_path") or ""
