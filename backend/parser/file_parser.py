@@ -613,7 +613,7 @@ def extract_sql_metadata(text: str) -> dict[str, Any]:
 
     사용처:
     - detect_content_type()에서 SQL 타입 판단
-    - extract_static_analysis()에서 테이블명 수집
+    - parse_text_file()에서 SQL 상세 메타데이터 생성
     - SQL 설명/DB 구조 질문에 대한 컨텍스트 생성
 
     반환 예:
@@ -1061,7 +1061,7 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
             "package": package,  # 패키지명/네임스페이스
             "xml_namespace": xml_meta.get("namespace", ""),  # XML mapper namespace
             "xml_sql_fragments": xml_meta.get("sql_fragments", []),  # XML <sql id="..."> fragment 목록
-            "xml_statements": xml_meta.get("statement_ids", []),
+            "xml_statements": xml_meta.get("statement_ids", []), # XML select/insert/update/delete id 목록
             "template_meta": template_meta,  # 템플릿 파일 관련 메타데이터
             "sql_meta": sql_meta,  # SQL statement type / table names 등 상세 SQL 메타데이터
         }
@@ -1079,18 +1079,23 @@ def extract_static_analysis(parsed: dict[str, Any]) -> dict[str, Any]:
     parse_text_file() 결과 1건에 대해 정적 분석 메타데이터를 확장 추출한다.
 
     언제 사용되나:
-    - parse_text_file() 이후, DB(code_elements 등)에 넣을 구조화 정보를 만들 때 호출
-    - 사용자의 구조 질의, 레이어 질의, DB 테이블 질의에 쓸 근거 데이터 생성 단계
+    - RAGService.index_files()에서 parse_text_file() 이후 호출됨
+    - SQLite code_elements 저장용 구조화 데이터를 만들 때 사용됨
+    - 사용자의 구조 질의, 레이어 질의, SQL/XML 관련 질의에 쓸 근거 데이터 생성 단계
 
     주요 역할:
     1) import 구문 추출
     2) 함수/메서드 시그니처 추출
-    3) parse_text_file()에서 이미 계산한 XML/SQL/템플릿 메타데이터 재사용
-    4) SQL/본문 기준 테이블명 추출
+    3) parse_text_file()에서 계산한 XML/SQL/템플릿 메타데이터 재사용
+    4) SQL 기준 테이블명 추출
     5) 후속 DB 저장용 최종 분석 dict 생성
 
+    특징:
+    - 파일을 다시 읽거나 parse_text_file()를 재호출하지 않음
+    - 1차 파싱 결과(parsed)를 재사용해 중복 계산을 줄임
+
     반환:
-    - 정적 분석 결과 dict
+    - code_elements 저장 및 구조 분석용 정적 분석 결과 dict
     - 입력 parsed가 비어 있으면 {}
     """
     if not parsed:

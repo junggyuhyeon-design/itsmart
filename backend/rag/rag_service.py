@@ -83,23 +83,28 @@ class RAGService:
                 parsed = parse_text_file(target)
 
                 # ? parsed 정보 :
-                # raw_text           : 파일 원문 텍스트
-                # project_id         : 프로젝트 아이디
-                # project_name       : 프로젝트명
-                # filename           : 파일명
-                # extension          : 확장자
-                # language           : 감지된 언어
-                # mimetype           : MIME 타입
-                # relativepath       : 상대경로
-                # savedpath          : 저장 경로
-                # filepath           : 실제 파일 경로
-                # filesize           : 파일 크기
-                # sourcetype         : 업로드 원본 타입
-                # rootcontainername  : 루트 zip 이름
-                # layertype          : 계층 타입 (controller/service/repository/mapper/config 등)
-                # contenttype        : 내용 타입 (apiendpoint/sqlselect/ddlcreate 등)
-                # classname          : 클래스명
-                # package            : 패키지명
+                # raw_text             : 파일 원문 텍스트
+                # project_id           : 프로젝트 아이디
+                # project_name         : 프로젝트명
+                # file_name            : 파일명
+                # extension            : 확장자
+                # language             : 감지된 언어
+                # mime_type            : MIME 타입
+                # relative_path        : 상대경로
+                # saved_path           : 저장 경로
+                # file_path            : 실제 파일 경로
+                # file_size            : 파일 크기
+                # source_type          : 업로드 원본 타입
+                # root_container_name  : 루트 zip 이름
+                # layer_type           : 계층 타입 (controller/service/repository/mapper/config 등)
+                # content_type         : 내용 타입 (apiendpoint/sqlselect/ddlcreate 등)
+                # class_name           : 클래스명
+                # package              : 패키지명
+                # xml_namespace        : XML mapper namespace
+                # xml_sql_fragments    : XML <sql id="..."> fragment 목록
+                # xml_statements       : XML select/insert/update/delete id 목록
+                # template_meta        : 템플릿 파일 관련 메타데이터
+                # sql_meta             : SQL statement type / table names 등 상세 SQL 메타데이터
 
                 if not parsed:
                     failed += 1
@@ -205,24 +210,27 @@ class RAGService:
                     # 정적 분석 추출
                     analysis = extract_static_analysis(parsed)
 
-                    # ? analysis 정보 : SQLite code_elements 저장용 정적 분석 결과
-                    # projectid      : 프로젝트 아이디
-                    # projectname    : 프로젝트명
-                    # filename       : 파일명
-                    # relativepath   : 상대경로
-                    # savedpath      : 저장 경로
-                    # extension      : 확장자
-                    # language       : 감지 언어
-                    # mimetype       : MIME 타입
-                    # layertype      : 계층 타입
-                    # contenttype    : 내용 타입
-                    # classname      : 클래스명
-                    # package        : 패키지명
-                    # imports        : import 목록
-                    # methods        : 메서드 목록
-                    # xmlstatements  : xml select/insert/update/delete id 목록
-                    # tablenames     : SQL/DDL 등에서 추출한 테이블명 목록
-                    # rawtext        : 원문 텍스트
+                    # ? analysis 정보        : SQLite code_elements 저장용 정적 분석 결과
+                    # raw_text              : 원문 텍스트
+                    # project_id            : 프로젝트 아이디
+                    # project_name          : 프로젝트명
+                    # file_name             : 파일명
+                    # extension             : 확장자
+                    # language              : 감지 언어
+                    # mime_type             : MIME 타입
+                    # relative_path         : 상대경로
+                    # saved_path            : 저장 경로
+                    # layer_type            : 계층 타입
+                    # content_type          : 내용 타입
+                    # class_name            : 클래스명
+                    # package               : 패키지명
+                    # xml_namespace         : XML namespace
+                    # xml_sql_fragments     : XML sql fragment id 목록
+                    # xml_statements        : xml select/insert/update/delete id 목록
+                    # template_meta         : JSP/HTML/Vue 등 템플릿 메타데이터
+                    # table_names           : SQL/DDL 등에서 추출한 테이블명 목록
+                    # imports               : import 목록
+                    # methods               : 메서드 목록
 
                     if analysis:
                         key = (project_id, project_name)
