@@ -1121,24 +1121,24 @@ def extract_static_analysis(parsed: dict[str, Any]) -> dict[str, Any]:
         table_names = extract_table_names_regex(raw_text)
 
     return {
-        "project_id": parsed.get("project_id", ""),  # 프로젝트 식별자
-        "project_name": parsed.get("project_name", ""),  # 프로젝트명
-        "file_name": parsed.get("file_name", ""),  # 파일명
-        "relative_path": parsed.get("relative_path", ""),  # 프로젝트 내 상대경로
-        "saved_path": parsed.get("saved_path", ""),  # 실제 저장 경로
-        "extension": extension,  # 정규화된 확장자
-        "language": language,  # 감지 언어/문서 유형
-        "mime_type": parsed.get("mime_type", ""),  # MIME 타입
-        "layer_type": parsed.get("layer_type", ""),  # 추정 레이어 타입
-        "content_type": parsed.get("content_type", ""),  # 추정 콘텐츠 타입
-        "class_name": parsed.get("class_name", ""),  # 대표 클래스/타입명
-        "package": parsed.get("package", ""),  # 패키지/네임스페이스
-        "imports": imports,  # import/use/include 목록
-        "methods": methods,  # 함수/메서드 목록(name, signature, params)
-        "xml_statements": parsed.get("xml_statements", []),  # XML select/insert/update/delete statement id 목록
-        "xml_namespace": parsed.get("xml_namespace", ""),  # XML namespace
-        "xml_sql_fragments": parsed.get("xml_sql_fragments", []),  # XML sql fragment id 목록
-        "table_names": table_names,  # SQL/본문 기준 추출한 테이블명 목록
-        "template_meta": template_meta,  # JSP/HTML/Vue 등 템플릿 메타데이터
-        "raw_text": raw_text,  # 원문 전체 텍스트, preview/hash/추가 분석용 원본
+        "raw_text": raw_text,                                       # 원문 전체 텍스트, preview/hash/추가 분석용 원본
+        "project_id": parsed.get("project_id", ""),                 # 프로젝트 식별자
+        "project_name": parsed.get("project_name", ""),             # 프로젝트명
+        "file_name": parsed.get("file_name", ""),                   # 파일명
+        "extension": extension,                                     # 정규화된 확장자
+        "language": language,                                       # 감지 언어/문서 유형
+        "mime_type": parsed.get("mime_type", ""),                   # MIME 타입
+        "relative_path": parsed.get("relative_path", ""),           # 프로젝트 내 상대경로
+        "saved_path": parsed.get("saved_path", ""),                 # 실제 저장 경로
+        "layer_type": parsed.get("layer_type", ""),                 # 추정 레이어 타입
+        "content_type": parsed.get("content_type", ""),             # 추정 콘텐츠 타입
+        "class_name": parsed.get("class_name", ""),                 # 대표 클래스/타입명
+        "package": parsed.get("package", ""),                       # 패키지/네임스페이스
+        "xml_namespace": parsed.get("xml_namespace", ""),           # XML namespace
+        "xml_sql_fragments": parsed.get("xml_sql_fragments", []),   # XML sql fragment id 목록
+        "xml_statements": parsed.get("xml_statements", []),         # XML select/insert/update/delete statement id 목록
+        "template_meta": template_meta,                             # JSP/HTML/Vue 등 템플릿 메타데이터
+        "table_names": table_names,                                 # (ADD) SQL/본문 기준 추출한 테이블명 목록
+        "imports": imports,                                         # (ADD) import/use/include 목록
+        "methods": methods,                                         # (ADD) 함수/메서드 목록(name, signature, params)
     }
