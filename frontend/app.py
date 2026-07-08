@@ -55,6 +55,7 @@ def init_session_state():
         "pending_upload_sig": "",
         "duplicate_pending": None,   # {old_project_id, project_name}
         "upload_items": [],          # 중복 확인 후 업로드할 파일 payload
+        "admin_role": False,         # admin 로그인 여부
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -75,7 +76,7 @@ def verify_user_id(user_id: str) -> bool:
         r = requests.get(
             f"{BACKEND_URL}/users/verify",
             params={"user_id": user_id},
-            timeout=10,
+            timeout=15,
         )
         r.raise_for_status()
         return r.json().get("exists", False)
@@ -130,6 +131,8 @@ def render_login_page():
                 msg = f"'{uid}' 로 로그인되었습니다." if exists else f"'{uid}' 가 신규 등록되었습니다."
                 st.success(msg)
                 st.session_state.user_id = uid
+                if uid.lower() == 'admin':
+                    st.session_state.admin_role = True
                 st.rerun()
 
 
@@ -776,6 +779,8 @@ def render_duplicate_confirm_dialog() -> bool:
                 st.session_state.upload_items = []
                 st.session_state.uploading = False
                 st.session_state.uploader_nonce += 1
+                st.session_state.pending_upload = None
+                st.session_state.pending_upload_sig = ""
                 st.rerun()
     return True
 
@@ -783,7 +788,7 @@ def render_duplicate_confirm_dialog() -> bool:
 def _resolve_duplicate(pending: dict):
     """
     중복 확인 버튼 클릭 시:
-    1. /projects/duplicate 로 구 project_id 의 SQLite + Qdrant 데이터 전부 삭제
+    1. /projects 로 구 project_id 의 SQLite + Qdrant 데이터 전부 삭제
     2. 세션 히스토리 초기화
     3. 새 파일 업로드 + 인덱싱 시작
     """
@@ -791,7 +796,7 @@ def _resolve_duplicate(pending: dict):
     project_name = pending["project_name"]
 
     try:
-        r = api_post("/projects/duplicate", json_data={"project_id": old_pid}, timeout=30)
+        r = api_delete(f"/projects/{old_pid}", timeout=30)
         r.raise_for_status()
         logger.info("duplicate 처리 완료: %s", r.json())
     except Exception as e:
@@ -970,16 +975,104 @@ def ask_backend(question: str, project_name: str | None, project_id: str | None)
         )
 
 
+def _clear_project_session(pid: str):
+    """삭제된 프로젝트를 세션에서 제거하고 전체 보기로 돌아갑니다."""
+    key = project_key(pid)
+    st.session_state.project_histories.pop(key, None)
+    st.session_state.projects = [
+        p for p in st.session_state.projects
+        if (p.get("project_id") or "").strip() != pid
+    ]
+    st.session_state.index_jobs = [
+        j for j in st.session_state.index_jobs
+        if (j.get("project_id") or "").strip() != pid
+    ]
+    if st.session_state.chat_project_id == pid:
+        st.session_state.chat_project_select = "전체"
+        st.session_state.chat_project_id = None
+    st.session_state.history_items = []
+
+
 def render_chat_area():
-    st.subheader("질문")
     pid = current_project_id()
     pname = current_project_name()
 
+    # ── 헤더: 제목 + 삭제 버튼 ───────────────────────────────
+    col_title, col_btn = st.columns([4, 1])
+    with col_title:
+        st.subheader("질문")
+
+    with col_btn:
+        # 프로젝트가 선택된 경우에만 삭제 버튼 표시
+        if pid:
+            is_admin = st.session_state.get("admin_role", False)
+            btn_label = "🗑 프로젝트 삭제" if is_admin else "🗑 히스토리 삭제"
+            confirm_key = f"delete_confirm_{pid}"
+
+            if st.button(btn_label, key="del_action_btn", use_container_width=True):
+                # 버튼 클릭 시 confirm 플래그 토글
+                st.session_state[confirm_key] = not st.session_state.get(confirm_key, False)
+                st.rerun()
+
+    # ── 삭제 확인 다이얼로그 ─────────────────────────────────
+    if pid:
+        confirm_key = f"delete_confirm_{pid}"
+        if st.session_state.get(confirm_key, False):
+            is_admin = st.session_state.get("admin_role", False)
+            if is_admin:
+                st.warning(
+                    f"⚠️ **'{pname}'** 프로젝트의 모든 데이터(소스·벡터·히스토리·인덱스)를 삭제합니다.\n\n"
+                    "이 작업은 되돌릴 수 없습니다."
+                )
+            else:
+                st.warning(
+                    f"⚠️ **'{pname}'** 프로젝트의 대화 히스토리를 삭제합니다."
+                )
+
+            c1, c2, _ = st.columns([1, 1, 3])
+            with c1:
+                if st.button("✅ 확인", key="del_ok_btn", type="primary", use_container_width=True):
+                    st.session_state[confirm_key] = False
+                    if is_admin:
+                        # admin: 프로젝트 전체 데이터 삭제 (SQLite 전 테이블 + Qdrant)
+                        try:
+                            r = api_delete(
+                                f"/projects/{pid}",
+                                timeout=30,
+                            )
+                            r.raise_for_status()
+                            _clear_project_session(pid)
+                            st.success(f"'{pname}' 프로젝트가 삭제되었습니다.")
+                        except Exception as e:
+                            st.error(f"프로젝트 삭제 실패: {e}")
+                    else:
+                        # 일반 사용자: 본인의 히스토리만 삭제
+                        try:
+                            r = api_delete(
+                                f"/history/{pid}",
+                                timeout=20,
+                            )
+                            r.raise_for_status()
+                            key = project_key(pid)
+                            st.session_state.project_histories.pop(key, None)
+                            st.session_state.history_items = []
+                            st.success("히스토리가 삭제되었습니다.")
+                        except Exception as e:
+                            st.error(f"히스토리 삭제 실패: {e}")
+                    time.sleep(0.8)
+                    st.rerun()
+            with c2:
+                if st.button("❌ 취소", key="del_cancel_btn", use_container_width=True):
+                    st.session_state[confirm_key] = False
+                    st.rerun()
+
+    # ── 프로젝트 캡션 ────────────────────────────────────────
     if pid:
         st.caption(f"현재 프로젝트 공간: {project_name_by_id(pid)}")
     else:
         st.info("전체 보기에서는 모든 프로젝트 대화가 표시됩니다.")
 
+    # ── 메시지 렌더링 ────────────────────────────────────────
     for msg in get_visible_chat_messages():
         with st.chat_message(msg["role"]):
             if msg["role"] == "assistant":
@@ -991,6 +1084,7 @@ def render_chat_area():
         st.info("사이드바에서 프로젝트를 선택한 뒤 질문하세요.")
         return
 
+    # ── 채팅 입력 ────────────────────────────────────────────
     jobs = fetch_index_jobs(force=True)
     projects = fetch_projects(force=True)
     job = build_project_job_map(projects, jobs).get(pid)
@@ -1073,7 +1167,8 @@ with st.sidebar:
     st.divider()
     render_sidebar_projects()
     st.divider()
-    render_reset_box()
+    if st.session_state.admin_role: # admin 인 경우에만 렌더링
+        render_reset_box()
 
 render_upload_area()
 st.divider()
