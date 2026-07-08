@@ -7,11 +7,14 @@ from typing import Any
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+import extra_streamlit_components as stx
 import logging
 
 from streamlit_autorefresh import st_autorefresh
 
 BACKEND_URL = os.getenv("FASTAPI_URL", "http://codeMind-backend:8000")
+COOKIE_KEY      = "codeMind_user_id"
+COOKIE_MAX_AGE  = 60 * 60 * 24 * 30  # 30일 (초)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -22,14 +25,57 @@ st.set_page_config(
     layout="wide",
 )
 
+# ─────────────────────────────────────────────
+# CookieManager
+# · set_page_config 직후, 다른 st.* 보다 먼저
+# · 첫 렌더링에서 JS 로 쿠키를 읽어오므로 값은 두 번째 실행부터 유효
+# ─────────────────────────────────────────────
+_cookie_mgr = stx.CookieManager(key="codeMind_cookie_mgr")
+
+
+def cookie_get(key: str) -> str:
+    try:
+        val = (_cookie_mgr.get(key) or "").strip()
+        logger.info("[COOKIE] get key=%s → '%s'", key, val)
+        return val
+    except Exception as e:
+        logger.warning("[COOKIE] get failed key=%s: %s", key, e)
+        return ""
+
+
+def cookie_set(key: str, value: str) -> None:
+    try:
+        _cookie_mgr.set(key, value, max_age=COOKIE_MAX_AGE)
+        logger.info("[COOKIE] set key=%s value='%s'", key, value)
+    except Exception as e:
+        logger.warning("[COOKIE] set failed key=%s: %s", key, e)
+
+
+def cookie_delete(key: str) -> None:
+    """
+    extra-streamlit-components 의 delete/set 은 브라우저에 즉시 반영되지 않음.
+    가능한 모든 방법을 시도하되, 실제 삭제 보장은 _logged_out 플래그로 보완.
+    """
+    for method_name, fn in [
+        ("set_empty_max_age_0",  lambda: _cookie_mgr.set(key, "", max_age=0)),
+        ("set_empty_max_age_-1", lambda: _cookie_mgr.set(key, "", max_age=-1)),
+        ("delete",               lambda: _cookie_mgr.delete(key)),
+    ]:
+        try:
+            fn()
+            logger.info("[COOKIE] delete step '%s' key=%s ok", method_name, key)
+        except Exception as e:
+            logger.warning("[COOKIE] delete step '%s' key=%s failed: %s", method_name, key, e)
+
+
 
 # ─────────────────────────────────────────────
 # session_state 초기화
 # ─────────────────────────────────────────────
-
 def init_session_state():
     defaults = {
         "user_id": None,
+        "admin_role": False,
         "projects": [],
         "projects_error": None,
         "system_status": None,
@@ -53,55 +99,58 @@ def init_session_state():
         "uploader_nonce": 0,
         "pending_upload": None,
         "pending_upload_sig": "",
-        "duplicate_pending": None,   # {old_project_id, project_name}
-        "upload_items": [],          # 중복 확인 후 업로드할 파일 payload
-        "admin_role": False,         # admin 로그인 여부
+        "duplicate_pending": None,
+        "upload_items": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
-# ─────────────────────────────────────────────
-# session_state 초기화
-# ─────────────────────────────────────────────
-init_session_state()
 
 
 # ─────────────────────────────────────────────
-# 로그인 게이트
+# 로그인 / 로그아웃
 # ─────────────────────────────────────────────
 def verify_user_id(user_id: str) -> bool:
-    """백엔드 /users/verify 로 user_id 존재 여부를 확인 후 없다면 생성합니다."""
-    try:
-        r = requests.get(
-            f"{BACKEND_URL}/users/verify",
-            params={"user_id": user_id},
-            timeout=15,
-        )
-        r.raise_for_status()
-        return r.json().get("exists", False)
-    except Exception as e:
-        raise RuntimeError(f"사용자 조회 중 오류가 발생했습니다: {e}") from e
+    """백엔드 /users/verify 로 user_id 존재 여부를 확인하고, 없으면 생성합니다."""
+    r = requests.get(
+        f"{BACKEND_URL}/users/verify",
+        params={"user_id": user_id},
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json().get("exists", False)
+
+
+def do_login(uid: str) -> None:
+    """로그인 처리: session + 쿠키에 user_id 저장. _logged_out 플래그 해제."""
+    logger.info("[LOGIN] do_login uid='%s'", uid)
+    st.session_state.user_id = uid
+    st.session_state.admin_role = (uid.lower() == "admin")
+    st.session_state["_logged_out"] = False   # 로그아웃 차단 플래그 해제
+    logger.info("[LOGIN] admin_role=%s _logged_out=False", st.session_state.admin_role)
+    cookie_set(COOKIE_KEY, uid)
+
+
+def do_logout() -> None:
+    """
+    로그아웃:
+    1. 쿠키 삭제 시도 (브라우저 반영은 비동기라 보장 안 됨)
+    2. session 에서 user_id / admin_role 즉시 제거
+    3. _logged_out 플래그를 session 에 보존 — 쿠키가 남아있어도 복원 차단
+    4. _logout_pending 으로 세션 초기화 트리거
+    """
+    logger.info("[LOGOUT] do_logout 시작 current_user='%s'", st.session_state.get("user_id"))
+    cookie_delete(COOKIE_KEY)
+    st.session_state.user_id = None
+    st.session_state.admin_role = False
+    st.session_state["_logged_out"] = True   # 쿠키 복원 차단 플래그
+    st.session_state["_logout_pending"] = True
+    logger.info("[LOGOUT] _logout_pending=True _logged_out=True, rerun")
+    st.rerun()
 
 
 def render_login_page():
-    st.markdown(
-        """
-        <style>
-        .login-box {
-            max-width: 420px;
-            margin: 8rem auto 0 auto;
-            padding: 2.5rem 2rem;
-            border: 1px solid #e5e7eb;
-            border-radius: 12px;
-            background: #fafafa;
-            box-shadow: 0 2px 12px rgba(0,0,0,0.07);
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
         st.markdown("## 🧠 IT-Smart CodeMind")
@@ -125,19 +174,20 @@ def render_login_page():
                 with st.spinner("사용자 확인 중..."):
                     try:
                         exists = verify_user_id(uid)
-                    except RuntimeError as e:
-                        st.error(str(e))
+                    except Exception as e:
+                        st.error(f"사용자 조회 오류: {e}")
                         return
+                logger.info("[LOGIN] form submit uid='%s' exists=%s", uid, exists)
+                do_login(uid)
                 msg = f"'{uid}' 로 로그인되었습니다." if exists else f"'{uid}' 가 신규 등록되었습니다."
                 st.success(msg)
-                st.session_state.user_id = uid
-                if uid.lower() == 'admin':
-                    st.session_state.admin_role = True
+                time.sleep(0.5)
                 st.rerun()
 
 
 def get_headers() -> dict[str, str]:
     return {"X-User-Id": st.session_state.user_id}
+
 
 # ─────────────────────────────────────────────
 # API 호출 헬퍼
@@ -628,6 +678,16 @@ def render_sidebar_projects():
         st.sidebar.caption(status_label)
         if progress is not None and progress < 100:
             st.sidebar.progress(progress / 100.0)
+
+
+def render_user_box():
+    """사이드바 하단: 로그인 사용자 정보 + 로그아웃 버튼."""
+    st.sidebar.divider()
+    uid = st.session_state.get("user_id", "")
+    role_label = "👑 admin" if st.session_state.get("admin_role") else "👤 사용자"
+    st.sidebar.caption(f"{role_label}: **{uid}**")
+    if st.sidebar.button("🔓 로그아웃 / 계정 전환", key="logout_btn", use_container_width=True):
+        do_logout()
 
 
 def render_reset_box():
@@ -1152,9 +1212,54 @@ def trigger_live_refresh():
         st_autorefresh(interval=2000, key="live_job_refresh")
 
 
-if not st.session_state.get("user_id"):
+# ─────────────────────────────────────────────
+# 메인 실행
+# ─────────────────────────────────────────────
+
+# ① 로그아웃 플래그 처리
+#    세션 전체 초기화 후 _logged_out 플래그를 재주입해서
+#    쿠키가 아직 브라우저에 남아있어도 복원 경로(③)를 차단.
+if st.session_state.pop("_logout_pending", False):
+    logger.info("[LOGOUT] _logout_pending 처리 — 세션 전체 초기화")
+    cookie_val_at_logout = cookie_get(COOKIE_KEY)
+    logger.info("[LOGOUT] 이 시점 쿠키 값(삭제 미반영 가능): '%s'", cookie_val_at_logout)
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    init_session_state()
+    st.session_state["_logged_out"] = True   # 재주입: 쿠키 복원 차단 유지
+    logger.info("[LOGOUT] 로그인 화면으로 이동 (_logged_out=True 유지)")
     render_login_page()
     st.stop()
+
+# ② session_state 기본값 설정
+init_session_state()
+
+# ③ user_id 확보
+#    1순위: session_state (로그인 직후 or 이전 rerun 에서 복원된 경우)
+#    2순위: 쿠키 — 단, _logged_out 플래그가 있으면 차단 (쿠키 삭제 미반영 대응)
+logger.info("[AUTH] session user_id='%s' _logged_out=%s",
+            st.session_state.get("user_id"), st.session_state.get("_logged_out"))
+
+if not st.session_state.get("user_id"):
+    if st.session_state.get("_logged_out"):
+        logger.info("[AUTH] _logged_out=True → 쿠키 복원 차단, 로그인 화면")
+        render_login_page()
+        st.stop()
+
+    uid_from_cookie = cookie_get(COOKIE_KEY)
+    logger.info("[AUTH] 쿠키 복원 시도 → '%s'", uid_from_cookie)
+    if uid_from_cookie:
+        st.session_state.user_id = uid_from_cookie
+        st.session_state.admin_role = (uid_from_cookie.lower() == "admin")
+        logger.info("[AUTH] 쿠키 복원 완료 user_id='%s' admin_role=%s",
+                    uid_from_cookie, st.session_state.admin_role)
+    else:
+        logger.info("[AUTH] 쿠키 없음 → 로그인 화면")
+        render_login_page()
+        st.stop()
+
+logger.info("[AUTH] 최종 user_id='%s' admin_role=%s",
+            st.session_state.get("user_id"), st.session_state.get("admin_role"))
 
 bootstrap()
 process_pending_upload()
@@ -1166,9 +1271,10 @@ with st.sidebar:
     render_system_status()
     st.divider()
     render_sidebar_projects()
-    st.divider()
-    if st.session_state.admin_role: # admin 인 경우에만 렌더링
+    if st.session_state.get("admin_role"):
+        st.divider()
         render_reset_box()
+    render_user_box()   # 항상 최하단에 위치
 
 render_upload_area()
 st.divider()
