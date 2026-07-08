@@ -473,7 +473,7 @@ def build_project_job_map(projects: list[dict], jobs: list[dict]) -> dict[str, d
         matched = sorted(
             [job for job in jobs if (job.get("project_id") or "").strip() == project_id],
             key=lambda job: (
-                job.get("updated_at") or "", 
+                job.get("updated_at") or "",
                 job.get("created_at") or ""),
             reverse=True,
         )
