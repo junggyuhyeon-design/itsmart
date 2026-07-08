@@ -596,28 +596,6 @@ async def upload(
         "projects": len(projects_created),
     }
 
-# TODO : 현재 미사용 확인
-# @app.post("/index")
-# async def index_now(
-#         request: Request,
-#         targets: list[dict[str, Any]] = Body(...),
-# ):
-#     if not targets:
-#         raise HTTPException(status_code=400, detail="targets are required")
-
-#     rag_service = get_rag_service(request)
-#     normalized_targets = [normalize_target_item(target) for target in targets]
-
-#     try:
-#         result = await run_in_threadpool(rag_service.index_files, normalized_targets)
-#         result["total_chunks"] = int(result.get("total_chunks", 0) or 0)
-#         result["indexed_files"] = int(result.get("indexed_files", 0) or 0)
-#         result["code_elements"] = int(result.get("code_elements", 0) or 0)
-#         return result
-#     except Exception as error:
-#         logger.exception("index_now failed")
-#         raise HTTPException(status_code=500, detail=f"index failed: {error}") from error
-
 
 @app.post("/index-jobs")
 async def create_job(
@@ -773,47 +751,45 @@ def get_project(
         raise HTTPException(status_code=500, detail=f"project failed: {error}") from error
     
 
-@app.post("/projects/duplicate")
-def duplicate_project(
+@app.delete("/projects/{project_id}")
+def delete_project(
         request: Request,
+        project_id: str,
         x_user_id: str | None = Header(default=None),
-        payload: dict[str, Any] = Body(...),
 ):
-    """동명 프로젝트 교체 시 구 project_id 관련 모든 데이터 삭제 (SQLite 전 테이블 + Qdrant)."""
-    old_project_id = (payload.get("project_id") or "").strip()
-    logger.info("/projects/duplicate 진입 old_project_id=%s", old_project_id)
+    """project_id 관련 모든 데이터 삭제 (SQLite 전 테이블 + Qdrant)."""
+    logger.info("프로젝트 삭제 진입 project_id=%s", project_id)
 
-    if not old_project_id:
+    if not project_id:
         raise HTTPException(status_code=400, detail="project_id is required !!!")
 
     try:
         deleted = {
-            "chat_history":   delete_history(project_id=old_project_id),
-            "uploaded_files": delete_uploaded_file(project_id=old_project_id),
-            "file_index":     delete_file_index(project_id=old_project_id),
-            "index_jobs":     delete_index_job(project_id=old_project_id),
-            "code_elements":  delete_code_elements(project_id=old_project_id),
-            "turn_entities":  delete_turn_entities(project_id=old_project_id),
+            "chat_history":   delete_history(project_id=project_id),
+            "uploaded_files": delete_uploaded_file(project_id=project_id),
+            "file_index":     delete_file_index(project_id=project_id),
+            "index_jobs":     delete_index_job(project_id=project_id),
+            "code_elements":  delete_code_elements(project_id=project_id),
+            "turn_entities":  delete_turn_entities(project_id=project_id),
         }
 
         # Qdrant 벡터 삭제
         qdrant_deleted = 0
         try:
             rag_service = get_rag_service(request)
-            qdrant_deleted = rag_service.qdrant_service.delete_by_project_id(old_project_id)
+            qdrant_deleted = rag_service.qdrant_service.delete_by_project_id(project_id)
         except Exception as qerr:
             logger.warning("Qdrant delete_by_project_id failed (non-fatal): %s", qerr)
 
         deleted["qdrant_vectors"] = qdrant_deleted
-        logger.info("duplicate_project done old=%s deleted=%s", old_project_id, deleted)
-        return {"deleted": deleted, "old_project_id": old_project_id}
+        logger.info("delete_project done pid=%s deleted=%s", project_id, deleted)
+        return {"deleted": deleted, "old_project_id": project_id}
 
     except HTTPException:
         raise
     except Exception as error:
-        logger.exception("중복 데이터 처리 실패")
+        logger.exception("프로젝트 삭제 처리 실패")
         raise HTTPException(status_code=500, detail=f"duplicate project failed: {error}") from error
-
 
 
 # ── Ask ───────────────────────────────────────────────────────
@@ -834,15 +810,6 @@ async def ask(
 
     if not question:
         raise HTTPException(status_code=400, detail="question is required")
-
-    # if project_id: # 프로젝트 ID로 기준으로 NAME 가져오기.
-    #     for project in get_all_projects():
-    #         if project.get("project_id") == project_id.strip():
-    #             project_name = project.get("project_name")
-    #             break
-
-    #     if not project_name:
-    #         raise HTTPException(status_code=400, detail=f"unknown project_id: {project_id}")
 
     history_limit = max(1, min(settings.chat_history_turns, 20))
     chat_history = list(reversed(get_history(user_id, project_id, limit=history_limit)))
@@ -938,10 +905,10 @@ def history(
     }
 
 
-@app.delete("/history")
+@app.delete("/history/{project_id}")
 def clear_history(
+        project_id: str,
         x_user_id: str | None = Header(default=None),
-        project_id: str | None = Query(default=None),
 ):
     user_id = require_user(x_user_id)
     deleted = delete_history(user_id, project_id=project_id )
@@ -1022,23 +989,3 @@ def reset_all_data(
     except Exception as error:
         logger.exception("reset_all_data failed")
         raise HTTPException(status_code=500, detail=f"reset failed: {error}") from error
-
-
-# @app.get("/ask")
-# async def ask_get(
-#         request: Request,
-#         question: str,
-#         project_name: str | None = Query(default=None),
-#         project_id: str | None = Query(default=None),
-#         extra_context: str = Query(default=""),
-#         top_k: int = Query(default=5),
-#         x_user_id: str | None = Header(default=None),
-# ):
-#     payload = {
-#         "question": question,
-#         "project_name": project_name,
-#         "project_id": project_id,
-#         "extra_context": extra_context,
-#         "top_k": top_k,
-#     }
-#     return await ask(request=request, payload=payload, x_user_id=x_user_id)
