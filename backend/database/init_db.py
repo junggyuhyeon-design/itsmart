@@ -49,15 +49,13 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS chat_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
                 question TEXT NOT NULL,
                 answer TEXT NOT NULL,
-                project_id TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
-
-        ensure_column(conn, "chat_history", "project_id", "TEXT")
 
         conn.execute(
             """

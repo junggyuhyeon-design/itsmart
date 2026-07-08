@@ -4,6 +4,9 @@ from typing import Any
 
 from config import Settings
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 class ChunkService:
     def __init__(self, settings: Settings) -> None:
@@ -81,6 +84,13 @@ class ChunkService:
                         "chunk_type": "text",
                     }
                 )
+        
+        for chunk in chunks:
+            logger.info(
+                "청크된 데이터 확인 ::: chunk_index=%d text=%s",
+                chunk["chunk_index"],
+                chunk["text"],
+            )
 
         return chunks
 

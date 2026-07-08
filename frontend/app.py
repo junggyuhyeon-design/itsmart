@@ -7,9 +7,14 @@ from typing import Any
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+import logging
+
 from streamlit_autorefresh import st_autorefresh
 
 BACKEND_URL = os.getenv("FASTAPI_URL", "http://codeMind-backend:8000")
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
 st.set_page_config(
     page_title="IT-Smart CodeMind",
@@ -18,9 +23,13 @@ st.set_page_config(
 )
 
 
+# ─────────────────────────────────────────────
+# session_state 초기화
+# ─────────────────────────────────────────────
+
 def init_session_state():
     defaults = {
-        "user_id": None,          # 로그인 전에는 None
+        "user_id": None,
         "projects": [],
         "projects_error": None,
         "system_status": None,
@@ -44,6 +53,8 @@ def init_session_state():
         "uploader_nonce": 0,
         "pending_upload": None,
         "pending_upload_sig": "",
+        "duplicate_pending": None,   # {old_project_id, project_name}
+        "upload_items": [],          # 중복 확인 후 업로드할 파일 payload
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -73,7 +84,6 @@ def verify_user_id(user_id: str) -> bool:
 
 
 def render_login_page():
-    """user_id 입력 화면을 렌더링합니다. 유효한 ID를 입력하면 session에 저장합니다."""
     st.markdown(
         """
         <style>
@@ -95,7 +105,7 @@ def render_login_page():
     with col_c:
         st.markdown("## 🧠 IT-Smart CodeMind")
         st.markdown("##### 사용자 ID를 입력하세요")
-        st.caption("시스템에 등록된 사용자가 아닌 경우 신규 등록됩니다.")
+        st.caption("등록되지 않은 사용자는 신규 등록됩니다.")
         st.divider()
 
         with st.form("login_form", clear_on_submit=False):
@@ -117,15 +127,10 @@ def render_login_page():
                     except RuntimeError as e:
                         st.error(str(e))
                         return
-
-                if exists:
-                    st.success(f"'{uid}' 로 로그인되었습니다.")
-                    st.session_state.user_id = uid
-                    st.rerun()
-                else:
-                    st.success(f"'{uid}' 가 생성되었습니다.")
-                    st.session_state.user_id = uid
-                    st.rerun()
+                msg = f"'{uid}' 로 로그인되었습니다." if exists else f"'{uid}' 가 신규 등록되었습니다."
+                st.success(msg)
+                st.session_state.user_id = uid
+                st.rerun()
 
 
 def get_headers() -> dict[str, str]:
@@ -241,6 +246,10 @@ def render_answer(content: str):
         render_mermaid(block)
 
 
+# ─────────────────────────────────────────────
+# 유틸
+# ─────────────────────────────────────────────
+
 def parse_created_at_to_ts(value: str | None) -> float:
     if not value:
         return time.time()
@@ -320,6 +329,14 @@ def dedupe_projects(projects: list[dict]) -> list[dict]:
         reverse=True,
     )
 
+def stem_filename(filename: str) -> str:
+    """확장자 제거"""
+    return filename.rsplit(".", 1)[0] if "." in filename else filename
+
+
+# ─────────────────────────────────────────────
+# 서버 데이터 조회
+# ─────────────────────────────────────────────
 
 def fetch_system_status(force: bool = False):
     if st.session_state.system_status is not None and not force:
@@ -368,42 +385,35 @@ def fetch_projects(force: bool = False):
 def fetch_index_jobs(force: bool = False):
     if st.session_state.index_jobs and not force:
         return st.session_state.index_jobs
-
-    last_error = None
-
-    for path in ("/index/jobs", "/index-jobs"):
-        try:
-            response = api_get(path, params={"limit": 50}, timeout=20)
-            response.raise_for_status()
-            data = response.json()
-            st.session_state.index_jobs = data.get("jobs", [])
-            st.session_state.index_job_error = None
-            return st.session_state.index_jobs
-        except Exception as error:
-            last_error = error
-
-    st.session_state.index_jobs = []
-    st.session_state.index_job_error = str(last_error) if last_error else "index job fetch failed"
+    try:
+        response = api_get("/index-jobs", params={"limit": 50}, timeout=20)
+        response.raise_for_status()
+        data = response.json()
+        st.session_state.index_jobs = data.get("jobs", [])
+        st.session_state.index_job_error = None
+    except Exception as error:
+        st.session_state.index_jobs = []
+        st.session_state.index_job_error = str(error)
     return st.session_state.index_jobs
 
 
 def fetch_index_job_detail(job_id: str):
-    for path in (f"/index/jobs/{job_id}", f"/index-jobs/{job_id}"):
-        try:
-            response = api_get(path, timeout=20)
-            response.raise_for_status()
-            return response.json()
-        except Exception:
-            pass
-    return None
+    try:
+        response = api_get(f"/index-jobs/{job_id}", timeout=20)
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
 
 
-def fetch_history(force: bool = False):
+def fetch_history(project_id: str | None = None, force: bool = False):
     if st.session_state.history_items and not force:
         return st.session_state.history_items
-
     try:
-        response = api_get("/history", params={"limit": 300}, timeout=20)
+        params: dict = {"limit": 300}
+        if project_id:
+            params["project_id"] = project_id
+        response = api_get("/history", params=params, timeout=20)
         response.raise_for_status()
         data = response.json()
         st.session_state.history_items = data.get("history", [])
@@ -416,38 +426,29 @@ def fetch_history(force: bool = False):
 
 
 def rebuild_project_histories_from_server():
+    """history_items 를 project_id 기준으로 project_histories 에 재구성합니다."""
     histories = st.session_state.get("history_items") or []
-    project_histories: dict[str, list[dict]] = {}
+    buckets: dict[str, list[dict]] = {}
 
-    ordered = list(reversed(histories))
-
-    for item in ordered:
+    for item in reversed(histories):
         question = (item.get("question") or "").strip()
         answer = (item.get("answer") or "").strip()
-        created_at = item.get("created_at")
-        ts = parse_created_at_to_ts(created_at)
+        ts = parse_created_at_to_ts(item.get("created_at"))
         key = project_key(item.get("project_id"))
-
-        if key not in project_histories:
-            project_histories[key] = []
-
+        buckets.setdefault(key, [])
         if question:
-            project_histories[key].append(
-                {"role": "user", "content": question, "ts": ts}
-            )
-
+            buckets[key].append({"role": "user", "content": question, "ts": ts})
         if answer:
-            project_histories[key].append(
-                {"role": "assistant", "content": answer, "ts": ts}
-            )
+            buckets[key].append({"role": "assistant", "content": answer, "ts": ts})
 
-    all_messages: list[dict] = []
-    for items in project_histories.values():
-        all_messages.extend(items)
-    project_histories["__all__"] = sorted(all_messages, key=lambda item: item["ts"])
+    all_msgs = sorted([m for msgs in buckets.values() for m in msgs], key=lambda x: x["ts"])
+    buckets["__all__"] = all_msgs
+    st.session_state.project_histories = buckets
 
-    st.session_state.project_histories = project_histories
 
+# ─────────────────────────────────────────────
+# Job / 상태 헬퍼
+# ─────────────────────────────────────────────
 
 def calc_job_progress(job: dict) -> int:
     total_targets = int(job.get("total_targets") or 0)
@@ -464,26 +465,20 @@ def calc_job_progress(job: dict) -> int:
 
 
 def build_project_job_map(projects: list[dict], jobs: list[dict]) -> dict[str, dict]:
-    result = {}
-
+    result: dict[str, dict] = {}
     for project in projects:
         project_id = (project.get("project_id") or "").strip()
         if not project_id:
             continue
-
-        matched = [job for job in jobs if (job.get("project_id") or "").strip() == project_id]
-        if not matched:
-            continue
-
-        matched.sort(
-            key=lambda item: (
-                item.get("updated_at") or "",
-                item.get("created_at") or "",
-            ),
+        matched = sorted(
+            [job for job in jobs if (job.get("project_id") or "").strip() == project_id],
+            key=lambda job: (
+                job.get("updated_at") or "", 
+                job.get("created_at") or ""),
             reverse=True,
         )
-        result[project_id] = matched[0]
-
+        if matched:
+            result[project_id] = matched[0]
     return result
 
 
@@ -528,33 +523,30 @@ def get_visible_chat_messages() -> list[dict]:
 
 
 def reset_local_state_after_reset():
-    st.session_state.projects = []
-    st.session_state.projects_error = None
-    st.session_state.index_jobs = []
-    st.session_state.index_job_error = None
-    st.session_state.history_items = []
-    st.session_state.history_error = None
-    st.session_state.latest_project_name = None
+    for k in ("projects", "index_jobs", "history_items", "last_uploaded_targets", "project_histories"):
+        st.session_state[k] = [] if isinstance(st.session_state.get(k), list) else {}
+    for k in ("projects_error", "index_job_error", "history_error", "latest_project_name",
+               "active_job_id", "active_job_detail", "last_upload_result",
+               "system_status", "system_status_error"):
+        st.session_state[k] = None
     st.session_state.chat_project_select = "전체"
     st.session_state.chat_project_id = None
-    st.session_state.active_job_id = None
-    st.session_state.active_job_detail = None
     st.session_state.uploading = False
     st.session_state.indexing = False
-    st.session_state.last_uploaded_targets = []
-    st.session_state.last_upload_result = None
     st.session_state.last_uploaded_file_sig = ""
     st.session_state.show_reset_confirm = False
-    st.session_state.project_histories = {}
     st.session_state.pending_upload = None
     st.session_state.pending_upload_sig = ""
     st.session_state.uploader_nonce += 1
 
 
-def render_system_status():
-    status = fetch_system_status()
-    st.sidebar.subheader("시스템 상태")
+# ─────────────────────────────────────────────
+# 사이드바 렌더링
+# ─────────────────────────────────────────────
 
+def render_system_status():
+    st.sidebar.subheader("시스템 상태")
+    status = fetch_system_status()
     if not status:
         err = st.session_state.system_status_error or "상태 조회 실패"
         st.sidebar.error(err)
@@ -596,7 +588,8 @@ def render_sidebar_projects():
     if st.sidebar.button("전체 보기", key="all_projects_btn", use_container_width=True):
         st.session_state.chat_project_select = "전체"
         st.session_state.chat_project_id = None
-        fetch_history(force=True)
+        # 전체 히스토리 재로드
+        fetch_history(project_id=None, force=True)
         rebuild_project_histories_from_server()
         st.rerun()
 
@@ -624,7 +617,8 @@ def render_sidebar_projects():
         ):
             st.session_state.chat_project_select = project_name
             st.session_state.chat_project_id = project_id
-            fetch_history(force=True)
+            # 해당 프로젝트 히스토리만 재로드
+            fetch_history(project_id=project_id, force=True)
             rebuild_project_histories_from_server()
             st.rerun()
 
@@ -664,7 +658,54 @@ def render_reset_box():
             st.rerun()
 
 
-def upload_files_and_start_index(uploaded_files):
+# ─────────────────────────────────────────────
+# 업로드 / 인덱싱
+# ─────────────────────────────────────────────
+
+def _start_index_job(targets: list):
+    """백엔드 /index-jobs 를 호출하고 active_job_id 를 저장합니다."""
+    if not targets:
+        return
+    project_name = normalize_project_name(targets[0].get("project_name"))
+    st.session_state.latest_project_name = project_name
+    try:
+        r = api_post("/index-jobs", json_data={"targets": targets}, timeout=60)
+        r.raise_for_status()
+        st.session_state.active_job_id = r.json().get("job_id")
+        st.session_state.indexing = True
+    except Exception as e:
+        st.error(f"인덱싱 작업 시작 실패: {e}")
+        return
+    fetch_projects(force=True)
+    fetch_index_jobs(force=True)
+
+
+def upload_files_and_start_index(files_payload: list):
+    """/upload 호출 후 즉시 인덱싱을 시작합니다."""
+    try:
+        r = api_post("/upload", files=files_payload, timeout=300)
+        r.raise_for_status()
+        data = r.json()
+        targets = data.get("targets", [])
+        st.session_state.last_upload_result = data
+        st.session_state.last_uploaded_targets = targets
+        st.session_state.uploading = False
+        if not targets:
+            st.error("업로드는 완료됐지만 인덱싱 대상이 없습니다.")
+            return
+        _start_index_job(targets)
+    except Exception as e:
+        st.session_state.uploading = False
+        st.session_state.indexing = False
+        st.error(f"업로드 실패: {e}")
+
+
+def start_upload_process(uploaded_files):
+    """
+    파일 업로드를 시작합니다.
+    - 동명 프로젝트가 존재하면 → 중복 확인 다이얼로그로 위임
+    - 그 외 → 바로 업로드 + 인덱싱
+    """
     if not uploaded_files:
         return
 
@@ -673,8 +714,8 @@ def upload_files_and_start_index(uploaded_files):
     st.session_state.active_job_id = None
     st.session_state.active_job_detail = None
 
-    files_payload = []
-    file_sig_parts = []
+    files_payload: list = []
+    file_sig_parts: list[str] = []
 
     for uploaded_file in uploaded_files:
         file_bytes = uploaded_file.getvalue()
@@ -685,50 +726,96 @@ def upload_files_and_start_index(uploaded_files):
 
     st.session_state.last_uploaded_file_sig = "|".join(file_sig_parts)
 
+    # 파일 사전 중복 체크
+    if len(files_payload) == 1:
+        project_name = stem_filename(uploaded_files[0].name)
+        try:
+            r = api_get(f"/projects/{project_name}", timeout=10)
+            if r.status_code == 200:
+                old_pid = r.json().get("project_id")
+                if old_pid:
+                    # 동명 프로젝트 존재 → 확인 다이얼로그로
+                    st.session_state.duplicate_pending = {
+                        "old_project_id": old_pid,
+                        "project_name": project_name,
+                    }
+                    st.session_state.upload_items = files_payload
+                    st.session_state.uploading = False
+                    return
+        except Exception as e:
+            logger.warning("중복 체크 오류(무시하고 진행): %s", e)
+
+    # 중복 없음 → 바로 업로드
+    upload_files_and_start_index(files_payload)
+
+
+def render_duplicate_confirm_dialog() -> bool:
+    """중복 프로젝트 확인 다이얼로그. 표시 중이면 True 반환."""
+    pending = st.session_state.get("duplicate_pending")
+    if not pending:
+        return False
+
+    project_name = pending["project_name"]
+    st.warning(
+        f"⚠️ **'{project_name}'** 프로젝트가 이미 존재합니다.\n\n"
+        "확인 시 기존 소스·벡터·히스토리를 모두 삭제하고 새 소스로 교체합니다."
+    )
+
+    col_info, col_btn = st.columns([3, 2])
+    with col_info:
+        st.text_input("프로젝트명", value=project_name, disabled=True)
+    with col_btn:
+        st.markdown("<br>", unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ 확인", key="dup_confirm_btn", use_container_width=True, type="primary"):
+                _resolve_duplicate(pending)
+        with c2:
+            if st.button("❌ 취소", key="dup_cancel_btn", use_container_width=True):
+                st.session_state.duplicate_pending = None
+                st.session_state.upload_items = []
+                st.session_state.uploading = False
+                st.session_state.uploader_nonce += 1
+                st.rerun()
+    return True
+
+
+def _resolve_duplicate(pending: dict):
+    """
+    중복 확인 버튼 클릭 시:
+    1. /projects/duplicate 로 구 project_id 의 SQLite + Qdrant 데이터 전부 삭제
+    2. 세션 히스토리 초기화
+    3. 새 파일 업로드 + 인덱싱 시작
+    """
+    old_pid = pending["old_project_id"]
+    project_name = pending["project_name"]
+
     try:
-        upload_response = api_post("/upload", files=files_payload, timeout=300)
-        upload_response.raise_for_status()
-        upload_data = upload_response.json()
+        r = api_post("/projects/duplicate", json_data={"project_id": old_pid}, timeout=30)
+        r.raise_for_status()
+        logger.info("duplicate 처리 완료: %s", r.json())
+    except Exception as e:
+        st.error(f"프로젝트 중복 처리 실패: {e}")
+        return
 
-        st.session_state.last_upload_result = upload_data
-        targets = upload_data.get("targets", [])
-        st.session_state.last_uploaded_targets = targets
-        st.session_state.uploading = False
+    # 세션 정리
+    st.session_state.duplicate_pending = None
+    key = project_key(old_pid)
+    st.session_state.project_histories.pop(key, None)
+    st.session_state.project_histories.pop(project_name, None)
 
-        if not targets:
-            st.error("업로드는 완료됐지만 인덱싱 대상이 없습니다.")
-            return
+    # 현재 선택 프로젝트가 교체 대상이면 초기화
+    if st.session_state.chat_project_id == old_pid:
+        st.session_state.chat_project_select = "전체"
+        st.session_state.chat_project_id = None
 
-        project_name = normalize_project_name(targets[0].get("project_name"))
-        st.session_state.latest_project_name = project_name
+    files_payload = st.session_state.upload_items
+    st.session_state.upload_items = []
 
-        job_created = False
-        last_error = None
+    if files_payload:
+        upload_files_and_start_index(files_payload)
 
-        for path in ("/index/jobs", "/index-jobs"):
-            try:
-                index_response = api_post(path, json_data={"targets": targets}, timeout=60)
-                index_response.raise_for_status()
-                job_data = index_response.json()
-                st.session_state.active_job_id = job_data.get("job_id")
-                st.session_state.indexing = True
-                job_created = True
-                break
-            except Exception as error:
-                last_error = error
-
-        if not job_created:
-            raise last_error if last_error else RuntimeError("index job create failed")
-
-        fetch_projects(force=True)
-        fetch_index_jobs(force=True)
-
-    except Exception as error:
-        st.session_state.uploading = False
-        st.session_state.indexing = False
-        st.session_state.active_job_id = None
-        st.session_state.active_job_detail = None
-        st.error(f"업로드/인덱싱 시작 실패: {error}")
+    st.rerun()
 
 
 def process_pending_upload():
@@ -743,7 +830,7 @@ def process_pending_upload():
         st.session_state.pending_upload_sig = ""
         return
 
-    upload_files_and_start_index(pending_upload)
+    start_upload_process(pending_upload)
     st.session_state.pending_upload = None
     st.session_state.pending_upload_sig = ""
     st.rerun()
@@ -782,11 +869,6 @@ def refresh_active_job():
         return
 
     st.session_state.indexing = True
-
-
-def trigger_live_refresh():
-    if st.session_state.get("uploading") or st.session_state.get("indexing"):
-        st_autorefresh(interval=2000, key="live_job_refresh")
 
 
 def render_upload_status_box():
@@ -845,36 +927,11 @@ def render_upload_area():
             st.rerun()
 
 
+# ─────────────────────────────────────────────
+# 채팅
+# ─────────────────────────────────────────────
+
 def ask_backend(question: str, project_name: str | None, project_id: str | None) -> str:
-    params = {
-        "question": question,
-        "top_k": 5,
-        "extra_context": "",
-    }
-
-    if project_id:
-        params["project_id"] = project_id
-    elif project_name and project_name != "전체":
-        params["project_name"] = project_name
-
-    chunks = []
-
-    try:
-        with api_get("/ask", params=params, timeout=300, stream=True) as response:
-            if response.status_code < 400:
-                for chunk in response.iter_content(chunk_size=None, decode_unicode=True):
-                    if chunk:
-                        chunks.append(chunk)
-
-                answer = "".join(chunks).strip()
-                if answer:
-                    return answer
-
-            elif response.status_code != 405:
-                return f"백엔드 /ask 오류: HTTP {response.status_code} - {response.text}"
-    except Exception:
-        pass
-
     payload = {
         "question": question,
         "top_k": 5,
@@ -886,8 +943,7 @@ def ask_backend(question: str, project_name: str | None, project_id: str | None)
     elif project_name and project_name != "전체":
         payload["project_name"] = project_name
 
-    chunks = []
-
+    chunks: list[str] = []
     try:
         with api_post("/ask", json_data=payload, timeout=300, stream=True) as response:
             if response.status_code >= 400:
@@ -916,38 +972,34 @@ def ask_backend(question: str, project_name: str | None, project_id: str | None)
 
 def render_chat_area():
     st.subheader("질문")
-    selected_project = current_project_name()
-    selected_project_id = current_project_id()
+    pid = current_project_id()
+    pname = current_project_name()
 
-    if selected_project_id:
-        st.caption(f"현재 프로젝트 공간: {project_name_by_id(selected_project_id)}")
+    if pid:
+        st.caption(f"현재 프로젝트 공간: {project_name_by_id(pid)}")
     else:
         st.info("전체 보기에서는 모든 프로젝트 대화가 표시됩니다.")
 
-    visible_messages = get_visible_chat_messages()
-    for message in visible_messages:
-        with st.chat_message("user" if message["role"] == "user" else "assistant"):
-            if message["role"] == "assistant":
-                render_answer(message["content"])
+    for msg in get_visible_chat_messages():
+        with st.chat_message(msg["role"]):
+            if msg["role"] == "assistant":
+                render_answer(msg["content"])
             else:
-                st.markdown(message["content"])
+                st.markdown(msg["content"])
 
-    if not selected_project_id:
-        st.info("사이드바에서 프로젝트를 선택한 뒤 질문하세요. 전체 보기에서는 질문 입력이 비활성화됩니다.")
+    if not pid:
+        st.info("사이드바에서 프로젝트를 선택한 뒤 질문하세요.")
         return
 
     jobs = fetch_index_jobs(force=True)
     projects = fetch_projects(force=True)
-    job_map = build_project_job_map(projects, jobs)
-    job = job_map.get(selected_project_id)
-    project_locked = not project_selectable(job)
+    job = build_project_job_map(projects, jobs).get(pid)
+    locked = not project_selectable(job)
 
     disabled_reason = None
     if st.session_state.get("uploading"):
         disabled_reason = "업로드 진행 중입니다."
-    elif st.session_state.get("indexing") and project_locked:
-        disabled_reason = "선택한 프로젝트는 아직 인덱싱 완료 전입니다."
-    elif project_locked:
+    elif locked:
         disabled_reason = "선택한 프로젝트는 아직 인덱싱 완료 전입니다."
 
     if disabled_reason:
@@ -966,37 +1018,45 @@ def render_chat_area():
 
     with st.chat_message("assistant"):
         with st.spinner("답변 생성 중..."):
-            answer = ask_backend(question, selected_project, selected_project_id)
+            answer = ask_backend(question, pname, pid)
         render_answer(answer)
 
-    local_ts = time.time()
-    key = project_key(selected_project_id)
+    # 로컬 session 에 즉시 반영 (rerun 전 화면 유지)
+    ts = time.time()
+    key = project_key(pid)
 
     st.session_state.project_histories.setdefault(key, [])
     st.session_state.project_histories[key].append(
-        {"role": "user", "content": question, "ts": local_ts}
+        {"role": "user", "content": question, "ts": ts}
     )
     st.session_state.project_histories[key].append(
-        {"role": "assistant", "content": answer, "ts": local_ts}
+        {"role": "assistant", "content": answer, "ts": ts}
     )
 
-    fetch_history(force=True)
+    # 서버 히스토리와 동기화 후 rerun
+    fetch_history(project_id=pid, force=True)
     rebuild_project_histories_from_server()
     st.rerun()
 
 
+# ─────────────────────────────────────────────
+# 진입점
+# ─────────────────────────────────────────────
+
 def bootstrap():
-    fetch_system_status(force=True) # 시스템 상태
-    fetch_projects(force=True)      # 프로젝트 목록
-    fetch_index_jobs(force=True)    # 인덱스 작업 목록
-    fetch_history(force=True)       # 히스토리 목록
-    rebuild_project_histories_from_server()  # 히스토리 기반 프로젝트별 대화 기록
-    refresh_active_job()            # 현재 진행 중인 인덱싱 작업 상태를 갱신
+    fetch_system_status(force=True)
+    fetch_projects(force=True)
+    fetch_index_jobs(force=True)
+    pid = current_project_id()
+    fetch_history(project_id=pid, force=True)
+    rebuild_project_histories_from_server()
+    refresh_active_job()
 
 
-# ─────────────────────────────────────────────
-# 진입점: 로그인 여부 확인 후 분기
-# ─────────────────────────────────────────────
+def trigger_live_refresh():
+    if st.session_state.get("uploading") or st.session_state.get("indexing"):
+        st_autorefresh(interval=2000, key="live_job_refresh")
+
 
 if not st.session_state.get("user_id"):
     render_login_page()
@@ -1017,6 +1077,9 @@ with st.sidebar:
 
 render_upload_area()
 st.divider()
-render_chat_area()
 
+if render_duplicate_confirm_dialog():
+    st.stop()
+
+render_chat_area()
 trigger_live_refresh()

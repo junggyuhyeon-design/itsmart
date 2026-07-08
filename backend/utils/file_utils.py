@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import uuid
@@ -8,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from config import get_settings
+
+logger = logging.getLogger(__name__)
 
 ANALYSIS_TARGET_EXTENSIONS = {
     ".py", ".java", ".js", ".ts", ".sql", ".sh", ".txt", ".md",
@@ -81,13 +84,13 @@ def _collect_regular_file(saved_path: Path) -> list[AnalysisTargetFile]:
 
 
 def _extract_zip(saved_zip: Path, extract_root: Path) -> list[AnalysisTargetFile]:
-    settings = get_settings()
     ensure_dir(extract_root)
     project_id = _make_project_id()
     project_name = _make_project_name(saved_zip.name)
-    target_root = extract_root / f"{project_name}_{project_id[:8]}"
+    target_root = extract_root / f"{project_name}" # 동일한 프로젝트(name으로 구분)인 경우 제거 후 재 생성
 
     if target_root.exists():
+        logger.info("[INFO] 기존 디렉토리를 제거: %s", target_root)
         shutil.rmtree(target_root, ignore_errors=True)
     ensure_dir(target_root)
 

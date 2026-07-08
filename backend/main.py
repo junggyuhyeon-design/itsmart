@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import re
 import sys
-import time
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -26,6 +25,7 @@ from database.history_repository import (
     get_file_index_summary,
     get_history,
     get_index_job,
+    get_project_by_name,
     get_recent_entities,
     get_table_rows_for_admin,
     init_index_jobs_table,
@@ -38,6 +38,11 @@ from database.history_repository import (
     update_index_job,
     upsert_user,
     user_exists,
+    delete_uploaded_file,
+    delete_file_index,
+    delete_index_job,
+    delete_code_elements,
+    delete_turn_entities,
 )
 from database.init_db import init_db
 from health_service import build_system_status
@@ -74,6 +79,10 @@ table_patterns = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────
+# Startup / Shutdown
+# ─────────────────────────────────────────────────────────────
+
 class AccessLogFilter(logging.Filter):
     skip_keywords = {"health", "status", "collections"}
 
@@ -100,18 +109,16 @@ async def lifespan(app: FastAPI):
         app.state.rag_service = rag_service
         app.state.rag_initialized = True
         app.state.init_error = None
-
-        logger.info("startup completed")
+        logger.info("===== startup completed =====")
     except Exception as error:
-        logger.exception("startup failed: %s", error)
+        logger.exception("===== startup failed: %s =====", error)
         app.state.rag_service = None
         app.state.rag_initialized = False
         app.state.init_error = str(error)
         raise RuntimeError(f"startup failed: {error}") from error
 
     yield
-
-    logger.info("shutdown completed")
+    logger.info("===== shutdown completed =====")
 
 
 app = FastAPI(
@@ -127,6 +134,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ─────────────────────────────────────────────────────────────
+# 공통 헬퍼
+# ─────────────────────────────────────────────────────────────
 
 def get_rag_service(request: Request) -> RAGService:
     rag_service = getattr(request.app.state, "rag_service", None)
@@ -176,6 +187,10 @@ async def save_upload_stream(upload_file: UploadFile, destination: Path) -> None
         logger.exception("save_upload_stream failed file=%s", upload_file.filename)
         raise HTTPException(status_code=500, detail=f"failed to save upload: {error}") from error
 
+
+# ─────────────────────────────────────────────────────────────
+# Normalizers
+# ─────────────────────────────────────────────────────────────
 
 def normalize_project_item(item: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -227,6 +242,10 @@ def normalize_target_item(item: dict[str, Any]) -> dict[str, Any]:
         "root_container_name": item.get("root_container_name", ""),
     }
 
+
+# ─────────────────────────────────────────────────────────────
+# Context builders
+# ─────────────────────────────────────────────────────────────
 
 def build_listing_context_summary(summary: dict[str, Any], extension_filter: str | None) -> str:
     lines: list[str] = []
@@ -377,6 +396,10 @@ def build_sqlite_context(project_id: str, project_name: str, question: str) -> s
     return "\n".join(parts)
 
 
+# ─────────────────────────────────────────────────────────────
+# Index job runner
+# ─────────────────────────────────────────────────────────────
+
 async def call_ask_with_context_stream(
         rag_service: RAGService,
         *,
@@ -411,6 +434,7 @@ async def call_ask_with_context_stream(
 
 def run_index_job(rag_service: RAGService, job_id: str, targets: list[dict[str, Any]]) -> None:
     try:
+        logger.info("run_index_job started job_id=%s targets=%d", job_id, len(targets))
         update_index_job(job_id, status="running", message="indexing started")
 
         def progress_callback(**kwargs):
@@ -455,9 +479,25 @@ def run_index_job(rag_service: RAGService, job_id: str, targets: list[dict[str, 
         )
 
 
+# ─────────────────────────────────────────────────────────────
+# Endpoints
+# ─────────────────────────────────────────────────────────────
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/")
+def root():
+    return PlainTextResponse("CodeMind backend is running.")
+
+
+@app.get("/status")
+def status():
+    rag_initialized = getattr(app.state, "rag_initialized", False)
+    init_error = getattr(app.state, "init_error", None)
+    return build_system_status(settings, rag_initialized, init_error)
 
 
 @app.get("/users/verify")
@@ -472,17 +512,7 @@ def verify_user(user_id: str = Query(...)):
     return {"user_id": uid, "exists": exists}
 
 
-@app.get("/status")
-def status():
-    rag_initialized = getattr(app.state, "rag_initialized", False)
-    init_error = getattr(app.state, "init_error", None)
-    return build_system_status(settings, rag_initialized, init_error)
-
-
-@app.get("/")
-def root():
-    return PlainTextResponse("CodeMind backend is running.")
-
+# ── Upload ────────────────────────────────────────────────────
 
 @app.post("/upload")
 async def upload(
@@ -526,10 +556,10 @@ async def upload(
     normalized_targets: list[dict[str, Any]] = []
 
     for target in raw_targets:
-        project_id = getattr(target, "project_id", None) or getattr(target, "projectid", None)
-        project_name = getattr(target, "project_name", None) or getattr(target, "projectname", None)
-        saved_path = getattr(target, "saved_path", None) or getattr(target, "savedpath", None)
-        root_container_name = getattr(target, "root_container_name", None) or getattr(target, "rootcontainername", None)
+        project_id = getattr(target, "project_id", None)
+        project_name = getattr(target, "project_name", None)
+        saved_path = getattr(target, "saved_path", None)
+        root_container_name = getattr(target, "root_container_name", None)
 
         if project_id and project_id not in projects_created:
             origin_saved_path = upload_name_map.get(root_container_name or "", "")
@@ -543,18 +573,19 @@ async def upload(
                 "project_id": project_id,
                 "project_name": project_name,
                 "saved_path": saved_path,
-                "relative_path": getattr(target, "relative_path", None) or getattr(target, "relativepath", None),
-                "original_name": getattr(target, "original_name", None) or getattr(target, "originalname", None),
-                "file_name": getattr(target, "original_name", None) or getattr(target, "originalname", None),
+                "relative_path": getattr(target, "relative_path", None),
+                "original_name": getattr(target, "original_name", None),
+                "file_name": getattr(target, "original_name", None),
                 "extension": getattr(target, "extension", None),
                 "file_size": getattr(target, "size", 0),
-                "source_type": getattr(target, "source_type", None) or getattr(target, "sourcetype", None),
+                "source_type": getattr(target, "source_type", None),
                 "root_container_name": root_container_name,
             }
         )
 
     for project_id, project_info in projects_created.items():
         try:
+            # SQLite에 업로드된 파일 정보 저장.
             save_uploaded_file(project_id, project_info["project_name"], project_info["saved_path"])
         except Exception as error:
             logger.exception("save_uploaded_file failed project_id=%s error=%s", project_id, error)
@@ -565,27 +596,27 @@ async def upload(
         "projects": len(projects_created),
     }
 
+# TODO : 현재 미사용 확인
+# @app.post("/index")
+# async def index_now(
+#         request: Request,
+#         targets: list[dict[str, Any]] = Body(...),
+# ):
+#     if not targets:
+#         raise HTTPException(status_code=400, detail="targets are required")
 
-@app.post("/index")
-async def index_now(
-        request: Request,
-        targets: list[dict[str, Any]] = Body(...),
-):
-    if not targets:
-        raise HTTPException(status_code=400, detail="targets are required")
+#     rag_service = get_rag_service(request)
+#     normalized_targets = [normalize_target_item(target) for target in targets]
 
-    rag_service = get_rag_service(request)
-    normalized_targets = [normalize_target_item(target) for target in targets]
-
-    try:
-        result = await run_in_threadpool(rag_service.index_files, normalized_targets)
-        result["total_chunks"] = int(result.get("total_chunks", 0) or 0)
-        result["indexed_files"] = int(result.get("indexed_files", 0) or 0)
-        result["code_elements"] = int(result.get("code_elements", 0) or 0)
-        return result
-    except Exception as error:
-        logger.exception("index_now failed")
-        raise HTTPException(status_code=500, detail=f"index failed: {error}") from error
+#     try:
+#         result = await run_in_threadpool(rag_service.index_files, normalized_targets)
+#         result["total_chunks"] = int(result.get("total_chunks", 0) or 0)
+#         result["indexed_files"] = int(result.get("indexed_files", 0) or 0)
+#         result["code_elements"] = int(result.get("code_elements", 0) or 0)
+#         return result
+#     except Exception as error:
+#         logger.exception("index_now failed")
+#         raise HTTPException(status_code=500, detail=f"index failed: {error}") from error
 
 
 @app.post("/index-jobs")
@@ -597,8 +628,11 @@ async def create_job(
 ):
     user_id = require_user(x_user_id)
 
+    logger.info("/index-jobs :: 진입")
+
     targets = payload.get("targets", [])
     if not targets:
+        logger.info("targets are required !!!")
         raise HTTPException(status_code=400, detail="targets are required")
 
     normalized_targets = [normalize_target_item(target) for target in targets]
@@ -616,8 +650,12 @@ async def create_job(
         message="queued",
     )
 
+    logger.info("SQLite :: index_job 생성 완료")
+
     rag_service = get_rag_service(request)
     background_tasks.add_task(run_index_job, rag_service, job_id, normalized_targets)
+
+    logger.info("SQLite :: index_job 진행")
 
     return {
         "job_id": job_id,
@@ -652,6 +690,8 @@ def get_index_job_detail(
         raise HTTPException(status_code=404, detail="job not found")
     return normalize_job_item(job)
 
+
+# ── Projects ──────────────────────────────────────────────────
 
 @app.get("/projects")
 def get_projects():
@@ -714,6 +754,69 @@ def get_project_files(
         logger.exception("get_project_files failed")
         raise HTTPException(status_code=500, detail=f"project files failed: {error}") from error
 
+@app.get("/projects/{project_name}")
+def get_project(
+        project_name: str,
+        x_user_id: str | None = Header(default=None),
+):
+    """프로젝트명으로 기존 project_id 조회 (중복 확인용)"""
+    name = (project_name or "").strip()
+    logger.info("/projects/%s 진입", name)
+    try:
+        exists = get_project_by_name(project_name=name)
+        dup_project_id = exists.get("project_id") if exists else None
+        return {"project_id": dup_project_id, "exists": dup_project_id is not None}
+    except HTTPException:
+        raise
+    except Exception as error:
+        logger.exception("get_project failed")
+        raise HTTPException(status_code=500, detail=f"project failed: {error}") from error
+    
+
+@app.post("/projects/duplicate")
+def duplicate_project(
+        request: Request,
+        x_user_id: str | None = Header(default=None),
+        payload: dict[str, Any] = Body(...),
+):
+    """동명 프로젝트 교체 시 구 project_id 관련 모든 데이터 삭제 (SQLite 전 테이블 + Qdrant)."""
+    old_project_id = (payload.get("project_id") or "").strip()
+    logger.info("/projects/duplicate 진입 old_project_id=%s", old_project_id)
+
+    if not old_project_id:
+        raise HTTPException(status_code=400, detail="project_id is required !!!")
+
+    try:
+        deleted = {
+            "chat_history":   delete_history(project_id=old_project_id),
+            "uploaded_files": delete_uploaded_file(project_id=old_project_id),
+            "file_index":     delete_file_index(project_id=old_project_id),
+            "index_jobs":     delete_index_job(project_id=old_project_id),
+            "code_elements":  delete_code_elements(project_id=old_project_id),
+            "turn_entities":  delete_turn_entities(project_id=old_project_id),
+        }
+
+        # Qdrant 벡터 삭제
+        qdrant_deleted = 0
+        try:
+            rag_service = get_rag_service(request)
+            qdrant_deleted = rag_service.qdrant_service.delete_by_project_id(old_project_id)
+        except Exception as qerr:
+            logger.warning("Qdrant delete_by_project_id failed (non-fatal): %s", qerr)
+
+        deleted["qdrant_vectors"] = qdrant_deleted
+        logger.info("duplicate_project done old=%s deleted=%s", old_project_id, deleted)
+        return {"deleted": deleted, "old_project_id": old_project_id}
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        logger.exception("중복 데이터 처리 실패")
+        raise HTTPException(status_code=500, detail=f"duplicate project failed: {error}") from error
+
+
+
+# ── Ask ───────────────────────────────────────────────────────
 
 @app.post("/ask")
 async def ask(
@@ -732,19 +835,17 @@ async def ask(
     if not question:
         raise HTTPException(status_code=400, detail="question is required")
 
-    selected_project_name = project_name
-    if project_name and not project_id:
-        for project in get_all_projects():
-            if project.get("project_name") == project_name.strip():
-                project_id = project.get("project_id")
-                selected_project_name = project.get("project_name")
-                break
+    # if project_id: # 프로젝트 ID로 기준으로 NAME 가져오기.
+    #     for project in get_all_projects():
+    #         if project.get("project_id") == project_id.strip():
+    #             project_name = project.get("project_name")
+    #             break
 
-        if not project_id:
-            raise HTTPException(status_code=400, detail=f"unknown project_name: {project_name}")
+    #     if not project_name:
+    #         raise HTTPException(status_code=400, detail=f"unknown project_id: {project_id}")
 
     history_limit = max(1, min(settings.chat_history_turns, 20))
-    chat_history = list(reversed(get_history(user_id, limit=history_limit)))
+    chat_history = list(reversed(get_history(user_id, project_id, limit=history_limit)))
     recent_entities = get_recent_entities(user_id, limit=20, project_id=project_id)
 
     intent = query_analyzer.analyze(question)
@@ -760,14 +861,14 @@ async def ask(
 
     sqlite_context = ""
     if project_id and detect_meta_request(question):
-        sqlite_context = build_sqlite_context(project_id, selected_project_name or "", question)
+        sqlite_context = build_sqlite_context(project_id, project_name or "", question)
 
     generator, hits = await call_ask_with_context_stream(
         rag_service=rag_service,
         question=question,
         retrieval_question=retrieval_question,
         project_id=project_id,
-        project_name=selected_project_name,
+        project_name=project_name,
         extra_context=structure_context or extra_context,
         sqlite_context=sqlite_context,
         top_k=top_k,
@@ -821,13 +922,16 @@ async def ask(
     return StreamingResponse(safe_stream(), media_type="text/plain; charset=utf-8")
 
 
+# ── History ───────────────────────────────────────────────────
+
 @app.get("/history")
 def history(
         limit: int = Query(default=20, ge=1, le=300),
         x_user_id: str | None = Header(default=None),
+        project_id: str | None = Query(default=None),
 ):
     user_id = require_user(x_user_id)
-    rows = get_history(user_id, limit=limit)
+    rows = get_history(user_id, limit=limit, project_id=project_id)
     return {
         "history": rows,
         "count": len(rows),
@@ -837,11 +941,14 @@ def history(
 @app.delete("/history")
 def clear_history(
         x_user_id: str | None = Header(default=None),
+        project_id: str | None = Query(default=None),
 ):
     user_id = require_user(x_user_id)
-    deleted = delete_history(user_id)
+    deleted = delete_history(user_id, project_id=project_id )
     return {"deleted": deleted}
 
+
+# ── DB Admin ─────────────────────────────────────────────────
 
 @app.get("/db/tables")
 def db_tables():
@@ -867,6 +974,8 @@ def db_table_rows(
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
+
+# ── Reset ─────────────────────────────────────────────────────
 
 @app.post("/admin/purge")
 def purge_runtime_data():
@@ -915,21 +1024,21 @@ def reset_all_data(
         raise HTTPException(status_code=500, detail=f"reset failed: {error}") from error
 
 
-@app.get("/ask")
-async def ask_get(
-        request: Request,
-        question: str,
-        project_name: str | None = Query(default=None),
-        project_id: str | None = Query(default=None),
-        extra_context: str = Query(default=""),
-        top_k: int = Query(default=5),
-        x_user_id: str | None = Header(default=None),
-):
-    payload = {
-        "question": question,
-        "project_name": project_name,
-        "project_id": project_id,
-        "extra_context": extra_context,
-        "top_k": top_k,
-    }
-    return await ask(request=request, payload=payload, x_user_id=x_user_id)
+# @app.get("/ask")
+# async def ask_get(
+#         request: Request,
+#         question: str,
+#         project_name: str | None = Query(default=None),
+#         project_id: str | None = Query(default=None),
+#         extra_context: str = Query(default=""),
+#         top_k: int = Query(default=5),
+#         x_user_id: str | None = Header(default=None),
+# ):
+#     payload = {
+#         "question": question,
+#         "project_name": project_name,
+#         "project_id": project_id,
+#         "extra_context": extra_context,
+#         "top_k": top_k,
+#     }
+#     return await ask(request=request, payload=payload, x_user_id=x_user_id)

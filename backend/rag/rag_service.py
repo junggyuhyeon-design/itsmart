@@ -254,3 +254,98 @@ class RAGService:
             sqlite_context=sqlite_context,
         )
         return generator, hits
+
+    # def index_files(self, targets: list[dict[str, Any]], progress_callback=None) -> dict[str, Any]:
+    #     if not targets:
+    #         return {"success": 0, "failed": 0, "total_chunks": 0, "logs": ["no targets"]}
+
+    #     success = 0
+    #     failed = 0
+    #     total_chunks = 0
+    #     logs: list[str] = []
+
+    #     file_index_rows = []
+    #     code_elements = []
+    #     all_chunks = []
+
+    #     for index, target in enumerate(targets, start=1):
+    #         try:
+    #             parsed = parse_text_file(target)
+    #             if not parsed:
+    #                 failed += 1
+    #                 logs.append(f"parse failed: {target.get('saved_path')}")
+    #                 continue
+
+    #             project_id = parsed["project_id"]
+    #             project_name = parsed["project_name"]
+
+    #             file_index_rows.append(
+    #                 {
+    #                     "project_id": project_id,
+    #                     "project_name": project_name,
+    #                     "file_name": parsed["file_name"],
+    #                     "relative_path": parsed["relative_path"],
+    #                     "extension": parsed["extension"],
+    #                     "file_size": parsed.get("file_size", 0),
+    #                 }
+    #             )
+
+    #             static_analysis = extract_static_analysis(target)
+    #             if static_analysis:
+    #                 code_elements.append(static_analysis)
+
+    #             chunks = self.chunk_service.chunk_parsed_file(parsed)
+    #             all_chunks.extend(chunks)
+
+    #             success += 1
+    #             total_chunks += len(chunks)
+    #             logs.append(f"indexed: {parsed['relative_path']} ({len(chunks)} chunks)")
+
+    #             if progress_callback:
+    #                 progress_callback(
+    #                     processed_targets=index,
+    #                     success_count=success,
+    #                     failed_count=failed,
+    #                     total_chunks=total_chunks,
+    #                     message=f"indexed {index}/{len(targets)}",
+    #                     logs=logs[-20:],
+    #                 )
+    #             logger.info(
+    #                 "---- 인덱싱 진행중... ::: processed=%d success=%d failed=%d total_chunks=%d",
+    #                 index,
+    #                 success,
+    #                 failed,
+    #                 total_chunks,
+    #             )
+    #         except Exception as error:
+    #             failed += 1
+    #             logs.append(f"failed: {target.get('saved_path')} - {error}")
+    #             logger.exception("index_files failed target=%s", target.get("saved_path"))
+
+    #     if file_index_rows:
+    #         from database.history_repository import bulk_insert_file_index
+    #         bulk_insert_file_index(file_index_rows)
+    #         logger.info("SQLite 파일인덱스 목록 저장 %d file index rows", len(file_index_rows))
+
+    #     if code_elements:
+    #         grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    #         for element in code_elements:
+    #             key = (element["project_id"], element["project_name"])
+    #             grouped.setdefault(key, []).append(element)
+
+    #         from database.history_repository import insert_code_elements
+    #         for (project_id, project_name), elements in grouped.items():
+    #             insert_code_elements(project_id, project_name, elements)
+    #         logger.info("SQLite 코드 요소 저장 %d code elements", len(code_elements))
+
+    #     if all_chunks:
+    #         vectors = self.embedding_service.embed_texts([chunk["text"] for chunk in all_chunks])
+    #         self.qdrant_service.upsert_chunks(all_chunks, vectors)
+    #         logger.info("Qdrant 청크 저장 %d chunks", len(all_chunks))
+
+    #     return {
+    #         "success": success,
+    #         "failed": failed,
+    #         "total_chunks": total_chunks,
+    #         "logs": logs,
+    #     }

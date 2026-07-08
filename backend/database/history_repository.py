@@ -10,6 +10,10 @@ from database.init_db import get_connection
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────────
+# 공통 유틸
+# ─────────────────────────────────────────────────────────────
+
 def json_dumps(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False)
@@ -49,6 +53,10 @@ def count_lines(text: str | None) -> int:
     return normalized.count("\n") + 1
 
 
+# ─────────────────────────────────────────────────────────────
+# Users
+# ─────────────────────────────────────────────────────────────
+
 def upsert_user(user_id: str) -> None:
     if not user_id or not user_id.strip():
         raise ValueError("user_id is required")
@@ -66,49 +74,26 @@ def user_exists(user_id: str) -> bool:
         return False
 
 
-def save_history(
-        user_id: str,
-        question: str,
-        answer: str,
-        project_id: str | None = None,
-) -> int:
+# ─────────────────────────────────────────────────────────────
+# Chat History  (project_id 기준)
+# ─────────────────────────────────────────────────────────────
+
+def save_history(user_id: str, project_id: str, question: str, answer: str) -> int:
     with get_connection() as conn:
         cur = conn.execute(
-            """
-            INSERT INTO chat_history (user_id, question, answer, project_id)
-            VALUES (?, ?, ?, ?)
-            """,
-            (user_id, question, answer, project_id),
+            "INSERT INTO chat_history (user_id, project_id, question, answer) VALUES (?, ?, ?, ?)",
+            (user_id, project_id, question, answer),
         )
         return int(cur.lastrowid)
 
 
-def get_history(user_id: str, limit: int) -> list[dict[str, Any]]:
-    try:
-        with get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, question, answer, project_id, created_at
-                FROM chat_history
-                WHERE user_id = ?
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-                """,
-                (user_id, limit),
-            ).fetchall()
-            return [dict(row) for row in rows]
-    except Exception:
-        logger.exception("get_history failed user_id=%s", user_id)
-        return []
-
-
-def get_history_by_project(user_id: str, project_id: str | None, limit: int) -> list[dict[str, Any]]:
+def get_history(user_id: str, project_id: str | None, limit: int) -> list[dict[str, Any]]:
     try:
         with get_connection() as conn:
             if project_id:
                 rows = conn.execute(
                     """
-                    SELECT id, question, answer, project_id, created_at
+                    SELECT id, project_id, question, answer, created_at
                     FROM chat_history
                     WHERE user_id = ? AND project_id = ?
                     ORDER BY created_at DESC, id DESC
@@ -119,9 +104,9 @@ def get_history_by_project(user_id: str, project_id: str | None, limit: int) -> 
             else:
                 rows = conn.execute(
                     """
-                    SELECT id, question, answer, project_id, created_at
+                    SELECT id, project_id, question, answer, created_at
                     FROM chat_history
-                    WHERE user_id = ? AND (project_id IS NULL OR project_id = '')
+                    WHERE user_id = ?
                     ORDER BY created_at DESC, id DESC
                     LIMIT ?
                     """,
@@ -129,15 +114,76 @@ def get_history_by_project(user_id: str, project_id: str | None, limit: int) -> 
                 ).fetchall()
             return [dict(row) for row in rows]
     except Exception:
-        logger.exception("get_history_by_project failed user_id=%s project_id=%s", user_id, project_id)
+        logger.exception("get_history failed user_id=%s project_id=%s", user_id, project_id)
         return []
 
 
-def delete_history(user_id: str) -> int:
-    with get_connection() as conn:
-        cur = conn.execute("DELETE FROM chat_history WHERE user_id = ?", (user_id,))
-        return int(cur.rowcount or 0)
+# def get_history_by_project(user_id: str, project_id: str | None, limit: int) -> list[dict[str, Any]]:
+#     try:
+#         with get_connection() as conn:
+#             if project_id:
+#                 rows = conn.execute(
+#                     """
+#                     SELECT id, question, answer, project_id, created_at
+#                     FROM chat_history
+#                     WHERE user_id = ? AND project_id = ?
+#                     ORDER BY created_at DESC, id DESC
+#                     LIMIT ?
+#                     """,
+#                     (user_id, project_id, limit),
+#                 ).fetchall()
+#             else:
+#                 rows = conn.execute(
+#                     """
+#                     SELECT id, question, answer, project_id, created_at
+#                     FROM chat_history
+#                     WHERE user_id = ? AND (project_id IS NULL OR project_id = '')
+#                     ORDER BY created_at DESC, id DESC
+#                     LIMIT ?
+#                     """,
+#                     (user_id, limit),
+#                 ).fetchall()
+#             return [dict(row) for row in rows]
+#     except Exception:
+#         logger.exception("get_history_by_project failed user_id=%s project_id=%s", user_id, project_id)
+#         return []
 
+
+def delete_history(project_id: str, user_id: str | None = None) -> int:
+    try:
+        if not user_id:
+            with get_connection() as conn:
+                cur = conn.execute(
+                    "DELETE FROM chat_history WHERE project_id = ?",
+                    (project_id,)
+                )
+                return int(cur.rowcount or 0)
+        else:
+            with get_connection() as conn:
+                cur = conn.execute(
+                    "DELETE FROM chat_history WHERE user_id = ? AND project_id = ?",
+                    (user_id, project_id)
+                )
+                return int(cur.rowcount or 0)
+    except Exception:
+        logger.exception("delete_history failed user_id=%s project_id=%s", user_id, project_id)
+        return 0
+
+
+# def delete_history_by_project_id(project_id: str) -> int:
+#     """프로젝트 교체 시 해당 project_id 의 모든 히스토리를 삭제합니다."""
+#     try:
+#         with get_connection() as conn:
+#             cur = conn.execute("DELETE FROM chat_history WHERE project_id = ?", (project_id,))
+#             return int(cur.rowcount or 0)
+#     except Exception:
+#         logger.exception("delete_history_by_project_id failed project_id=%s", project_id)
+#         return 0
+
+
+# ─────────────────────────────────────────────────────────────
+# Uploaded Files / Projects
+# ─────────────────────────────────────────────────────────────
 
 def save_uploaded_file(project_id: str, project_name: str, saved_path: str) -> str:
     with get_connection() as conn:
@@ -150,7 +196,20 @@ def save_uploaded_file(project_id: str, project_name: str, saved_path: str) -> s
         )
     return project_id
 
+def delete_uploaded_file(project_id: str) -> int:
+    try:
+        with get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM uploaded_files WHERE project_id = ?",
+                (project_id,),
+            )
+            return int(cur.rowcount or 0)
+    except Exception:
+        logger.exception("delete_uploaded_file failed project_id=%s", project_id)
+        return 0
 
+
+# TODO : 미사용 확인 필요
 def get_uploaded_files() -> list[dict[str, Any]]:
     try:
         with get_connection() as conn:
@@ -167,6 +226,7 @@ def get_uploaded_files() -> list[dict[str, Any]]:
         return []
 
 
+# TODO : 미사용 확인 필요
 def get_uploaded_files_by_project_id(project_id: str) -> dict[str, Any] | None:
     try:
         with get_connection() as conn:
@@ -199,6 +259,24 @@ def get_all_projects() -> list[dict[str, Any]]:
         logger.exception("get_all_projects failed")
         return []
 
+
+def get_project_by_name(project_name: str) -> dict[str, Any] | None:
+    """동일한 프로젝트명 존재여부 확인 후 ID 반환"""
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT project_id, project_name, uploaded_at FROM uploaded_files WHERE project_name = ?",
+                (project_name.strip(),),
+            ).fetchone()
+            return dict(row) if row else None
+    except Exception:
+        logger.exception("get_project_by_name failed project_name=%s", project_name)
+        return None
+
+
+# ─────────────────────────────────────────────────────────────
+# File Index
+# ─────────────────────────────────────────────────────────────
 
 def bulk_insert_file_index(files: list[dict[str, Any]]) -> int:
     if not files:
@@ -294,6 +372,22 @@ def get_file_index_summary(project_id: str) -> dict[str, Any]:
         logger.exception("get_file_index_summary failed project_id=%s", project_id)
         return {"total": 0, "by_extension": {}, "files": []}
 
+def delete_file_index(project_id: str) -> int:
+    try:
+        with get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM file_index WHERE project_id = ?",
+                (project_id,),
+            )
+            return int(cur.rowcount or 0)
+    except Exception:
+        logger.exception("delete_file_index failed project_id=%s", project_id)
+        return 0
+
+
+# ─────────────────────────────────────────────────────────────
+# Code Elements
+# ─────────────────────────────────────────────────────────────
 
 def insert_code_elements(project_id: str, project_name: str, elements: list[dict[str, Any]]) -> int:
     if not elements:
@@ -375,7 +469,24 @@ def get_code_elements(project_id: str, layer_type: str | None = None) -> list[di
         logger.exception("get_code_elements failed project_id=%s", project_id)
         return []
 
+def delete_code_elements(project_id: str) -> int:
+    try:
+        with get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM code_elements WHERE project_id = ?",
+                (project_id,),
+            )
+            return int(cur.rowcount or 0)
+    except Exception:
+        logger.exception("delete_code_elements failed project_id=%s", project_id)
+        return 0
 
+
+# ─────────────────────────────────────────────────────────────
+# Turn Entities  (turn_entities 테이블은 init_db 에서 생성)
+# ─────────────────────────────────────────────────────────────
+
+# TODO 미사용 확인 필요
 def find_code_elements_by_name(project_id: str, keyword: str) -> list[dict[str, Any]]:
     try:
         like_keyword = f"%{keyword}%"
@@ -421,6 +532,7 @@ def find_code_elements_by_name(project_id: str, keyword: str) -> list[dict[str, 
         return []
 
 
+# TODO : 미사용 확인 필요(TABLE 은 init_db 에서 생성)
 def ensure_turn_entities_table() -> None:
     with get_connection() as conn:
         conn.execute(
@@ -442,7 +554,6 @@ def save_turn_entities(user_id: str, entities: list[dict[str, Any]], project_id:
         return 0
 
     try:
-        ensure_turn_entities_table()
         rows = []
         for entity in entities:
             entity_name = (entity.get("entity_name", "") or "").strip()
@@ -469,7 +580,6 @@ def save_turn_entities(user_id: str, entities: list[dict[str, Any]], project_id:
 
 def get_recent_entities(user_id: str, limit: int = 20, project_id: str | None = None) -> list[dict[str, Any]]:
     try:
-        ensure_turn_entities_table()
         with get_connection() as conn:
             if project_id:
                 rows = conn.execute(
@@ -499,6 +609,24 @@ def get_recent_entities(user_id: str, limit: int = 20, project_id: str | None = 
         return []
 
 
+def delete_turn_entities(project_id: str) -> int:
+    try:
+        with get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM turn_entities WHERE project_id = ?",
+                (project_id,),
+            )
+            return int(cur.rowcount or 0)
+    except Exception:
+        logger.exception("delete_turn_entities failed project_id=%s", project_id)
+        return 0
+
+
+# ─────────────────────────────────────────────────────────────
+# Index Jobs
+# ─────────────────────────────────────────────────────────────
+
+# TODO : 미사용 확인 필요 (TABLE 은 init_db 에서 생성)
 def init_index_jobs_table() -> None:
     required_columns = {
         "job_id": "TEXT PRIMARY KEY",
@@ -670,9 +798,25 @@ def list_index_jobs(user_id: str, limit: int = 20) -> list[dict[str, Any]]:
         logger.exception("list_index_jobs failed user_id=%s", user_id)
         return []
 
+def delete_index_job(project_id: str) -> int:
+    """해당 project_id 의 모든 index_jobs 를 삭제합니다."""
+    try:
+        with get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM index_jobs WHERE project_id = ?",
+                (project_id,),
+            )
+            return int(cur.rowcount or 0)
+    except Exception:
+        logger.exception("delete_index_job failed project_id=%s", project_id)
+        return 0
+
+
+# ─────────────────────────────────────────────────────────────
+# Admin / Purge
+# ─────────────────────────────────────────────────────────────
 
 def purge_all_runtime_data() -> dict[str, int]:
-    ensure_turn_entities_table()
     with get_connection() as conn:
         chat_history_deleted = conn.execute("DELETE FROM chat_history").rowcount
         uploaded_files_deleted = conn.execute("DELETE FROM uploaded_files").rowcount

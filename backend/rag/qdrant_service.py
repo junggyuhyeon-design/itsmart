@@ -8,6 +8,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.models import (
     Distance,
     FieldCondition,
+    FilterSelector,
     Filter,
     MatchValue,
     PointStruct,
@@ -71,7 +72,7 @@ class QdrantService:
 
         for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
             point_id = hashlib.md5(
-                f"{chunk.get('project_id', '')}|{chunk.get('relative_path', '')}|{chunk.get('chunk_index', index)}".encode()
+                f"{chunk.get('project_name','')}|{chunk.get('relative_path','')}|{chunk.get('chunk_index', index)}".encode()
             ).hexdigest()
 
             payload = {
@@ -110,6 +111,25 @@ class QdrantService:
             points=points,
         )
         return len(points)
+
+    def delete_by_project_id(self, project_id: str) -> int:
+        """특정 project_id 에 해당하는 Qdrant 벡터를 모두 삭제합니다."""
+        if not project_id:
+            return 0
+        try:
+            result = self.client.delete(
+                collection_name=self.settings.qdrant_collection,
+                points_selector=FilterSelector(
+                    filter=Filter(
+                        must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
+                    )
+                ),
+            )
+            logger.info("Qdrant delete_by_project_id project_id=%s result=%s", project_id, result)
+            return 1
+        except Exception:
+            logger.exception("Qdrant delete_by_project_id failed project_id=%s", project_id)
+            return 0
 
     def search(
             self,
