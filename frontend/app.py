@@ -371,31 +371,26 @@ def fetch_index_jobs(force: bool = False):
 
     last_error = None
 
-    for path in ("/index/jobs", "/index-jobs"):
-        try:
-            response = api_get(path, params={"limit": 50}, timeout=20)
-            response.raise_for_status()
-            data = response.json()
-            st.session_state.index_jobs = data.get("jobs", [])
-            st.session_state.index_job_error = None
-            return st.session_state.index_jobs
-        except Exception as error:
-            last_error = error
-
-    st.session_state.index_jobs = []
-    st.session_state.index_job_error = str(last_error) if last_error else "index job fetch failed"
-    return st.session_state.index_jobs
+    try:
+        response = api_get("/index-jobs", params={"limit": 50}, timeout=20)
+        response.raise_for_status()
+        data = response.json()
+        st.session_state.index_jobs = data.get("jobs", [])
+        st.session_state.index_job_error = None
+        return st.session_state.index_jobs
+    except Exception as error:
+        st.session_state.index_jobs = []
+        st.session_state.index_job_error = str(error)
+        return st.session_state.index_jobs
 
 
 def fetch_index_job_detail(job_id: str):
-    for path in (f"/index/jobs/{job_id}", f"/index-jobs/{job_id}"):
-        try:
-            response = api_get(path, timeout=20)
-            response.raise_for_status()
-            return response.json()
-        except Exception:
-            pass
-    return None
+    try:
+        response = api_get(f"/index-jobs/{job_id}", timeout=20)
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
 
 
 def fetch_history(force: bool = False):
@@ -705,17 +700,15 @@ def upload_files_and_start_index(uploaded_files):
         job_created = False
         last_error = None
 
-        for path in ("/index/jobs", "/index-jobs"):
-            try:
-                index_response = api_post(path, json_data={"targets": targets}, timeout=60)
-                index_response.raise_for_status()
-                job_data = index_response.json()
-                st.session_state.active_job_id = job_data.get("job_id")
-                st.session_state.indexing = True
-                job_created = True
-                break
-            except Exception as error:
-                last_error = error
+        try:
+            index_response = api_post("/index-jobs", json_data={"targets": targets}, timeout=60)
+            index_response.raise_for_status()
+            job_data = index_response.json()
+            st.session_state.active_job_id = job_data.get("jobid")
+            st.session_state.indexing = True
+            job_created = True
+        except Exception as error:
+            last_error = error
 
         if not job_created:
             raise last_error if last_error else RuntimeError("index job create failed")

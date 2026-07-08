@@ -24,6 +24,7 @@ class RAGService:
         self.diagram_service = DiagramService()
         self.chunk_service = ChunkService(settings)
 
+        # Qdrant 컬렉션 보장
         self.qdrant_service.ensure_collection(self.embedding_service.dimension)
 
     def index_files(
@@ -31,6 +32,18 @@ class RAGService:
             targets: list[dict[str, Any]],
             progress_callback: Callable[..., None] | None = None,
     ) -> dict[str, Any]:
+        # ? targets 정보 : /upload 응답 -> /index-jobs 로 넘어온 인덱싱 대상 리스트
+        # project_id         : 프로젝트 아이디
+        # project_name       : 프로젝트명
+        # saved_path         : 업로드된 원본 zip/파일 저장 경로
+        # relative_path      : 프로젝트 내부 상대경로 (예: backend/main.py)
+        # original_name      : 원본 파일명
+        # filename           : 파일명
+        # extension          : 확장자
+        # filesize           : 파일 크기
+        # source_type        : 원본 유형 (zip_entry, single_file 등)
+        # root_container_name: 루트 zip 이름 등
+
         if not targets:
             return {
                 "success": 0,
@@ -47,14 +60,47 @@ class RAGService:
         logs: list[str] = []
 
         total_targets = len(targets)
+
+        # ? file_index_rows 정보 : SQLite file_index 테이블 저장용 메타데이터
+        # project_id    : 프로젝트 아이디
+        # project_name  : 프로젝트명
+        # file_name     : 파일명
+        # relative_path : 프로젝트 내부 상대경로
+        # extension     : 확장자
+        # file_size     : 파일 크기
         file_index_rows: list[dict[str, Any]] = []
+
+        # ? code_elements_rows_by_project 정보 : SQLite code_elements 저장용 정적분석 결과 모음
+        # key = (project_id, project_name)
+        # value = [analysis, analysis, ...]
         code_elements_rows_by_project: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
         for index, target in enumerate(targets, start=1):
             relative_path = target.get("relative_path") or target.get("file_name") or target.get("filename") or "unknown"
 
             try:
+                # 파일 읽기 + 기본 메타/언어/계층/클래스 정보 파싱
                 parsed = parse_text_file(target)
+
+                # ? parsed 정보 :
+                # raw_text           : 파일 원문 텍스트
+                # project_id         : 프로젝트 아이디
+                # project_name       : 프로젝트명
+                # filename           : 파일명
+                # extension          : 확장자
+                # language           : 감지된 언어
+                # mimetype           : MIME 타입
+                # relativepath       : 상대경로
+                # savedpath          : 저장 경로
+                # filepath           : 실제 파일 경로
+                # filesize           : 파일 크기
+                # sourcetype         : 업로드 원본 타입
+                # rootcontainername  : 루트 zip 이름
+                # layertype          : 계층 타입 (controller/service/repository/mapper/config 등)
+                # contenttype        : 내용 타입 (apiendpoint/sqlselect/ddlcreate 등)
+                # classname          : 클래스명
+                # package            : 패키지명
+
                 if not parsed:
                     failed += 1
                     logs.append(f"[skip] parse failed: {relative_path}")
@@ -70,7 +116,30 @@ class RAGService:
                         )
                     continue
 
+                # 파일 청킹
                 chunks = self.chunk_service.chunk_parsed_file(parsed)
+
+                # ? chunks 정보 : 벡터DB(Qdrant)에 저장할 청크 리스트
+                # projectid         : 프로젝트 아이디
+                # projectname       : 프로젝트명
+                # filename          : 파일명
+                # extension         : 확장자
+                # relativepath      : 상대경로
+                # savedpath         : 저장 경로
+                # filepath          : 실제 파일 경로
+                # filesize          : 파일 크기
+                # sourcetype        : 업로드 원본 타입
+                # rootcontainername : 루트 zip 이름
+                # layertype         : 계층 타입
+                # classname         : 클래스명
+                # package           : 패키지명
+                # contenttype       : 내용 타입
+                # text              : 청크 텍스트
+                # chunkindex        : 청크 인덱스
+                # startline         : 시작 라인
+                # endline           : 끝 라인
+                # chunktype         : 청크 타입(text 등)
+
                 if not chunks:
                     failed += 1
                     logs.append(f"[skip] no chunks: {relative_path}")
@@ -86,6 +155,7 @@ class RAGService:
                         )
                     continue
 
+                # 공백 청크 제거
                 valid_chunks = [chunk for chunk in chunks if (chunk.get("text") or "").strip()]
                 if not valid_chunks:
                     failed += 1
@@ -102,16 +172,24 @@ class RAGService:
                         )
                     continue
 
+                # ? vectors 정보 : 각 청크 텍스트를 임베딩한 벡터 리스트
+                # [
+                #   [0.0123, -0.4421, ...],
+                #   [0.2871,  0.0311, ...],
+                #   ...
+                # ]
                 vectors = self.embedding_service.embed_texts(
                     [(chunk.get("text") or "").strip() for chunk in valid_chunks]
                 )
 
+                # Qdrant 저장
                 upserted = self.qdrant_service.upsert_chunks(valid_chunks, vectors)
                 total_chunks += upserted
 
                 project_id = parsed.get("project_id", "") or target.get("project_id", "")
                 project_name = parsed.get("project_name", "") or target.get("project_name", "")
 
+                # SQLite file_index 저장용 메타데이터 누적
                 file_index_rows.append(
                     {
                         "project_id": project_id,
@@ -124,7 +202,28 @@ class RAGService:
                 )
 
                 try:
-                    analysis = extract_static_analysis(target)
+                    # 정적 분석 추출
+                    analysis = extract_static_analysis(parsed)
+
+                    # ? analysis 정보 : SQLite code_elements 저장용 정적 분석 결과
+                    # projectid      : 프로젝트 아이디
+                    # projectname    : 프로젝트명
+                    # filename       : 파일명
+                    # relativepath   : 상대경로
+                    # savedpath      : 저장 경로
+                    # extension      : 확장자
+                    # language       : 감지 언어
+                    # mimetype       : MIME 타입
+                    # layertype      : 계층 타입
+                    # contenttype    : 내용 타입
+                    # classname      : 클래스명
+                    # package        : 패키지명
+                    # imports        : import 목록
+                    # methods        : 메서드 목록
+                    # xmlstatements  : xml select/insert/update/delete id 목록
+                    # tablenames     : SQL/DDL 등에서 추출한 테이블명 목록
+                    # rawtext        : 원문 텍스트
+
                     if analysis:
                         key = (project_id, project_name)
                         code_elements_rows_by_project.setdefault(key, []).append(analysis)
@@ -141,6 +240,14 @@ class RAGService:
                 logs.append(f"[ok] indexed {relative_path} ({upserted} chunks)")
 
                 if progress_callback:
+                    # ? progress_callback kwargs :
+                    # processed_targets : 현재까지 처리한 파일 수
+                    # total_targets     : 전체 대상 파일 수
+                    # success_count     : 성공 파일 수
+                    # failed_count      : 실패 파일 수
+                    # total_chunks      : 누적 저장 청크 수
+                    # message           : 현재 진행 메시지
+                    # logs              : 최근 로그 목록
                     progress_callback(
                         processed_targets=index,
                         total_targets=total_targets,
@@ -172,12 +279,14 @@ class RAGService:
         code_elements_count = 0
 
         try:
+            # SQLite file_index 테이블 일괄 저장
             indexed_files = bulk_insert_file_index(file_index_rows)
         except Exception as error:
             logger.exception("bulk_insert_file_index failed: %s", error)
             logs.append(f"[error] bulk_insert_file_index: {error}")
 
         try:
+            # SQLite code_elements 테이블 프로젝트별 일괄 저장
             for (project_id, project_name), elements in code_elements_rows_by_project.items():
                 code_elements_count += insert_code_elements(project_id, project_name, elements)
         except Exception as error:
@@ -211,6 +320,7 @@ class RAGService:
         if top_k is None:
             top_k = self.settings.top_k
 
+        # diagram 요청이면 LLM 대신 mermaid를 바로 생성 시도
         if query_type == "diagram" and project_id:
             try:
                 q = (question or "").lower()
@@ -229,12 +339,19 @@ class RAGService:
             except Exception as error:
                 logger.warning("DiagramService fallback to LLM: %s", error)
 
+        # 검색용 질의문 결정
         retrieval_text = (retrieval_question or question or "").strip()
         if not retrieval_text:
             retrieval_text = (question or "").strip()
 
+        # 질의 임베딩
         query_vector = self.embedding_service.embed_query(retrieval_text)
 
+        # ? query_vector 정보 :
+        # 사용자의 질문을 임베딩 모델로 변환한 검색용 벡터
+        # Qdrant 유사도 검색 입력값으로 사용됨
+
+        # Qdrant 유사도 검색
         hits = self.qdrant_service.search(
             query_vector,
             project_id=project_id,
@@ -243,6 +360,12 @@ class RAGService:
             extension_filter=extension_filter,
         )
 
+        # ? hits 정보 : Qdrant 검색 결과 문서/청크 리스트
+        # 각 hit에는 보통 청크 본문(text)과 메타(project_id, file_name, relative_path,
+        # extension, layer_type, class_name, chunk_index 등)가 포함됨
+        # 이후 Ollama 프롬프트 컨텍스트로 전달됨
+
+        # LLM 스트리밍 응답 생성
         generator = self.ollama_service.generate_response_stream(
             question=question,
             hits=hits,
@@ -253,4 +376,9 @@ class RAGService:
             recent_entities=recent_entities,
             sqlite_context=sqlite_context,
         )
+
+        # ? generator 정보 :
+        # Ollama에서 생성되는 스트리밍 텍스트 generator
+        # FastAPI StreamingResponse를 통해 프론트로 chunk 단위 전송됨
+
         return generator, hits
