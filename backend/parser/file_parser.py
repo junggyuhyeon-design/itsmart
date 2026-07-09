@@ -1007,26 +1007,39 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
         # MIME 타입 추정
         mime_type = detect_mime_type(saved_path)
 
-        # 프로그래밍 언어 또는 문서 유형 추정
+        # 프로그래밍 언어 또는 문서 유형 추정   (USE pygments)
         language = detect_language(file_name, raw_text)
 
         # controller/service/repository/mapper/config/ddl 등 레이어 분류
         layer_type = detect_layer(raw_text, extension, language, relative_path)
 
-        # api_endpoint / sql_select / ddl_create 등 콘텐츠 성격 분류
+        # api_endpoint / sql_select / ddl_create 등 콘텐츠 성격 분류 (USE XML파일일경우:lxml, SQL파일일경우: sqlglot)
+        # SQL,XML 일경우 우선수위 SELECT -> INSERT -> UPDATE -> DELETE
         content_type = detect_content_type(raw_text, extension)
 
         # 대표 클래스/타입명 추출
         # - tree-sitter 우선
         # - 실패 시 regex fallback
+        # (USE tree-sitter)
         class_name = extract_class_name_tree_sitter(raw_text, language) or extract_class_name_regex(raw_text, extension)
 
-        # 대표 package/namespace 추출
+        # 대표 package/namespace 추출 (USE tree-sitter)
         package = extract_package_tree_sitter(raw_text, language) or extract_package_regex(raw_text, extension)
 
         # 파일 종류별 상세 메타데이터
-        xml_meta = extract_xml_metadata(raw_text) if extension == "xml" else {}
-        sql_meta = extract_sql_metadata(raw_text) if extension == "sql" else {}
+        # xml_meta = {
+        #     "namespace": "com.example.user.UserMapper",
+        #     "statement_ids": [
+        #         { "tag": "select", "id": "selectUser" },
+        #         { "tag": "insert", "id": "insertUser" },
+        #         { "tag": "update", "id": "updateUser" },
+        #         { "tag": "delete", "id": "deleteUser" }
+        #     ],
+        #     "sql_fragments": [ "Base_Column_List", "User_Where"],
+        #     "root_tag": "mapper"
+        # }
+        xml_meta = extract_xml_metadata(raw_text) if extension == "xml" else {} #(USE lxml)
+        sql_meta = extract_sql_metadata(raw_text) if extension == "sql" else {} #(USE sqlglot)
         template_meta = (
             extract_template_metadata(raw_text, extension)
             if extension in TEMPLATE_EXTENSIONS | HTML_LIKE_EXTENSIONS
@@ -1053,7 +1066,7 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
             "saved_path": saved_path,  # 서버 내 실제 저장 경로
             "file_path": saved_path,  # 타 모듈 호환용 파일 경로 별칭
             "file_size": file_info.get("file_size", file_info.get("size", 0)),  # 파일 크기(byte)
-            "source_type": file_info.get("source_type", file_info.get("sourcetype", "")),  # 업로드 출처 유형(zip/direct 등)
+            "source_type": file_info.get("source_type", file_info.get("sourcetype", "")),  # 업로드 출처 유형(stream/file/local/url/file-legacy)
             "root_container_name": file_info.get("root_container_name", file_info.get("rootcontainername", "")),  # zip 루트 폴더명 등 상위 컨테이너 정보
             "layer_type": layer_type,  # 추정 레이어(controller/service/repository/mapper/config/ddl)
             "content_type": content_type,  # 추정 콘텐츠 역할(api/sql ddl/dml 등)
@@ -1107,12 +1120,12 @@ def extract_static_analysis(parsed: dict[str, Any]) -> dict[str, Any]:
     language = parsed.get("language", "")
 
     # import는 tree-sitter 우선 추출, 실패하면 regex fallback
-    imports = extract_imports_tree_sitter(raw_text, language)
+    imports = extract_imports_tree_sitter(raw_text, language) #(USE tree-sitter)
     if not imports:
         imports = extract_imports_regex(raw_text, extension)
 
     # 메서드/함수는 tree-sitter 우선 추출, 실패하면 regex fallback
-    methods = extract_methods_tree_sitter(raw_text, language)
+    methods = extract_methods_tree_sitter(raw_text, language) #(USE tree-sitter)
     if not methods:
         methods = extract_methods_regex(raw_text, extension)
 
