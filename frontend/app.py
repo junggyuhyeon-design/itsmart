@@ -7,11 +7,14 @@ from typing import Any
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+import extra_streamlit_components as stx
 import logging
 
 from streamlit_autorefresh import st_autorefresh
 
 BACKEND_URL = os.getenv("FASTAPI_URL", "http://codeMind-backend:8000")
+COOKIE_KEY      = "codeMind_user_id"
+COOKIE_MAX_AGE  = 60 * 60 * 24 * 30  # 30일 (초)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -22,14 +25,56 @@ st.set_page_config(
     layout="wide",
 )
 
+# ─────────────────────────────────────────────
+# CookieManager
+# · set_page_config 직후, 다른 st.* 보다 먼저
+# · 첫 렌더링에서 JS 로 쿠키를 읽어오므로 값은 두 번째 실행부터 유효
+# ─────────────────────────────────────────────
+_cookie_mgr = stx.CookieManager(key="codeMind_cookie_mgr")
+
+
+def cookie_get(key: str) -> str:
+    try:
+        val = (_cookie_mgr.get(key) or "").strip()
+        logger.info("[COOKIE] get key=%s → '%s'", key, val)
+        return val
+    except Exception as e:
+        logger.warning("[COOKIE] get failed key=%s: %s", key, e)
+        return ""
+
+
+def cookie_set(key: str, value: str) -> None:
+    try:
+        _cookie_mgr.set(key, value, max_age=COOKIE_MAX_AGE)
+        logger.info("[COOKIE] set key=%s value='%s'", key, value)
+    except Exception as e:
+        logger.warning("[COOKIE] set failed key=%s: %s", key, e)
+
+
+def cookie_delete(key: str) -> None:
+    """
+    extra-streamlit-components 의 delete/set 은 브라우저에 즉시 반영되지 않음.
+    가능한 모든 방법을 시도하되, 실제 삭제 보장은 _logged_out 플래그로 보완.
+    """
+    for method_name, fn in [
+        ("set_empty_max_age_0",  lambda: _cookie_mgr.set(key, "", max_age=0)),
+        ("delete",               lambda: _cookie_mgr.delete(key)),
+    ]:
+        try:
+            fn()
+            logger.info("[COOKIE] delete step '%s' key=%s ok", method_name, key)
+        except Exception as e:
+            logger.warning("[COOKIE] delete step '%s' key=%s failed: %s", method_name, key, e)
+
+
 
 # ─────────────────────────────────────────────
 # session_state 초기화
 # ─────────────────────────────────────────────
-
 def init_session_state():
     defaults = {
         "user_id": None,
+        "admin_role": False,
         "projects": [],
         "projects_error": None,
         "system_status": None,
@@ -43,65 +88,67 @@ def init_session_state():
         "chat_project_id": None,
         "active_job_id": None,
         "active_job_detail": None,
+        "upload_flag": False,
         "uploading": False,
         "indexing": False,
         "last_uploaded_targets": [],
         "last_upload_result": None,
-        "last_uploaded_file_sig": "",
         "show_reset_confirm": False,
         "project_histories": {},
         "uploader_nonce": 0,
         "pending_upload": None,
-        "pending_upload_sig": "",
-        "duplicate_pending": None,   # {old_project_id, project_name}
-        "upload_items": [],          # 중복 확인 후 업로드할 파일 payload
-        "admin_role": False,         # admin 로그인 여부
+        "duplicate_pending": None,
+        "upload_items": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
-# ─────────────────────────────────────────────
-# session_state 초기화
-# ─────────────────────────────────────────────
-init_session_state()
 
 
 # ─────────────────────────────────────────────
-# 로그인 게이트
+# 로그인 / 로그아웃
 # ─────────────────────────────────────────────
 def verify_user_id(user_id: str) -> bool:
-    """백엔드 /users/verify 로 user_id 존재 여부를 확인 후 없다면 생성합니다."""
-    try:
-        r = requests.get(
-            f"{BACKEND_URL}/users/verify",
-            params={"user_id": user_id},
-            timeout=15,
-        )
-        r.raise_for_status()
-        return r.json().get("exists", False)
-    except Exception as e:
-        raise RuntimeError(f"사용자 조회 중 오류가 발생했습니다: {e}") from e
+    """백엔드 /users/verify 로 user_id 존재 여부를 확인하고, 없으면 생성합니다."""
+    r = requests.get(
+        f"{BACKEND_URL}/users/verify",
+        params={"user_id": user_id},
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json().get("exists", False)
+
+
+def do_login(uid: str) -> None:
+    """로그인 처리: session + 쿠키에 user_id 저장. _logged_out 플래그 해제."""
+    logger.info("[LOGIN] do_login uid='%s'", uid)
+    st.session_state.user_id = uid
+    st.session_state.admin_role = (uid.lower() == "admin")
+    st.session_state["_logged_out"] = False   # 로그아웃 차단 플래그 해제
+    logger.info("[LOGIN] admin_role=%s _logged_out=False", st.session_state.admin_role)
+    cookie_set(COOKIE_KEY, uid)
+
+
+def do_logout() -> None:
+    """
+    로그아웃:
+    1. 쿠키 삭제 시도 (브라우저 반영은 비동기라 보장 안 됨)
+    2. session 에서 user_id / admin_role 즉시 제거
+    3. _logged_out 플래그를 session 에 보존 — 쿠키가 남아있어도 복원 차단
+    4. _logout_pending 으로 세션 초기화 트리거
+    """
+    logger.info("[LOGOUT] do_logout 시작 current_user='%s'", st.session_state.get("user_id"))
+    cookie_delete(COOKIE_KEY)
+    st.session_state.user_id = None
+    st.session_state.admin_role = False
+    st.session_state["_logged_out"] = True   # 쿠키 복원 차단 플래그
+    st.session_state["_logout_pending"] = True
+    logger.info("[LOGOUT] _logout_pending=True _logged_out=True, rerun")
+    st.rerun()
 
 
 def render_login_page():
-    st.markdown(
-        """
-        <style>
-        .login-box {
-            max-width: 420px;
-            margin: 8rem auto 0 auto;
-            padding: 2.5rem 2rem;
-            border: 1px solid #e5e7eb;
-            border-radius: 12px;
-            background: #fafafa;
-            box-shadow: 0 2px 12px rgba(0,0,0,0.07);
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
         st.markdown("## 🧠 IT-Smart CodeMind")
@@ -112,7 +159,7 @@ def render_login_page():
         with st.form("login_form", clear_on_submit=False):
             user_id_input = st.text_input(
                 "User ID",
-                placeholder="예: 1234",
+                placeholder="예: user",
                 max_chars=100,
             )
             submitted = st.form_submit_button("로그인", use_container_width=True, type="primary")
@@ -125,19 +172,20 @@ def render_login_page():
                 with st.spinner("사용자 확인 중..."):
                     try:
                         exists = verify_user_id(uid)
-                    except RuntimeError as e:
-                        st.error(str(e))
+                    except Exception as e:
+                        st.error(f"사용자 조회 오류: {e}")
                         return
+                logger.info("[LOGIN] form submit uid='%s' exists=%s", uid, exists)
+                do_login(uid)
                 msg = f"'{uid}' 로 로그인되었습니다." if exists else f"'{uid}' 가 신규 등록되었습니다."
                 st.success(msg)
-                st.session_state.user_id = uid
-                if uid.lower() == 'admin':
-                    st.session_state.admin_role = True
+                time.sleep(0.5)
                 st.rerun()
 
 
 def get_headers() -> dict[str, str]:
     return {"X-User-Id": st.session_state.user_id}
+
 
 # ─────────────────────────────────────────────
 # API 호출 헬퍼
@@ -410,43 +458,59 @@ def fetch_index_job_detail(job_id: str):
 
 
 def fetch_history(project_id: str | None = None, force: bool = False):
-    if st.session_state.history_items and not force:
-        return st.session_state.history_items
-    try:
-        params: dict = {"limit": 300}
-        if project_id:
-            params["project_id"] = project_id
-        response = api_get("/history", params=params, timeout=20)
-        response.raise_for_status()
-        data = response.json()
-        st.session_state.history_items = data.get("history", [])
-        st.session_state.history_error = None
-    except Exception as error:
+    """
+    project_id 기준으로 히스토리를 조회합니다.
+    """
+    if not project_id:
+        logger.info("[HISTORY] fetch_history project_id 없음 → 조회 생략")
         st.session_state.history_items = []
-        st.session_state.history_error = str(error)
+        return []
 
+    cache_key = f"_hist_loaded_{project_id}"
+    if not force and st.session_state.get(cache_key):
+        logger.info("[HISTORY] fetch_history cache hit project_id=%s", project_id)
+        return st.session_state.history_items
+
+    logger.info("[HISTORY] fetch_history 요청 project_id=%s force=%s", project_id, force)
+    try:
+        r = api_get("/history", params={"project_id": project_id, "limit": 300}, timeout=20)
+        logger.info("[HISTORY] 응답 status=%d", r.status_code)
+        r.raise_for_status()
+        rows = r.json().get("history", [])
+        logger.info("[HISTORY] 수신 count=%d project_id=%s", len(rows), project_id)
+        st.session_state.history_items = rows
+        st.session_state.history_error = None
+        st.session_state[cache_key] = True
+    except Exception as e:
+        logger.warning("[HISTORY] fetch_history 실패 project_id=%s error=%s", project_id, e)
+        st.session_state.history_items = []
+        st.session_state.history_error = str(e)
     return st.session_state.history_items
 
 
 def rebuild_project_histories_from_server():
-    """history_items 를 project_id 기준으로 project_histories 에 재구성합니다."""
+    """
+    history_items(현재 선택된 project_id 의 히스토리)를
+    project_histories[project_key] 에 반영합니다.
+    """
     histories = st.session_state.get("history_items") or []
-    buckets: dict[str, list[dict]] = {}
+    pid = current_project_id()
+    key = project_key(pid)
 
+    logger.info("[HISTORY] rebuild project_id=%s key=%s items=%d", pid, key, len(histories))
+
+    messages: list[dict] = []
     for item in reversed(histories):
         question = (item.get("question") or "").strip()
         answer = (item.get("answer") or "").strip()
         ts = parse_created_at_to_ts(item.get("created_at"))
-        key = project_key(item.get("project_id"))
-        buckets.setdefault(key, [])
         if question:
-            buckets[key].append({"role": "user", "content": question, "ts": ts})
+            messages.append({"role": "user", "content": question, "ts": ts})
         if answer:
-            buckets[key].append({"role": "assistant", "content": answer, "ts": ts})
+            messages.append({"role": "assistant", "content": answer, "ts": ts})
 
-    all_msgs = sorted([m for msgs in buckets.values() for m in msgs], key=lambda x: x["ts"])
-    buckets["__all__"] = all_msgs
-    st.session_state.project_histories = buckets
+    st.session_state.project_histories[key] = messages
+    logger.info("[HISTORY] rebuild 완료 key=%s messages=%d", key, len(messages))
 
 
 # ─────────────────────────────────────────────
@@ -536,10 +600,8 @@ def reset_local_state_after_reset():
     st.session_state.chat_project_id = None
     st.session_state.uploading = False
     st.session_state.indexing = False
-    st.session_state.last_uploaded_file_sig = ""
     st.session_state.show_reset_confirm = False
     st.session_state.pending_upload = None
-    st.session_state.pending_upload_sig = ""
     st.session_state.uploader_nonce += 1
 
 
@@ -630,6 +692,16 @@ def render_sidebar_projects():
             st.sidebar.progress(progress / 100.0)
 
 
+def render_user_box():
+    """사이드바 하단: 로그인 사용자 정보 + 로그아웃 버튼."""
+    st.sidebar.divider()
+    uid = st.session_state.get("user_id", "")
+    role_label = "👑 admin" if st.session_state.get("admin_role") else "👤 사용자"
+    st.sidebar.caption(f"{role_label}: **{uid}**")
+    if st.sidebar.button("🔓 로그아웃 / 계정 전환", key="logout_btn", use_container_width=True):
+        do_logout()
+
+
 def render_reset_box():
     st.sidebar.subheader("데이터 초기화")
     st.sidebar.caption("Qdrant + SQLite 전체 데이터 삭제")
@@ -678,6 +750,13 @@ def _start_index_job(targets: list):
         st.session_state.indexing = True
     except Exception as e:
         st.error(f"인덱싱 작업 시작 실패: {e}")
+        st.session_state.upload_flag = False
+        st.session_state.uploading = False
+        st.session_state.indexing = False
+        st.session_state.pending_upload = None
+        st.session_state.last_upload_result = None
+        st.session_state.last_uploaded_targets = []
+        st.session_state.latest_project_name = None
         return
     fetch_projects(force=True)
     fetch_index_jobs(force=True)
@@ -692,18 +771,25 @@ def upload_files_and_start_index(files_payload: list):
         targets = data.get("targets", [])
         st.session_state.last_upload_result = data
         st.session_state.last_uploaded_targets = targets
-        st.session_state.uploading = False
         if not targets:
             st.error("업로드는 완료됐지만 인덱싱 대상이 없습니다.")
+            st.session_state.upload_flag = False
+            st.session_state.pending_upload = None
+            st.session_state.last_upload_result = None
+            st.session_state.last_uploaded_targets = []
             return
+        st.session_state.uploading = True
         _start_index_job(targets)
     except Exception as e:
         st.session_state.uploading = False
         st.session_state.indexing = False
+        st.session_state.pending_upload = None
+        st.session_state.last_upload_result = None
+        st.session_state.last_uploaded_targets = []
         st.error(f"업로드 실패: {e}")
 
 
-def start_upload_process(uploaded_files):
+def start_upload_process(uploaded_files): # 업로드할 파일을 가지고 왔음.
     """
     파일 업로드를 시작합니다.
     - 동명 프로젝트가 존재하면 → 중복 확인 다이얼로그로 위임
@@ -712,41 +798,31 @@ def start_upload_process(uploaded_files):
     if not uploaded_files:
         return
 
-    st.session_state.uploading = True
-    st.session_state.indexing = False
-    st.session_state.active_job_id = None
-    st.session_state.active_job_detail = None
-
     files_payload: list = []
-    file_sig_parts: list[str] = []
+    # file_sig_parts: list[str] = []
 
-    for uploaded_file in uploaded_files:
+    for uploaded_file in uploaded_files: # 업로드 파일 목록을 순회하면서
         file_bytes = uploaded_file.getvalue()
-        file_sig_parts.append(f"{uploaded_file.name}:{len(file_bytes)}")
         files_payload.append(
             ("files", (uploaded_file.name, file_bytes, uploaded_file.type or "application/octet-stream"))
         )
 
-    st.session_state.last_uploaded_file_sig = "|".join(file_sig_parts)
-
     # 파일 사전 중복 체크
-    if len(files_payload) == 1:
-        project_name = stem_filename(uploaded_files[0].name)
-        try:
-            r = api_get(f"/projects/{project_name}", timeout=10)
-            if r.status_code == 200:
-                old_pid = r.json().get("project_id")
-                if old_pid:
-                    # 동명 프로젝트 존재 → 확인 다이얼로그로
-                    st.session_state.duplicate_pending = {
-                        "old_project_id": old_pid,
-                        "project_name": project_name,
-                    }
-                    st.session_state.upload_items = files_payload
-                    st.session_state.uploading = False
-                    return
-        except Exception as e:
-            logger.warning("중복 체크 오류(무시하고 진행): %s", e)
+    project_name = stem_filename(uploaded_files[0].name) # 확장자를 제거
+    try:
+        r = api_get(f"/projects/{project_name}", timeout=10) # SQLite3 조회
+        if r.status_code == 200:
+            old_pid = r.json().get("project_id")
+            if old_pid:
+                # 동명 프로젝트 존재 → 확인 다이얼로그로
+                st.session_state.duplicate_pending = {
+                    "old_project_id": old_pid,
+                    "project_name": project_name,
+                }
+                st.session_state.upload_items = files_payload
+                return
+    except Exception as e:
+        logger.warning("중복 체크 오류(무시하고 진행): %s", e)
 
     # 중복 없음 → 바로 업로드
     upload_files_and_start_index(files_payload)
@@ -772,15 +848,15 @@ def render_duplicate_confirm_dialog() -> bool:
         c1, c2 = st.columns(2)
         with c1:
             if st.button("✅ 확인", key="dup_confirm_btn", use_container_width=True, type="primary"):
-                _resolve_duplicate(pending)
+                _resolve_duplicate(pending) # 중복일 때 변수에 담아두었던 정보를 전달
         with c2:
             if st.button("❌ 취소", key="dup_cancel_btn", use_container_width=True):
                 st.session_state.duplicate_pending = None
                 st.session_state.upload_items = []
                 st.session_state.uploading = False
-                st.session_state.uploader_nonce += 1
+                st.session_state.upload_flag = False
                 st.session_state.pending_upload = None
-                st.session_state.pending_upload_sig = ""
+                st.session_state.uploader_nonce += 1
                 st.rerun()
     return True
 
@@ -788,26 +864,24 @@ def render_duplicate_confirm_dialog() -> bool:
 def _resolve_duplicate(pending: dict):
     """
     중복 확인 버튼 클릭 시:
-    1. /projects 로 구 project_id 의 SQLite + Qdrant 데이터 전부 삭제
-    2. 세션 히스토리 초기화
+    1. /projects/{old_pid} 로 구 데이터(SQLite + Qdrant) 전부 삭제
+    2. 세션 정리
     3. 새 파일 업로드 + 인덱싱 시작
+    4. rerun
     """
     old_pid = pending["old_project_id"]
-    project_name = pending["project_name"]
 
     try:
         r = api_delete(f"/projects/{old_pid}", timeout=30)
         r.raise_for_status()
-        logger.info("duplicate 처리 완료: %s", r.json())
+        logger.info("[UPLOAD] duplicate 처리 완료 old_pid=%s result=%s", old_pid, r.json())
     except Exception as e:
         st.error(f"프로젝트 중복 처리 실패: {e}")
         return
 
     # 세션 정리
     st.session_state.duplicate_pending = None
-    key = project_key(old_pid)
-    st.session_state.project_histories.pop(key, None)
-    st.session_state.project_histories.pop(project_name, None)
+    st.session_state.project_histories.pop(project_key(old_pid), None)
 
     # 현재 선택 프로젝트가 교체 대상이면 초기화
     if st.session_state.chat_project_id == old_pid:
@@ -824,20 +898,29 @@ def _resolve_duplicate(pending: dict):
 
 
 def process_pending_upload():
+    """
+    rerun 마다 호출됨. pending_upload 가 있을 때만 업로드 처리를 시작합니다.
+    - pending_upload 를 먼저 None 으로 초기화해서 다음 rerun 에서 재진입 방지
+    - 업로드 완료 후 uploader_nonce 를 올려 파일 위젯 상태를 완전히 초기화
+    """
     pending_upload = st.session_state.get("pending_upload")
-    pending_upload_sig = st.session_state.get("pending_upload_sig", "")
-
     if not pending_upload:
         return
 
-    if pending_upload_sig == st.session_state.get("last_uploaded_file_sig", ""):
-        st.session_state.pending_upload = None
-        st.session_state.pending_upload_sig = ""
-        return
+    logger.info("[UPLOAD] process_pending_upload 진입 files=%d", len(pending_upload))
 
-    start_upload_process(pending_upload)
+    # ① pending 을 먼저 초기화 — 이후 rerun 에서 재진입 차단
     st.session_state.pending_upload = None
-    st.session_state.pending_upload_sig = ""
+    st.session_state.upload_flag = False
+
+    # ② 업로드 처리 (중복 감지 시 duplicate_pending 설정하고 return)
+    start_upload_process(pending_upload)
+
+    # ③ 업로드 위젯 key 교체 — Streamlit 위젯이 파일 상태를 유지하므로
+    #    nonce 를 올려야 다음 rerun 에서 위젯이 빈 상태로 렌더링됨
+    st.session_state.uploader_nonce += 1
+
+    # ④ rerun: 중복 다이얼로그 표시 또는 인덱싱 진행 상태 반영
     st.rerun()
 
 
@@ -876,37 +959,10 @@ def refresh_active_job():
     st.session_state.indexing = True
 
 
-def render_upload_status_box():
-    active_job = st.session_state.get("active_job_detail") or {}
-    active_job_id = st.session_state.get("active_job_id")
-
-    if st.session_state.get("uploading"):
-        st.info("파일 업로드 중입니다...")
-
-    if st.session_state.get("indexing") and active_job_id:
-        project_name = normalize_project_name(
-            active_job.get("project_name") or st.session_state.get("latest_project_name")
-        )
-        progress = calc_job_progress(active_job)
-        status = active_job.get("status") or "queued"
-        message = active_job.get("message") or ""
-
-        st.markdown(f"**현재 프로젝트:** {project_name}")
-        st.progress(progress / 100.0)
-        st.caption(f"상태: {status} · 진행률: {progress}%")
-        if message:
-            st.caption(message)
-
-    if not st.session_state.get("uploading") and not st.session_state.get("indexing"):
-        latest_project_name = st.session_state.get("latest_project_name")
-        if latest_project_name:
-            st.success(f"{latest_project_name} 업로드/인덱싱 작업이 완료되었습니다.")
-
-
 def render_upload_area():
     st.subheader("업로드")
     st.caption("파일을 선택하는 즉시 자동 업로드 및 인덱싱이 시작됩니다.")
-    render_upload_status_box()
+    # render_upload_status_box() # 이걸 주석처리 해도 무방할 것같음. 화면에 보여주기 위한 렌더링 부분
 
     uploader_key = f"auto_uploader_{st.session_state.uploader_nonce}"
     uploaded_files = st.file_uploader(
@@ -918,18 +974,14 @@ def render_upload_area():
         accept_multiple_files=True,
         key=uploader_key,
         help="선택 즉시 업로드 및 인덱싱 시작",
-        disabled=st.session_state.get("uploading") or st.session_state.get("indexing"),
+        disabled=st.session_state.get("upload_flag"), # 별도 플래그 지정으로 업로드 창 출력제어
     )
 
     if uploaded_files:
-        file_sig = "|".join([f"{uploaded_file.name}:{uploaded_file.size}" for uploaded_file in uploaded_files])
+        st.session_state.upload_flag = True
+        st.session_state.pending_upload = uploaded_files
 
-        if file_sig != st.session_state.get("last_uploaded_file_sig", ""):
-            st.session_state.uploading = True
-            st.session_state.indexing = False
-            st.session_state.pending_upload = uploaded_files
-            st.session_state.pending_upload_sig = file_sig
-            st.rerun()
+        st.rerun()
 
 
 # ─────────────────────────────────────────────
@@ -1069,8 +1121,6 @@ def render_chat_area():
     # ── 프로젝트 캡션 ────────────────────────────────────────
     if pid:
         st.caption(f"현재 프로젝트 공간: {project_name_by_id(pid)}")
-    else:
-        st.info("전체 보기에서는 모든 프로젝트 대화가 표시됩니다.")
 
     # ── 메시지 렌더링 ────────────────────────────────────────
     for msg in get_visible_chat_messages():
@@ -1141,8 +1191,6 @@ def bootstrap():
     fetch_system_status(force=True)
     fetch_projects(force=True)
     fetch_index_jobs(force=True)
-    pid = current_project_id()
-    fetch_history(project_id=pid, force=True)
     rebuild_project_histories_from_server()
     refresh_active_job()
 
@@ -1152,9 +1200,54 @@ def trigger_live_refresh():
         st_autorefresh(interval=2000, key="live_job_refresh")
 
 
-if not st.session_state.get("user_id"):
+# ─────────────────────────────────────────────
+# 메인 실행
+# ─────────────────────────────────────────────
+
+# ① 로그아웃 플래그 처리
+#    세션 전체 초기화 후 _logged_out 플래그를 재주입해서
+#    쿠키가 아직 브라우저에 남아있어도 복원 경로(③)를 차단.
+if st.session_state.pop("_logout_pending", False):
+    logger.info("[LOGOUT] _logout_pending 처리 — 세션 전체 초기화")
+    cookie_val_at_logout = cookie_get(COOKIE_KEY)
+    logger.info("[LOGOUT] 이 시점 쿠키 값(삭제 미반영 가능): '%s'", cookie_val_at_logout)
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    init_session_state()
+    st.session_state["_logged_out"] = True   # 재주입: 쿠키 복원 차단 유지
+    logger.info("[LOGOUT] 로그인 화면으로 이동 (_logged_out=True 유지)")
     render_login_page()
     st.stop()
+
+# ② session_state 기본값 설정
+init_session_state()
+
+# ③ user_id 확보
+#    1순위: session_state (로그인 직후 or 이전 rerun 에서 복원된 경우)
+#    2순위: 쿠키 — 단, _logged_out 플래그가 있으면 차단 (쿠키 삭제 미반영 대응)
+logger.info("[AUTH] session user_id='%s' _logged_out=%s",
+            st.session_state.get("user_id"), st.session_state.get("_logged_out"))
+
+if not st.session_state.get("user_id"):
+    if st.session_state.get("_logged_out"):
+        # logger.info("[AUTH] _logged_out=True → 쿠키 복원 차단, 로그인 화면")
+        render_login_page()
+        st.stop()
+
+    uid_from_cookie = cookie_get(COOKIE_KEY)
+    # logger.info("[AUTH] 쿠키 복원 시도 → '%s'", uid_from_cookie)
+    if uid_from_cookie:
+        st.session_state.user_id = uid_from_cookie
+        st.session_state.admin_role = (uid_from_cookie.lower() == "admin")
+        # logger.info("[AUTH] 쿠키 복원 완료 user_id='%s' admin_role=%s",
+                    # uid_from_cookie, st.session_state.admin_role)
+    else:
+        # logger.info("[AUTH] 쿠키 없음 → 로그인 화면")
+        render_login_page()
+        st.stop()
+
+# logger.info("[AUTH] 최종 user_id='%s' admin_role=%s",
+            # st.session_state.get("user_id"), st.session_state.get("admin_role"))
 
 bootstrap()
 process_pending_upload()
@@ -1166,9 +1259,10 @@ with st.sidebar:
     render_system_status()
     st.divider()
     render_sidebar_projects()
-    st.divider()
-    if st.session_state.admin_role: # admin 인 경우에만 렌더링
+    if st.session_state.get("admin_role"):
+        st.divider()
         render_reset_box()
+    render_user_box()   # 항상 최하단에 위치
 
 render_upload_area()
 st.divider()

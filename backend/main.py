@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+import time
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -21,14 +22,12 @@ from database.history_repository import (
     delete_history,
     get_all_projects,
     get_code_elements,
-    get_file_index,
     get_file_index_summary,
     get_history,
     get_index_job,
     get_project_by_name,
     get_recent_entities,
     get_table_rows_for_admin,
-    init_index_jobs_table,
     list_db_tables,
     list_index_jobs,
     purge_all_runtime_data,
@@ -103,22 +102,23 @@ async def lifespan(app: FastAPI):
         ensure_dir(upload_dir)
         ensure_dir(extract_dir)
         init_db()
-        init_index_jobs_table()
 
         rag_service = RAGService(settings)
         app.state.rag_service = rag_service
         app.state.rag_initialized = True
         app.state.init_error = None
-        logger.info("===== startup completed =====")
+
+        logger.info("startup completed")
     except Exception as error:
-        logger.exception("===== startup failed: %s =====", error)
+        logger.exception("startup failed: %s", error)
         app.state.rag_service = None
         app.state.rag_initialized = False
         app.state.init_error = str(error)
         raise RuntimeError(f"startup failed: {error}") from error
 
     yield
-    logger.info("===== shutdown completed =====")
+
+    logger.info("shutdown completed")
 
 
 app = FastAPI(
@@ -434,7 +434,6 @@ async def call_ask_with_context_stream(
 
 def run_index_job(rag_service: RAGService, job_id: str, targets: list[dict[str, Any]]) -> None:
     try:
-        logger.info("run_index_job started job_id=%s targets=%d", job_id, len(targets))
         update_index_job(job_id, status="running", message="indexing started")
 
         def progress_callback(**kwargs):
@@ -596,7 +595,6 @@ async def upload(
         "projects": len(projects_created),
     }
 
-
 @app.post("/index-jobs")
 async def create_job(
         request: Request,
@@ -685,53 +683,6 @@ def get_projects():
         raise HTTPException(status_code=500, detail=f"projects failed: {error}") from error
 
 
-@app.get("/projects/{project_name}/files")
-def get_project_files(
-        project_name: str,
-        extension: str | None = Query(default=None),
-):
-    try:
-        matched_project = next(
-            (
-                project
-                for project in get_all_projects()
-                if project.get("project_name") == project_name.strip()
-            ),
-            None,
-        )
-
-        if not matched_project:
-            raise HTTPException(status_code=404, detail=f"project not found: {project_name}")
-
-        project_id = matched_project.get("project_id")
-        files = get_file_index(project_id, extension)
-
-        normalized_files = []
-        for item in files:
-            normalized_files.append(
-                {
-                    "file_name": item.get("file_name"),
-                    "relative_path": item.get("relative_path"),
-                    "extension": item.get("extension"),
-                    "file_size": int(item.get("file_size", 0) or 0),
-                    "indexed_at": item.get("indexed_at"),
-                }
-            )
-
-        return {
-            "project_id": project_id,
-            "project_name": project_name,
-            "extension_filter": extension,
-            "files": normalized_files,
-            "count": len(normalized_files),
-        }
-
-    except HTTPException:
-        raise
-    except Exception as error:
-        logger.exception("get_project_files failed")
-        raise HTTPException(status_code=500, detail=f"project files failed: {error}") from error
-
 @app.get("/projects/{project_name}")
 def get_project(
         project_name: str,
@@ -743,6 +694,7 @@ def get_project(
     try:
         exists = get_project_by_name(project_name=name)
         dup_project_id = exists.get("project_id") if exists else None
+        logger.info("중복확인 dup_project_id : %s", dup_project_id)
         return {"project_id": dup_project_id, "exists": dup_project_id is not None}
     except HTTPException:
         raise
@@ -765,9 +717,9 @@ def delete_project(
 
     try:
         deleted = {
-            "chat_history":   delete_history(project_id=project_id),
-            "uploaded_files": delete_uploaded_file(project_id=project_id),
-            "file_index":     delete_file_index(project_id=project_id),
+            "chat_history":   delete_history(project_id=project_id), # 히스토리 삭제
+            "uploaded_files": delete_uploaded_file(project_id=project_id), # 업로드 파일정보 삭제
+            "file_index":     delete_file_index(project_id=project_id),   # 업로드 파일정보 삭제
             "index_jobs":     delete_index_job(project_id=project_id),
             "code_elements":  delete_code_elements(project_id=project_id),
             "turn_entities":  delete_turn_entities(project_id=project_id),
@@ -812,7 +764,7 @@ async def ask(
         raise HTTPException(status_code=400, detail="question is required")
 
     history_limit = max(1, min(settings.chat_history_turns, 20))
-    chat_history = list(reversed(get_history(user_id, project_id, limit=history_limit)))
+    chat_history = list(reversed(get_history(user_id, project_id=project_id, limit=history_limit)))
     recent_entities = get_recent_entities(user_id, limit=20, project_id=project_id)
 
     intent = query_analyzer.analyze(question)
@@ -893,12 +845,14 @@ async def ask(
 
 @app.get("/history")
 def history(
-        limit: int = Query(default=20, ge=1, le=300),
+        project_id: str = Query(...),
+        limit: int = Query(default=50, ge=1, le=300),
         x_user_id: str | None = Header(default=None),
-        project_id: str | None = Query(default=None),
 ):
     user_id = require_user(x_user_id)
-    rows = get_history(user_id, limit=limit, project_id=project_id)
+    logger.info("[HISTORY] GET /history user_id=%s project_id=%s limit=%d", user_id, project_id, limit)
+    rows = get_history(user_id=user_id, project_id=project_id, limit=limit)
+    logger.info("[HISTORY] 조회 결과 count=%d", len(rows))
     return {
         "history": rows,
         "count": len(rows),
@@ -907,11 +861,12 @@ def history(
 
 @app.delete("/history/{project_id}")
 def clear_history(
-        project_id: str,
         x_user_id: str | None = Header(default=None),
+        project_id: str = None,
 ):
     user_id = require_user(x_user_id)
-    deleted = delete_history(user_id, project_id=project_id )
+    logger.info("@app.delete(/history) 진입!!!")
+    deleted = delete_history(user_id=user_id, project_id=project_id)
     return {"deleted": deleted}
 
 
@@ -943,11 +898,6 @@ def db_table_rows(
 
 
 # ── Reset ─────────────────────────────────────────────────────
-
-@app.post("/admin/purge")
-def purge_runtime_data():
-    return purge_all_runtime_data()
-
 
 @app.delete("/reset")
 def reset_all_data(

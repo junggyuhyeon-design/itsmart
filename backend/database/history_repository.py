@@ -87,66 +87,23 @@ def save_history(user_id: str, project_id: str, question: str, answer: str) -> i
         return int(cur.lastrowid)
 
 
-def get_history(user_id: str, project_id: str | None, limit: int) -> list[dict[str, Any]]:
+def get_history(user_id: str, project_id: str, limit: int) -> list[dict[str, Any]]:
     try:
         with get_connection() as conn:
-            if project_id:
-                rows = conn.execute(
-                    """
-                    SELECT id, project_id, question, answer, created_at
-                    FROM chat_history
-                    WHERE user_id = ? AND project_id = ?
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT ?
-                    """,
-                    (user_id, project_id, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT id, project_id, question, answer, created_at
-                    FROM chat_history
-                    WHERE user_id = ?
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT ?
-                    """,
-                    (user_id, limit),
-                ).fetchall()
+            rows = conn.execute(
+                """
+                SELECT id, project_id, question, answer, created_at
+                FROM chat_history
+                WHERE user_id = ? AND project_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (user_id, project_id, limit),
+            ).fetchall()
             return [dict(row) for row in rows]
     except Exception:
         logger.exception("get_history failed user_id=%s project_id=%s", user_id, project_id)
         return []
-
-
-# def get_history_by_project(user_id: str, project_id: str | None, limit: int) -> list[dict[str, Any]]:
-#     try:
-#         with get_connection() as conn:
-#             if project_id:
-#                 rows = conn.execute(
-#                     """
-#                     SELECT id, question, answer, project_id, created_at
-#                     FROM chat_history
-#                     WHERE user_id = ? AND project_id = ?
-#                     ORDER BY created_at DESC, id DESC
-#                     LIMIT ?
-#                     """,
-#                     (user_id, project_id, limit),
-#                 ).fetchall()
-#             else:
-#                 rows = conn.execute(
-#                     """
-#                     SELECT id, question, answer, project_id, created_at
-#                     FROM chat_history
-#                     WHERE user_id = ? AND (project_id IS NULL OR project_id = '')
-#                     ORDER BY created_at DESC, id DESC
-#                     LIMIT ?
-#                     """,
-#                     (user_id, limit),
-#                 ).fetchall()
-#             return [dict(row) for row in rows]
-#     except Exception:
-#         logger.exception("get_history_by_project failed user_id=%s project_id=%s", user_id, project_id)
-#         return []
 
 
 def delete_history(project_id: str, user_id: str | None = None) -> int:
@@ -168,17 +125,6 @@ def delete_history(project_id: str, user_id: str | None = None) -> int:
     except Exception:
         logger.exception("delete_history failed user_id=%s project_id=%s", user_id, project_id)
         return 0
-
-
-# def delete_history_by_project_id(project_id: str) -> int:
-#     """프로젝트 교체 시 해당 project_id 의 모든 히스토리를 삭제합니다."""
-#     try:
-#         with get_connection() as conn:
-#             cur = conn.execute("DELETE FROM chat_history WHERE project_id = ?", (project_id,))
-#             return int(cur.rowcount or 0)
-#     except Exception:
-#         logger.exception("delete_history_by_project_id failed project_id=%s", project_id)
-#         return 0
 
 
 # ─────────────────────────────────────────────────────────────
@@ -207,41 +153,6 @@ def delete_uploaded_file(project_id: str) -> int:
     except Exception:
         logger.exception("delete_uploaded_file failed project_id=%s", project_id)
         return 0
-
-
-# TODO : 미사용 확인 필요
-def get_uploaded_files() -> list[dict[str, Any]]:
-    try:
-        with get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT project_id, project_name, saved_path, uploaded_at
-                FROM uploaded_files
-                ORDER BY uploaded_at DESC
-                """
-            ).fetchall()
-            return [dict(row) for row in rows]
-    except Exception:
-        logger.exception("get_uploaded_files failed")
-        return []
-
-
-# TODO : 미사용 확인 필요
-def get_uploaded_files_by_project_id(project_id: str) -> dict[str, Any] | None:
-    try:
-        with get_connection() as conn:
-            row = conn.execute(
-                """
-                SELECT project_id, project_name, saved_path, uploaded_at
-                FROM uploaded_files
-                WHERE project_id = ?
-                """,
-                (project_id,),
-            ).fetchone()
-            return dict(row) if row else None
-    except Exception:
-        logger.exception("get_uploaded_files_by_project_id failed project_id=%s", project_id)
-        return None
 
 
 def get_all_projects() -> list[dict[str, Any]]:
@@ -486,69 +397,6 @@ def delete_code_elements(project_id: str) -> int:
 # Turn Entities  (turn_entities 테이블은 init_db 에서 생성)
 # ─────────────────────────────────────────────────────────────
 
-# TODO 미사용 확인 필요
-def find_code_elements_by_name(project_id: str, keyword: str) -> list[dict[str, Any]]:
-    try:
-        like_keyword = f"%{keyword}%"
-        with get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT *
-                FROM code_elements
-                WHERE project_id = ?
-                  AND (
-                    file_name LIKE ?
-                    OR relative_path LIKE ?
-                    OR class_name LIKE ?
-                    OR package LIKE ?
-                    OR raw_text_preview LIKE ?
-                    OR content_hash LIKE ?
-                  )
-                ORDER BY relative_path
-                LIMIT 100
-                """,
-                (
-                    project_id,
-                    like_keyword,
-                    like_keyword,
-                    like_keyword,
-                    like_keyword,
-                    like_keyword,
-                    like_keyword,
-                ),
-            ).fetchall()
-
-        result = []
-        for row in rows:
-            item = dict(row)
-            item["table_names"] = json_loads(item.pop("table_names_json", "[]"), [])
-            item["imports"] = json_loads(item.pop("imports_json", "[]"), [])
-            item["methods"] = json_loads(item.pop("methods_json", "[]"), [])
-            item["xml_statements"] = json_loads(item.pop("xml_statements_json", "[]"), [])
-            result.append(item)
-        return result
-    except Exception:
-        logger.exception("find_code_elements_by_name failed project_id=%s keyword=%s", project_id, keyword)
-        return []
-
-
-# TODO : 미사용 확인 필요(TABLE 은 init_db 에서 생성)
-def ensure_turn_entities_table() -> None:
-    with get_connection() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS turn_entities (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
-                entity_name TEXT NOT NULL,
-                entity_type TEXT DEFAULT '',
-                project_id TEXT DEFAULT '',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-
-
 def save_turn_entities(user_id: str, entities: list[dict[str, Any]], project_id: str | None = None) -> int:
     if not entities:
         return 0
@@ -625,59 +473,6 @@ def delete_turn_entities(project_id: str) -> int:
 # ─────────────────────────────────────────────────────────────
 # Index Jobs
 # ─────────────────────────────────────────────────────────────
-
-# TODO : 미사용 확인 필요 (TABLE 은 init_db 에서 생성)
-def init_index_jobs_table() -> None:
-    required_columns = {
-        "job_id": "TEXT PRIMARY KEY",
-        "user_id": "TEXT NOT NULL",
-        "project_id": "TEXT",
-        "project_name": "TEXT",
-        "status": "TEXT NOT NULL DEFAULT 'queued'",
-        "total_targets": "INTEGER NOT NULL DEFAULT 0",
-        "processed_targets": "INTEGER NOT NULL DEFAULT 0",
-        "success_count": "INTEGER NOT NULL DEFAULT 0",
-        "failed_count": "INTEGER NOT NULL DEFAULT 0",
-        "total_chunks": "INTEGER NOT NULL DEFAULT 0",
-        "message": "TEXT DEFAULT ''",
-        "error": "TEXT DEFAULT ''",
-        "logs_json": "TEXT DEFAULT '[]'",
-        "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        "finished_at": "TIMESTAMP",
-    }
-
-    with get_connection() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS index_jobs (
-                job_id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                project_id TEXT,
-                project_name TEXT,
-                status TEXT NOT NULL DEFAULT 'queued',
-                total_targets INTEGER NOT NULL DEFAULT 0,
-                processed_targets INTEGER NOT NULL DEFAULT 0,
-                success_count INTEGER NOT NULL DEFAULT 0,
-                failed_count INTEGER NOT NULL DEFAULT 0,
-                total_chunks INTEGER NOT NULL DEFAULT 0,
-                message TEXT DEFAULT '',
-                error TEXT DEFAULT '',
-                logs_json TEXT DEFAULT '[]',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                finished_at TIMESTAMP
-            )
-            """
-        )
-
-        rows = conn.execute("PRAGMA table_info(index_jobs)").fetchall()
-        existing_columns = {row["name"] for row in rows}
-
-        for column_name, column_def in required_columns.items():
-            if column_name not in existing_columns and "PRIMARY KEY" not in column_def:
-                conn.execute(f"ALTER TABLE index_jobs ADD COLUMN {column_name} {column_def}")
-
 
 def create_index_job(
         job_id: str,
