@@ -87,31 +87,19 @@ def save_history(user_id: str, project_id: str, question: str, answer: str) -> i
         return int(cur.lastrowid)
 
 
-def get_history(user_id: str, limit: int, project_id: str | None = None) -> list[dict[str, Any]]:
+def get_history(user_id: str, project_id: str, limit: int) -> list[dict[str, Any]]:
     try:
         with get_connection() as conn:
-            if project_id:
-                rows = conn.execute(
-                    """
-                    SELECT id, project_id, question, answer, created_at
-                    FROM chat_history
-                    WHERE user_id = ? AND project_id = ?
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT ?
-                    """,
-                    (user_id, project_id, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT id, project_id, question, answer, created_at
-                    FROM chat_history
-                    WHERE user_id = ?
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT ?
-                    """,
-                    (user_id, limit),
-                ).fetchall()
+            rows = conn.execute(
+                """
+                SELECT id, project_id, question, answer, created_at
+                FROM chat_history
+                WHERE user_id = ? AND project_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (user_id, project_id, limit),
+            ).fetchall()
             return [dict(row) for row in rows]
     except Exception:
         logger.exception("get_history failed user_id=%s project_id=%s", user_id, project_id)
