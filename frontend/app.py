@@ -84,7 +84,7 @@ def init_session_state():
         "history_items": [],
         "history_error": None,
         "latest_project_name": None,
-        "chat_project_select": "전체",
+        "chat_project_select": None,
         "chat_project_id": None,
         "active_job_id": None,
         "active_job_detail": None,
@@ -333,7 +333,7 @@ def normalize_project_name(name: str | None) -> str:
 
 
 def current_project_name() -> str:
-    return st.session_state.get("chat_project_select", "전체")
+    return st.session_state.get("chat_project_select", "")
 
 
 def current_project_id() -> str | None:
@@ -346,7 +346,7 @@ def project_key(project_id: str | None) -> str:
 
 def project_name_by_id(project_id: str | None) -> str:
     if not project_id:
-        return "전체"
+        return "업로드"
 
     for project in st.session_state.get("projects", []):
         if (project.get("project_id") or "").strip() == project_id:
@@ -423,7 +423,7 @@ def fetch_projects(force: bool = False):
         }
 
         if (st.session_state.chat_project_id or "") not in valid_ids:
-            st.session_state.chat_project_select = "전체"
+            st.session_state.chat_project_select = None
             st.session_state.chat_project_id = None
 
     except Exception as error:
@@ -596,7 +596,7 @@ def reset_local_state_after_reset():
                "active_job_id", "active_job_detail", "last_upload_result",
                "system_status", "system_status_error"):
         st.session_state[k] = None
-    st.session_state.chat_project_select = "전체"
+    st.session_state.chat_project_select = None
     st.session_state.chat_project_id = None
     st.session_state.uploading = False
     st.session_state.indexing = False
@@ -650,12 +650,9 @@ def render_sidebar_projects():
         st.sidebar.info("프로젝트가 없습니다.")
         return
 
-    if st.sidebar.button("전체 보기", key="all_projects_btn", use_container_width=True):
-        st.session_state.chat_project_select = "전체"
+    if st.sidebar.button("프로젝트 업로드", key="upload_projects_btn", use_container_width=True):
+        st.session_state.chat_project_select = None
         st.session_state.chat_project_id = None
-        # 전체 히스토리 재로드
-        fetch_history(project_id=None, force=True)
-        rebuild_project_histories_from_server()
         st.rerun()
 
     current_project_id_value = current_project_id()
@@ -885,7 +882,7 @@ def _resolve_duplicate(pending: dict):
 
     # 현재 선택 프로젝트가 교체 대상이면 초기화
     if st.session_state.chat_project_id == old_pid:
-        st.session_state.chat_project_select = "전체"
+        st.session_state.chat_project_select = None
         st.session_state.chat_project_id = None
 
     files_payload = st.session_state.upload_items
@@ -962,7 +959,6 @@ def refresh_active_job():
 def render_upload_area():
     st.subheader("업로드")
     st.caption("파일을 선택하는 즉시 자동 업로드 및 인덱싱이 시작됩니다.")
-    # render_upload_status_box() # 이걸 주석처리 해도 무방할 것같음. 화면에 보여주기 위한 렌더링 부분
 
     uploader_key = f"auto_uploader_{st.session_state.uploader_nonce}"
     uploaded_files = st.file_uploader(
@@ -997,7 +993,7 @@ def ask_backend(question: str, project_name: str | None, project_id: str | None)
 
     if project_id:
         payload["project_id"] = project_id
-    elif project_name and project_name != "전체":
+    elif project_name:
         payload["project_name"] = project_name
 
     chunks: list[str] = []
@@ -1020,7 +1016,7 @@ def ask_backend(question: str, project_name: str | None, project_id: str | None)
         return (
             "프론트에서 /ask 스트리밍 처리 중 예외가 발생했습니다.\n\n"
             f"- 질문: {question}\n"
-            f"- 선택 프로젝트: {project_name or '전체'}\n"
+            f"- 선택 프로젝트: {project_name}\n"
             f"- 프로젝트 ID: {project_id or '없음'}\n"
             f"- 원본 오류: {error}\n\n"
             "이 오류가 계속 뜨면 백엔드 /ask와 Ollama 연결 상태를 점검하세요."
@@ -1028,7 +1024,7 @@ def ask_backend(question: str, project_name: str | None, project_id: str | None)
 
 
 def _clear_project_session(pid: str):
-    """삭제된 프로젝트를 세션에서 제거하고 전체 보기로 돌아갑니다."""
+    """삭제된 프로젝트를 세션에서 제거하고 업로드 화면으로 돌아갑니다."""
     key = project_key(pid)
     st.session_state.project_histories.pop(key, None)
     st.session_state.projects = [
@@ -1040,7 +1036,7 @@ def _clear_project_session(pid: str):
         if (j.get("project_id") or "").strip() != pid
     ]
     if st.session_state.chat_project_id == pid:
-        st.session_state.chat_project_select = "전체"
+        st.session_state.chat_project_select = None
         st.session_state.chat_project_id = None
     st.session_state.history_items = []
 
@@ -1138,20 +1134,10 @@ def render_chat_area():
     jobs = fetch_index_jobs(force=True)
     projects = fetch_projects(force=True)
     job = build_project_job_map(projects, jobs).get(pid)
-    locked = not project_selectable(job)
-
-    disabled_reason = None
-    if st.session_state.get("uploading"):
-        disabled_reason = "업로드 진행 중입니다."
-    elif locked:
-        disabled_reason = "선택한 프로젝트는 아직 인덱싱 완료 전입니다."
-
-    if disabled_reason:
-        st.info(disabled_reason)
 
     question = st.chat_input(
         "코드 구조, 흐름, DB, 호출관계 등을 질문하세요.",
-        disabled=disabled_reason is not None,
+        # disabled=disabled_reason is not None,
     )
 
     if not question:
@@ -1264,11 +1250,15 @@ with st.sidebar:
         render_reset_box()
     render_user_box()   # 항상 최하단에 위치
 
-render_upload_area()
-st.divider()
+if not st.session_state.get("chat_project_select"):
+    render_upload_area()
 
-if render_duplicate_confirm_dialog():
-    st.stop()
+    st.divider()
 
-render_chat_area()
+    if render_duplicate_confirm_dialog():
+        st.stop()
+
+else:
+    render_chat_area()
+
 trigger_live_refresh()
