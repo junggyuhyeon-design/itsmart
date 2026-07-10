@@ -14,7 +14,7 @@ from streamlit_autorefresh import st_autorefresh
 
 BACKEND_URL = os.getenv("FASTAPI_URL", "http://codeMind-backend:8000")
 COOKIE_KEY      = "codeMind_user_id"
-COOKIE_MAX_AGE  = 60 * 60 * 24 * 30  # 30일 (초)
+COOKIE_MAX_AGE  = 60 * 60 * 24  # 1일
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -88,11 +88,8 @@ def init_session_state():
         "chat_project_id": None,
         "active_job_id": None,
         "active_job_detail": None,
-        "upload_flag": False,
         "uploading": False,
         "indexing": False,
-        "last_uploaded_targets": [],
-        "last_upload_result": None,
         "show_reset_confirm": False,
         "project_histories": {},
         "uploader_nonce": 0,
@@ -133,7 +130,7 @@ def do_login(uid: str) -> None:
 def do_logout() -> None:
     """
     로그아웃:
-    1. 쿠키 삭제 시도 (브라우저 반영은 비동기라 보장 안 됨)
+    1. 쿠키 삭제 시도
     2. session 에서 user_id / admin_role 즉시 제거
     3. _logged_out 플래그를 session 에 보존 — 쿠키가 남아있어도 복원 차단
     4. _logout_pending 으로 세션 초기화 트리거
@@ -590,10 +587,10 @@ def get_visible_chat_messages() -> list[dict]:
 
 
 def reset_local_state_after_reset():
-    for k in ("projects", "index_jobs", "history_items", "last_uploaded_targets", "project_histories"):
+    for k in ("projects", "index_jobs", "history_items", "project_histories"):
         st.session_state[k] = [] if isinstance(st.session_state.get(k), list) else {}
     for k in ("projects_error", "index_job_error", "history_error", "latest_project_name",
-               "active_job_id", "active_job_detail", "last_upload_result",
+               "active_job_id", "active_job_detail",
                "system_status", "system_status_error"):
         st.session_state[k] = None
     st.session_state.chat_project_select = None
@@ -747,12 +744,9 @@ def _start_index_job(targets: list):
         st.session_state.indexing = True
     except Exception as e:
         st.error(f"인덱싱 작업 시작 실패: {e}")
-        st.session_state.upload_flag = False
         st.session_state.uploading = False
         st.session_state.indexing = False
         st.session_state.pending_upload = None
-        st.session_state.last_upload_result = None
-        st.session_state.last_uploaded_targets = []
         st.session_state.latest_project_name = None
         return
     fetch_projects(force=True)
@@ -766,14 +760,9 @@ def upload_files_and_start_index(files_payload: list):
         r.raise_for_status()
         data = r.json()
         targets = data.get("targets", [])
-        st.session_state.last_upload_result = data
-        st.session_state.last_uploaded_targets = targets
         if not targets:
             st.error("업로드는 완료됐지만 인덱싱 대상이 없습니다.")
-            st.session_state.upload_flag = False
             st.session_state.pending_upload = None
-            st.session_state.last_upload_result = None
-            st.session_state.last_uploaded_targets = []
             return
         st.session_state.uploading = True
         _start_index_job(targets)
@@ -781,8 +770,6 @@ def upload_files_and_start_index(files_payload: list):
         st.session_state.uploading = False
         st.session_state.indexing = False
         st.session_state.pending_upload = None
-        st.session_state.last_upload_result = None
-        st.session_state.last_uploaded_targets = []
         st.error(f"업로드 실패: {e}")
 
 
@@ -796,7 +783,6 @@ def start_upload_process(uploaded_files): # 업로드할 파일을 가지고 왔
         return
 
     files_payload: list = []
-    # file_sig_parts: list[str] = []
 
     for uploaded_file in uploaded_files: # 업로드 파일 목록을 순회하면서
         file_bytes = uploaded_file.getvalue()
@@ -805,21 +791,24 @@ def start_upload_process(uploaded_files): # 업로드할 파일을 가지고 왔
         )
 
     # 파일 사전 중복 체크
-    project_name = stem_filename(uploaded_files[0].name) # 확장자를 제거
-    try:
-        r = api_get(f"/projects/{project_name}", timeout=10) # SQLite3 조회
-        if r.status_code == 200:
-            old_pid = r.json().get("project_id")
-            if old_pid:
-                # 동명 프로젝트 존재 → 확인 다이얼로그로
-                st.session_state.duplicate_pending = {
-                    "old_project_id": old_pid,
-                    "project_name": project_name,
-                }
-                st.session_state.upload_items = files_payload
-                return
-    except Exception as e:
-        logger.warning("중복 체크 오류(무시하고 진행): %s", e)
+    if len(uploaded_files) > 1: # 다중 파일
+        pass
+    else: # 단일 파일
+        project_name = stem_filename(uploaded_files[0].name) # 확장자를 제거
+        try:
+            r = api_get(f"/projects/{project_name}", timeout=10) # SQLite3 조회
+            if r.status_code == 200:
+                old_pid = r.json().get("project_id")
+                if old_pid:
+                    # 동명 프로젝트 존재 → 확인 다이얼로그로
+                    st.session_state.duplicate_pending = {
+                        "old_project_id": old_pid,
+                        "project_name": project_name,
+                    }
+                    st.session_state.upload_items = files_payload
+                    return
+        except Exception as e:
+            logger.warning("중복 체크 오류(무시하고 진행): %s", e)
 
     # 중복 없음 → 바로 업로드
     upload_files_and_start_index(files_payload)
@@ -849,9 +838,6 @@ def render_duplicate_confirm_dialog() -> bool:
         with c2:
             if st.button("❌ 취소", key="dup_cancel_btn", use_container_width=True):
                 st.session_state.duplicate_pending = None
-                st.session_state.upload_items = []
-                st.session_state.uploading = False
-                st.session_state.upload_flag = False
                 st.session_state.pending_upload = None
                 st.session_state.uploader_nonce += 1
                 st.rerun()
@@ -908,7 +894,6 @@ def process_pending_upload():
 
     # ① pending 을 먼저 초기화 — 이후 rerun 에서 재진입 차단
     st.session_state.pending_upload = None
-    st.session_state.upload_flag = False
 
     # ② 업로드 처리 (중복 감지 시 duplicate_pending 설정하고 return)
     start_upload_process(pending_upload)
@@ -964,18 +949,18 @@ def render_upload_area():
     uploaded_files = st.file_uploader(
         "파일 선택",
         type=[
-            "zip", "py", "java", "js", "ts", "sql", "sh", "txt", "md", "json",
-            "xml", "yml", "yaml", "ini", "toml", "html", "htm", "css"
+            "zip"
+            # , "py", "java", "js", "ts", "sql", "sh", "txt", "md", "json",
+            # "xml", "yml", "yaml", "ini", "toml", "html", "htm", "css"
         ],
         accept_multiple_files=True,
         key=uploader_key,
         help="선택 즉시 업로드 및 인덱싱 시작",
-        disabled=st.session_state.get("upload_flag"), # 별도 플래그 지정으로 업로드 창 출력제어
     )
 
     if uploaded_files:
-        st.session_state.upload_flag = True
         st.session_state.pending_upload = uploaded_files
+        logger.info("upload_files 존재")
 
         st.rerun()
 
@@ -1131,9 +1116,6 @@ def render_chat_area():
         return
 
     # ── 채팅 입력 ────────────────────────────────────────────
-    jobs = fetch_index_jobs(force=True)
-    projects = fetch_projects(force=True)
-    job = build_project_job_map(projects, jobs).get(pid)
 
     question = st.chat_input(
         "코드 구조, 흐름, DB, 호출관계 등을 질문하세요.",
@@ -1211,8 +1193,6 @@ init_session_state()
 # ③ user_id 확보
 #    1순위: session_state (로그인 직후 or 이전 rerun 에서 복원된 경우)
 #    2순위: 쿠키 — 단, _logged_out 플래그가 있으면 차단 (쿠키 삭제 미반영 대응)
-logger.info("[AUTH] session user_id='%s' _logged_out=%s",
-            st.session_state.get("user_id"), st.session_state.get("_logged_out"))
 
 if not st.session_state.get("user_id"):
     if st.session_state.get("_logged_out"):
