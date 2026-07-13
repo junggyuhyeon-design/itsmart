@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import re
 import sys
-import time
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -591,8 +590,6 @@ async def upload(
 
     return {
         "targets": normalized_targets,
-        "count": len(normalized_targets),
-        "projects": len(projects_created),
     }
 
 @app.post("/index-jobs")
@@ -616,6 +613,8 @@ async def create_job(
     project_id = first_target.get("project_id")
     project_name = first_target.get("project_name")
 
+    logger.info("target 생성 건수 : %s", len(normalized_targets))
+
     job_id = str(uuid.uuid4())
     create_index_job(
         job_id=job_id,
@@ -635,10 +634,6 @@ async def create_job(
 
     return {
         "job_id": job_id,
-        "status": "queued",
-        "project_id": project_id,
-        "project_name": project_name,
-        "total_targets": len(normalized_targets),
     }
 
 
@@ -694,7 +689,7 @@ def get_project(
     try:
         exists = get_project_by_name(project_name=name)
         dup_project_id = exists.get("project_id") if exists else None
-        logger.info("중복확인 dup_project_id : %s", dup_project_id)
+        logger.info("중복 확인 dup_project_id : %s", dup_project_id)
         return {"project_id": dup_project_id, "exists": dup_project_id is not None}
     except HTTPException:
         raise
