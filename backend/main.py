@@ -745,12 +745,7 @@ async def create_job(
     project_id = first_target.get("project_id")
     project_name = first_target.get("project_name")
 
-    logger.info(
-        "[main.py][create_job] normalized targets project_id=%s project_name=%s target_count=%d",
-        project_id,
-        project_name,
-        len(normalized_targets),
-    )
+    logger.info("target 생성 건수 : %s", len(normalized_targets))
 
     job_id = str(uuid.uuid4())
     create_index_job(
@@ -840,14 +835,14 @@ def get_project(
     try:
         exists = get_project_by_name(project_name=name)
         dup_project_id = exists.get("project_id") if exists else None
-        logger.info("중복확인 dup_project_id : %s", dup_project_id)
+        logger.info("중복 확인 dup_project_id : %s", dup_project_id)
         return {"project_id": dup_project_id, "exists": dup_project_id is not None}
     except HTTPException:
         raise
     except Exception as error:
         logger.exception("get_project failed")
         raise HTTPException(status_code=500, detail=f"project failed: {error}") from error
-
+    
 
 @app.delete("/projects/{project_id}")
 def delete_project(
