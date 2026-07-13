@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 import re
+import json
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ try:
 except Exception:
     get_language = None
     get_parser = None
+    logger.warning("[file_parser.py][module] tree_sitter_language_pack unavailable, fallback mode enabled")
 
 
 # 단순 텍스트 설정 파일 계열 확장자
@@ -77,12 +79,24 @@ def read_text_file(path: str) -> str:
     - 한글 프로젝트를 고려해 utf-8, cp949, euc-kr, latin-1 순으로 시도
     - 어떤 인코딩으로도 읽지 못하면 ValueError 발생
     """
+    logger.info("[file_parser.py][read_text_file] start path=%s", path)
+
     file_path = Path(path)
     for encoding in ("utf-8", "cp949", "euc-kr", "latin-1"):
         try:
-            return file_path.read_text(encoding=encoding)
+            text = file_path.read_text(encoding=encoding)
+            logger.info(
+                "[file_parser.py][read_text_file] success path=%s encoding=%s text_length=%d",
+                path,
+                encoding,
+                len(text),
+            )
+            return text
         except UnicodeDecodeError:
+            logger.debug("[file_parser.py][read_text_file] decode failed path=%s encoding=%s", path, encoding)
             continue
+
+    logger.error("[file_parser.py][read_text_file] cannot decode path=%s", path)
     raise ValueError(f"cannot decode file: {path}")
 
 
@@ -125,70 +139,110 @@ def detect_language(file_name: str, text: str) -> str:
     """
     extension = normalize_extension(Path(file_name).suffix)
 
+    logger.info(
+        "[file_parser.py][detect_language] start file_name=%s extension=%s text_length=%d",
+        file_name,
+        extension,
+        len(text or ""),
+    )
+
     if extension in SQL_LIKE_EXTENSIONS:
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=sql", file_name)
         return "sql"
     if extension in XML_LIKE_EXTENSIONS:
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=xml", file_name)
         return "xml"
     if extension in TEXT_CONFIG_EXTENSIONS:
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=%s", file_name, extension)
         return extension
     if extension == "py":
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=python", file_name)
         return "python"
     if extension == "js":
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=javascript", file_name)
         return "javascript"
     if extension == "ts":
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=typescript", file_name)
         return "typescript"
     if extension in {"c", "h"}:
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=c", file_name)
         return "c"
     if extension in {"cc", "cpp", "cxx", "hpp"}:
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=cpp", file_name)
         return "cpp"
     if extension == "cs":
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=c_sharp", file_name)
         return "c_sharp"
     if extension == "java":
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=java", file_name)
         return "java"
     if extension == "go":
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=go", file_name)
         return "go"
     if extension == "rs":
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=rust", file_name)
         return "rust"
     if extension == "kt":
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=kotlin", file_name)
         return "kotlin"
     if extension == "swift":
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=swift", file_name)
         return "swift"
     if extension in HTML_LIKE_EXTENSIONS:
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=html", file_name)
         return "html"
     if extension in TEMPLATE_EXTENSIONS:
+        logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=%s", file_name, extension)
         return extension
 
     try:
         lexer = guess_lexer_for_filename(file_name, text)
         alias = (lexer.aliases[0] if getattr(lexer, "aliases", None) else "").lower()
         if alias:
+            logger.info(
+                "[file_parser.py][detect_language] detected by guess_lexer_for_filename file_name=%s language=%s",
+                file_name,
+                alias,
+            )
             return alias
     except ClassNotFound:
-        pass
-    except Exception:
-        pass
+        logger.debug("[file_parser.py][detect_language] guess_lexer_for_filename class not found file_name=%s", file_name)
+    except Exception as error:
+        logger.debug("[file_parser.py][detect_language] guess_lexer_for_filename failed file_name=%s error=%s", file_name, error)
 
     try:
         lexer = get_lexer_for_filename(file_name)
         alias = (lexer.aliases[0] if getattr(lexer, "aliases", None) else "").lower()
         if alias:
+            logger.info(
+                "[file_parser.py][detect_language] detected by get_lexer_for_filename file_name=%s language=%s",
+                file_name,
+                alias,
+            )
             return alias
     except ClassNotFound:
-        pass
-    except Exception:
-        pass
+        logger.debug("[file_parser.py][detect_language] get_lexer_for_filename class not found file_name=%s", file_name)
+    except Exception as error:
+        logger.debug("[file_parser.py][detect_language] get_lexer_for_filename failed file_name=%s error=%s", file_name, error)
 
     try:
         lexer = guess_lexer(text)
         alias = (lexer.aliases[0] if getattr(lexer, "aliases", None) else "").lower()
         if alias:
+            logger.info(
+                "[file_parser.py][detect_language] detected by guess_lexer file_name=%s language=%s",
+                file_name,
+                alias,
+            )
             return alias
     except ClassNotFound:
-        pass
-    except Exception:
-        pass
+        logger.debug("[file_parser.py][detect_language] guess_lexer class not found file_name=%s", file_name)
+    except Exception as error:
+        logger.debug("[file_parser.py][detect_language] guess_lexer failed file_name=%s error=%s", file_name, error)
 
-    return extension or "text"
+    detected = extension or "text"
+    logger.info("[file_parser.py][detect_language] fallback file_name=%s language=%s", file_name, detected)
+    return detected
 
 
 def get_tree_sitter_parser(language_name: str):
@@ -204,6 +258,7 @@ def get_tree_sitter_parser(language_name: str):
     - 설치되지 않았거나 지원되지 않는 언어면 None 반환
     """
     if get_parser is None:
+        logger.debug("[file_parser.py][get_tree_sitter_parser] get_parser unavailable language=%s", language_name)
         return None
 
     alias_candidates = [
@@ -235,6 +290,12 @@ def get_tree_sitter_parser(language_name: str):
         if mapped:
             alias_candidates.append(mapped)
 
+    logger.debug(
+        "[file_parser.py][get_tree_sitter_parser] candidates language=%s alias_candidates=%s",
+        language_name,
+        alias_candidates,
+    )
+
     seen = set()
     for candidate in alias_candidates:
         key = candidate.lower()
@@ -242,10 +303,13 @@ def get_tree_sitter_parser(language_name: str):
             continue
         seen.add(key)
         try:
-            return get_parser(candidate)
+            parser = get_parser(candidate)
+            logger.info("[file_parser.py][get_tree_sitter_parser] resolved language=%s parser_candidate=%s", language_name, candidate)
+            return parser
         except Exception:
             continue
 
+    logger.debug("[file_parser.py][get_tree_sitter_parser] not resolved language=%s", language_name)
     return None
 
 
@@ -261,6 +325,7 @@ def get_tree_sitter_language(language_name: str):
     - 지원 불가 시 None 반환
     """
     if get_language is None:
+        logger.debug("[file_parser.py][get_tree_sitter_language] get_language unavailable language=%s", language_name)
         return None
 
     alias_candidates = [
@@ -292,6 +357,12 @@ def get_tree_sitter_language(language_name: str):
         if mapped:
             alias_candidates.append(mapped)
 
+    logger.debug(
+        "[file_parser.py][get_tree_sitter_language] candidates language=%s alias_candidates=%s",
+        language_name,
+        alias_candidates,
+    )
+
     seen = set()
     for candidate in alias_candidates:
         key = candidate.lower()
@@ -299,10 +370,13 @@ def get_tree_sitter_language(language_name: str):
             continue
         seen.add(key)
         try:
-            return get_language(candidate)
+            language = get_language(candidate)
+            logger.info("[file_parser.py][get_tree_sitter_language] resolved language=%s language_candidate=%s", language_name, candidate)
+            return language
         except Exception:
             continue
 
+    logger.debug("[file_parser.py][get_tree_sitter_language] not resolved language=%s", language_name)
     return None
 
 
@@ -320,17 +394,41 @@ def tree_sitter_query_captures(language_name: str, text: str, query_source: str)
     - [(node, capture_name), ...]
     - parser/language 준비 실패 또는 query 실패 시 []
     """
+    logger.debug(
+        "[file_parser.py][tree_sitter_query_captures] start language=%s text_length=%d query_length=%d",
+        language_name,
+        len(text or ""),
+        len(query_source or ""),
+    )
+
     parser = get_tree_sitter_parser(language_name)
     language = get_tree_sitter_language(language_name)
 
     if parser is None or language is None:
+        logger.debug(
+            "[file_parser.py][tree_sitter_query_captures] unavailable parser_or_language language=%s parser_exists=%s language_exists=%s",
+            language_name,
+            parser is not None,
+            language is not None,
+            )
         return []
 
     try:
         tree = parser.parse(text.encode("utf-8"))
         query = language.query(query_source)
-        return query.captures(tree.root_node)
-    except Exception:
+        captures = query.captures(tree.root_node)
+        logger.debug(
+            "[file_parser.py][tree_sitter_query_captures] success language=%s capture_count=%d",
+            language_name,
+            len(captures),
+        )
+        return captures
+    except Exception as error:
+        logger.debug(
+            "[file_parser.py][tree_sitter_query_captures] failed language=%s error=%s",
+            language_name,
+            error,
+        )
         return []
 
 
@@ -532,6 +630,8 @@ def extract_xml_metadata(text: str) -> dict[str, Any]:
     - content_type 보정
     - code_elements 저장 시 xml_statements/xml_namespace 근거 데이터
     """
+    logger.info("[file_parser.py][extract_xml_metadata] start text_length=%d", len(text or ""))
+
     result = {
         "namespace": "",
         "statement_ids": [],
@@ -563,8 +663,15 @@ def extract_xml_metadata(text: str) -> dict[str, Any]:
             if node_id:
                 result["sql_fragments"].append(node_id)
 
-    except Exception:
-        pass
+        logger.info(
+            "[file_parser.py][extract_xml_metadata] completed root_tag=%s namespace=%s statement_count=%d sql_fragment_count=%d",
+            result["root_tag"],
+            result["namespace"],
+            len(result["statement_ids"]),
+            len(result["sql_fragments"]),
+        )
+    except Exception as error:
+        logger.debug("[file_parser.py][extract_xml_metadata] failed error=%s", error)
 
     return result
 
@@ -583,6 +690,12 @@ def extract_template_metadata(text: str, extension: str) -> dict[str, Any]:
     - 프론트/템플릿 파일 설명
     - 화면 파일의 폼 제출 경로/스크립트 존재 여부 파악
     """
+    logger.info(
+        "[file_parser.py][extract_template_metadata] start extension=%s text_length=%d",
+        extension,
+        len(text or ""),
+    )
+
     result = {
         "template_directives": [],
         "template_tags": [],
@@ -601,8 +714,17 @@ def extract_template_metadata(text: str, extension: str) -> dict[str, Any]:
         doc = html.fromstring(text)
         result["form_actions"] = [action.strip() for action in doc.xpath("//form/@action") if action and action.strip()]
         result["script_blocks"] = len(doc.xpath("//script"))
-    except Exception:
-        pass
+
+        logger.info(
+            "[file_parser.py][extract_template_metadata] completed extension=%s directive_count=%d tag_count=%d form_action_count=%d script_blocks=%d",
+            extension,
+            len(result["template_directives"]),
+            len(result["template_tags"]),
+            len(result["form_actions"]),
+            result["script_blocks"],
+        )
+    except Exception as error:
+        logger.debug("[file_parser.py][extract_template_metadata] failed extension=%s error=%s", extension, error)
 
     return result
 
@@ -622,6 +744,8 @@ def extract_sql_metadata(text: str) -> dict[str, Any]:
         "table_names": ["USERS", "ORDERS"]
     }
     """
+    logger.info("[file_parser.py][extract_sql_metadata] start text_length=%d", len(text or ""))
+
     result = {
         "statement_type": "",
         "table_names": [],
@@ -631,6 +755,8 @@ def extract_sql_metadata(text: str) -> dict[str, Any]:
 
     try:
         expressions = sqlglot.parse(text)
+        logger.info("[file_parser.py][extract_sql_metadata] parsed expressions=%d", len(expressions or []))
+
         for expression in expressions:
             key = expression.key.upper() if getattr(expression, "key", None) else ""
             if not result["statement_type"]:
@@ -652,8 +778,15 @@ def extract_sql_metadata(text: str) -> dict[str, Any]:
                     if upper_name not in seen:
                         seen.add(upper_name)
                         result["table_names"].append(upper_name)
-    except Exception:
-        pass
+
+        logger.info(
+            "[file_parser.py][extract_sql_metadata] completed statement_type=%s table_count=%d tables=%s",
+            result["statement_type"],
+            len(result["table_names"]),
+            result["table_names"][:20],
+        )
+    except Exception as error:
+        logger.debug("[file_parser.py][extract_sql_metadata] failed error=%s", error)
 
     return result
 
@@ -976,6 +1109,14 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
     - 후속 청킹, 정적 분석, DB 저장에 쓸 기본 메타데이터 dict
     - 필수 키 누락, 읽기 실패, 빈 파일이면 {}
     """
+    logger.info(
+        "[file_parser.py][parse_text_file] start project_id=%s project_name=%s relative_path=%s saved_path=%s",
+        file_info.get("project_id", file_info.get("projectid", "")),
+        file_info.get("project_name", file_info.get("projectname", "")),
+        file_info.get("relative_path", file_info.get("relativepath", "")),
+        file_info.get("saved_path", file_info.get("savedpath", "")),
+    )
+
     try:
         # 여러 업로드 경로 키명을 허용해 saved_path를 최대한 유연하게 찾음
         saved_path = (
@@ -987,9 +1128,14 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
         if not saved_path:
             raise KeyError("saved_path")
 
+        logger.info("[file_parser.py][parse_text_file] resolved saved_path=%s", saved_path)
+
         # 파일 원문 전체 텍스트
         raw_text = read_text_file(saved_path)
+        logger.info("[file_parser.py][parse_text_file] read_text_file completed saved_path=%s text_length=%d", saved_path, len(raw_text))
+
         if not raw_text.strip():
+            logger.warning("[file_parser.py][parse_text_file] empty file saved_path=%s", saved_path)
             return {}
 
         # 원본 파일명 우선, 없으면 저장된 경로의 파일명 사용
@@ -1004,27 +1150,40 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
         # 확장자 정규화
         extension = normalize_extension(file_info.get("extension") or Path(file_name).suffix)
 
+        logger.info(
+            "[file_parser.py][parse_text_file] file identity file_name=%s relative_path=%s extension=%s",
+            file_name,
+            relative_path,
+            extension,
+        )
+
         # MIME 타입 추정
         mime_type = detect_mime_type(saved_path)
+        logger.info("[file_parser.py][parse_text_file] detect_mime_type completed mime_type=%s", mime_type)
 
         # 프로그래밍 언어 또는 문서 유형 추정   (USE pygments)
         language = detect_language(file_name, raw_text)
+        logger.info("[file_parser.py][parse_text_file] detect_language completed language=%s", language)
 
         # controller/service/repository/mapper/config/ddl 등 레이어 분류
         layer_type = detect_layer(raw_text, extension, language, relative_path)
+        logger.info("[file_parser.py][parse_text_file] detect_layer completed layer_type=%s", layer_type)
 
         # api_endpoint / sql_select / ddl_create 등 콘텐츠 성격 분류 (USE XML파일일경우:lxml, SQL파일일경우: sqlglot)
         # SQL,XML 일경우 우선수위 SELECT -> INSERT -> UPDATE -> DELETE
         content_type = detect_content_type(raw_text, extension)
+        logger.info("[file_parser.py][parse_text_file] detect_content_type completed content_type=%s", content_type)
 
         # 대표 클래스/타입명 추출
         # - tree-sitter 우선
         # - 실패 시 regex fallback
         # (USE tree-sitter)
         class_name = extract_class_name_tree_sitter(raw_text, language) or extract_class_name_regex(raw_text, extension)
+        logger.info("[file_parser.py][parse_text_file] class_name resolved class_name=%s", class_name)
 
         # 대표 package/namespace 추출 (USE tree-sitter)
         package = extract_package_tree_sitter(raw_text, language) or extract_package_regex(raw_text, extension)
+        logger.info("[file_parser.py][parse_text_file] package resolved package=%s", package)
 
         # 파일 종류별 상세 메타데이터
         # xml_meta = {
@@ -1046,15 +1205,26 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
             else {}
         )
 
+        logger.info(
+            "[file_parser.py][parse_text_file] metadata extracted xml_namespace=%s xml_statement_count=%d sql_statement_type=%s sql_table_count=%d template_script_blocks=%s",
+            xml_meta.get("namespace", ""),
+            len(xml_meta.get("statement_ids", [])),
+            sql_meta.get("statement_type", ""),
+            len(sql_meta.get("table_names", [])),
+            template_meta.get("script_blocks", 0) if template_meta else 0,
+        )
+
         # mapper XML의 경우 namespace만 있고 class_name이 없으면 namespace 마지막 토큰을 대표명으로 사용
         if extension == "xml" and xml_meta.get("namespace") and not class_name:
             class_name = str(xml_meta["namespace"]).split(".")[-1]
+            logger.info("[file_parser.py][parse_text_file] class_name adjusted from xml namespace class_name=%s", class_name)
 
         # SQL 파일은 sqlglot에서 얻은 statement_type을 content_type으로 보정
         if extension == "sql" and sql_meta.get("statement_type") and not content_type:
             content_type = sql_meta["statement_type"]
+            logger.info("[file_parser.py][parse_text_file] content_type adjusted from sql metadata content_type=%s", content_type)
 
-        return {
+        result = {
             "raw_text": raw_text,  # 파일 원문 전체 텍스트, 추가 분석의 기준 데이터
             "project_id": file_info.get("project_id", file_info.get("projectid", "")),  # 프로젝트 식별자
             "project_name": file_info.get("project_name", file_info.get("projectname", "")),  # 프로젝트명
@@ -1079,11 +1249,33 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
             "sql_meta": sql_meta,  # SQL statement type / table names 등 상세 SQL 메타데이터
         }
 
+        logger.info(
+            "[file_parser.py][parse_text_file] completed file_name=%s language=%s layer_type=%s content_type=%s class_name=%s package=%s",
+            result["file_name"],
+            result["language"],
+            result["layer_type"],
+            result["content_type"],
+            result["class_name"],
+            result["package"],
+        )
+
+        logger.info(
+            "[파일파싱 결과 JSON] %s",
+            _to_log_json(result),
+        )
+
+
+        return result
+
     except KeyError as error:
-        logger.error("parse_text_file required key missing - %s file_info=%s", error, file_info)
+        logger.error("[file_parser.py][parse_text_file] required key missing key=%s file_info=%s", error, file_info)
         return {}
     except Exception as error:
-        logger.error("parse_text_file failed - %s path=%s", error, file_info.get("saved_path", file_info.get("savedpath", "")))
+        logger.error(
+            "[file_parser.py][parse_text_file] failed error=%s path=%s",
+            error,
+            file_info.get("saved_path", file_info.get("savedpath", "")),
+        )
         return {}
 
 
@@ -1112,7 +1304,16 @@ def extract_static_analysis(parsed: dict[str, Any]) -> dict[str, Any]:
     - 입력 parsed가 비어 있으면 {}
     """
     if not parsed:
+        logger.warning("[file_parser.py][extract_static_analysis] empty parsed input")
         return {}
+
+    logger.info(
+        "[file_parser.py][extract_static_analysis] start file_name=%s relative_path=%s language=%s extension=%s",
+        parsed.get("file_name", ""),
+        parsed.get("relative_path", ""),
+        parsed.get("language", ""),
+        parsed.get("extension", ""),
+    )
 
     # 1차 파싱 결과 재사용
     raw_text = parsed["raw_text"]
@@ -1122,12 +1323,16 @@ def extract_static_analysis(parsed: dict[str, Any]) -> dict[str, Any]:
     # import는 tree-sitter 우선 추출, 실패하면 regex fallback
     imports = extract_imports_tree_sitter(raw_text, language) #(USE tree-sitter)
     if not imports:
+        logger.info("[file_parser.py][extract_static_analysis] imports tree_sitter empty, fallback regex")
         imports = extract_imports_regex(raw_text, extension)
+    logger.info("[file_parser.py][extract_static_analysis] imports resolved count=%d", len(imports))
 
     # 메서드/함수는 tree-sitter 우선 추출, 실패하면 regex fallback
     methods = extract_methods_tree_sitter(raw_text, language) #(USE tree-sitter)
     if not methods:
+        logger.info("[file_parser.py][extract_static_analysis] methods tree_sitter empty, fallback regex")
         methods = extract_methods_regex(raw_text, extension)
+    logger.info("[file_parser.py][extract_static_analysis] methods resolved count=%d", len(methods))
 
     # parse_text_file()에서 이미 계산한 메타데이터 재사용
     sql_meta = parsed.get("sql_meta", {})
@@ -1136,9 +1341,11 @@ def extract_static_analysis(parsed: dict[str, Any]) -> dict[str, Any]:
     # SQL 파서 기반 테이블명 우선, 없으면 regex fallback
     table_names = sql_meta.get("table_names", [])
     if not table_names:
+        logger.info("[file_parser.py][extract_static_analysis] sql_meta table_names empty, fallback regex")
         table_names = extract_table_names_regex(raw_text)
+    logger.info("[file_parser.py][extract_static_analysis] table_names resolved count=%d values=%s", len(table_names), table_names[:20])
 
-    return {
+    result = {
         "raw_text": raw_text,                                       # 원문 전체 텍스트, preview/hash/추가 분석용 원본
         "project_id": parsed.get("project_id", ""),                 # 프로젝트 식별자
         "project_name": parsed.get("project_name", ""),             # 프로젝트명
@@ -1160,3 +1367,30 @@ def extract_static_analysis(parsed: dict[str, Any]) -> dict[str, Any]:
         "imports": imports,                                         # (ADD) import/use/include 목록
         "methods": methods,                                         # (ADD) 함수/메서드 목록(name, signature, params)
     }
+
+    logger.info(
+        "[file_parser.py][extract_static_analysis] completed file_name=%s imports=%d methods=%d table_names=%d",
+        result["file_name"],
+        len(result["imports"]),
+        len(result["methods"]),
+        len(result["table_names"]),
+    )
+
+    logger.info(
+        "[file_parser.py][parse_text_file][result_json] %s",
+        _to_log_json(result),
+    )
+
+    return result
+
+
+def _to_log_json(data: dict[str, Any], *, max_text: int = 300) -> str:
+    safe = dict(data or {})
+
+    if "raw_text" in safe:
+        raw_text = safe.get("raw_text") or ""
+        safe["raw_text_preview"] = raw_text[:max_text]
+        safe["raw_text_length"] = len(raw_text)
+        safe.pop("raw_text", None)
+
+    return json.dumps(safe, ensure_ascii=False, default=str)
