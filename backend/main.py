@@ -747,25 +747,36 @@ async def ask(
         payload: dict[str, Any] = Body(...),
         x_user_id: str | None = Header(default=None),
 ):
+    # pgy : 확인용[payload]
+    # "question": question,
+    # "top_k": 5,
+    #  project_id
+    #  project_name
+    # "extra_context": "",  --> extract_context 는 없음.
+
+    # read csv and plot graph
+
     user_id = require_user(x_user_id)
 
     question = (payload.get("question") or "").strip()
     project_name = payload.get("project_name")
     project_id = payload.get("project_id")
     extra_context = payload.get("extra_context", "")
-    top_k = int(payload.get("top_k") or settings.top_k)
+    top_k = int(payload.get("top_k") or settings.top_k) # default = 8
 
     if not question:
         raise HTTPException(status_code=400, detail="question is required")
 
-    history_limit = max(1, min(settings.chat_history_turns, 20))
+    history_limit = max(1, min(settings.chat_history_turns, 20)) # default = 8
     chat_history = list(reversed(get_history(user_id, project_id=project_id, limit=history_limit)))
-    recent_entities = get_recent_entities(user_id, limit=20, project_id=project_id)
+    recent_entities = get_recent_entities(user_id, limit=20, project_id=project_id) # 이게 뭐지..
+    
 
     intent = query_analyzer.analyze(question)
     rag_service = get_rag_service(request)
 
     retrieval_question = (intent.search_query or question).strip()
+    logger.info("retrieval_question ::: %s", retrieval_question)
 
     structure_context = ""
     if intent.query_type != "diagram" and project_id:

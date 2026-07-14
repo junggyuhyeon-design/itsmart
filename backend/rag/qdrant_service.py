@@ -169,8 +169,6 @@ class QdrantService:
         query_filter = Filter(must=must) if must else None
 
         try:
-            # qdrant-client >= 1.7.0: search() 가 제거되고 query_points() 로 대체됨
-            from qdrant_client.models import QueryRequest  # noqa: F401 (버전 확인용)
             response = self.client.query_points(
                 collection_name=self.settings.qdrant_collection,
                 query=query_vector,
@@ -184,25 +182,6 @@ class QdrantService:
                 payload["score"] = float(result.score)
                 hits.append(payload)
             return hits
-        except ImportError:
-            # qdrant-client < 1.7.0 fallback: search() 사용
-            try:
-                results = self.client.search(
-                    collection_name=self.settings.qdrant_collection,
-                    query_vector=query_vector,
-                    query_filter=query_filter,
-                    limit=max(1, top_k),
-                    with_payload=True,
-                )
-                hits = []
-                for result in results:
-                    payload = dict(result.payload or {})
-                    payload["score"] = float(result.score)
-                    hits.append(payload)
-                return hits
-            except Exception:
-                logger.exception("qdrant search failed")
-                return []
         except Exception:
             logger.exception("qdrant search failed")
             return []

@@ -349,11 +349,16 @@ class RAGService:
 
         # 검색용 질의문 결정
         retrieval_text = (retrieval_question or question or "").strip()
+        logger.info("검색용 질의문 ::: %s", retrieval_text)
         if not retrieval_text:
             retrieval_text = (question or "").strip()
 
         # 질의 임베딩
         query_vector = self.embedding_service.embed_query(retrieval_text)
+
+        ## pgy : 확인 로그
+        logger.info("layer_filter ::: %s", layer_filter)
+        logger.info("extension_filter ::: %s", extension_filter)
 
         # ? query_vector 정보 :
         # 사용자의 질문을 임베딩 모델로 변환한 검색용 벡터

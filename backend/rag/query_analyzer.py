@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
+import logging
 from dataclasses import dataclass, field
 
-
+logger = logging.getLogger(__name__)
 @dataclass
 class QueryIntent:
     """
@@ -89,18 +90,32 @@ class QueryAnalyzer:
 
         # 질문에서 대표 엔티티(파일/클래스/URI 등) 추출
         entity_hint = self.extract_entity(question)
+        logger.info("entity_hint : %s", entity_hint)
+
         # 질문에서 검색용 주요 키워드 추출
         keywords = self.extract_keywords(question)
+        for kw in keywords:
+            logger.info("keyword item: %s", kw)
+
         # 불용어 제거 후 검색용 질의 문자열 생성
         search_query = self.build_search_query(question, entity_hint)
+        logger.info("search_query : %s", search_query)
+        
         # 컨트롤러/서비스/레포지토리/매퍼 계층 추론
         layer_filter = self.detect_layer(question, entity_hint)
+        logger.info("layer_filter : %s", layer_filter)
+
         # 확장자 필터(xml/sql/java 등) 추론
         extension_filter = self.detect_extension_filter(question, entity_hint, layer_filter)
+        logger.info("extension_filter : %s", extension_filter)
+
         # 질의 유형(qa, diagram, api_doc, xml_analysis, table_analysis, architecture 등) 결정
         query_type = self.detect_type(question, layer_filter, extension_filter)
+        logger.info("query_type : %s", query_type)
+
         # 질의 유형과 엔티티 힌트에 따라 top_k 결정
         top_k = self.decide_top_k(query_type, entity_hint)
+        logger.info("top_k : %s", top_k)
 
         # API 문서 분석은 기본적으로 controller 레이어에 포커스
         if query_type == "api_doc":
