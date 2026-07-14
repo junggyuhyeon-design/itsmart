@@ -62,7 +62,6 @@ class RAGService:
         # root_container_name: 루트 zip 이름 등
 
         if not targets:
-            logger.warning("[rag_service.py][index_files] no targets")
             return {
                 "success": 0,
                 "failed": 0,
