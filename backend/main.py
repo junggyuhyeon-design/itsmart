@@ -922,6 +922,15 @@ async def ask(
         payload: dict[str, Any] = Body(...),
         x_user_id: str | None = Header(default=None),
 ):
+    # pgy : 확인용[payload]
+    # "question": question,
+    # "top_k": 5,
+    #  project_id
+    #  project_name
+    # "extra_context": "",  --> extract_context 는 없음.
+
+    # read csv and plot graph
+
     user_id = require_user(x_user_id)
 
     question = (payload.get("question") or "").strip()

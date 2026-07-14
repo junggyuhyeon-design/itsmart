@@ -570,6 +570,10 @@ class RAGService:
             len(query_vector or []),
         )
 
+        ## pgy : 확인 로그
+        logger.info("layer_filter ::: %s", layer_filter)
+        logger.info("extension_filter ::: %s", extension_filter)
+
         # ? query_vector 정보 :
         # 사용자의 질문을 임베딩 모델로 변환한 검색용 벡터
         # Qdrant 유사도 검색 입력값으로 사용됨
@@ -582,23 +586,6 @@ class RAGService:
             layer_filter=layer_filter,
             extension_filter=extension_filter,
         )
-
-        logger.info(
-            "[rag_service.py][ask_with_context_stream] qdrant search completed hit_count=%d",
-            len(hits or []),
-        )
-
-        if hits:
-            first_hit = hits[0]
-            logger.info(
-                "[rag_service.py][ask_with_context_stream] first_hit relative_path=%s file_name=%s extension=%s layer_type=%s class_name=%s chunk_index=%s",
-                first_hit.get("relative_path"),
-                first_hit.get("file_name"),
-                first_hit.get("extension"),
-                first_hit.get("layer_type"),
-                first_hit.get("class_name"),
-                first_hit.get("chunk_index"),
-            )
 
         # ? hits 정보 : Qdrant 검색 결과 문서/청크 리스트
         # 각 hit에는 보통 청크 본문(text)과 메타(project_id, file_name, relative_path,
