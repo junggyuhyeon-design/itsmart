@@ -216,15 +216,10 @@ class QueryAnalyzer:
         - 엔티티 힌트가 있으면 앞에 붙여서 검색 정확도 향상
         """
         cleaned = question.strip()
-        original = cleaned
-        removed_noise: list[str] = []
 
         # 길이가 긴 노이즈부터 제거 (중복 패턴 방지)
         for noise in sorted(_NOISE_KW, key=len, reverse=True):
-            new_cleaned = re.sub(re.escape(noise), " ", cleaned, flags=re.IGNORECASE)
-            if new_cleaned != cleaned:
-                removed_noise.append(noise)
-            cleaned = new_cleaned
+            cleaned = re.sub(re.escape(noise), " ", cleaned, flags=re.IGNORECASE)
 
         # 다중 공백 정리
         cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
@@ -234,20 +229,7 @@ class QueryAnalyzer:
             cleaned = f"{entity_hint} {cleaned}".strip()
 
         # 모든 처리를 했는데도 빈 문자열이면 원 질문을 그대로 반환
-        result = cleaned or question
-
-        logger.info(
-            "[query_analyzer.py][build_search_query][검색 질의 생성] %s",
-            _json_log({
-                "question": question,
-                "original": original,
-                "entity_hint": entity_hint,
-                "removed_noise": removed_noise,
-                "search_query": result,
-            }),
-        )
-
-        return result
+        return cleaned or question
 
     def detect_type(self, question: str, layer_filter: str | None, extension_filter: str | None) -> str:
         """

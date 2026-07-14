@@ -547,7 +547,7 @@ class RAGService:
 
                     return mermaid_generator(), []
             except Exception as error:
-                logger.warning("[rag_service.py][ask_with_context_stream] DiagramService fallback to LLM error=%s", error)
+                logger.warning("DiagramService fallback to LLM: %s", error)
 
         # 검색용 질의문 결정
         retrieval_text = (retrieval_question or question or "").strip()
