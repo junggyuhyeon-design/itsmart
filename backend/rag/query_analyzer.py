@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import json
+import logging
 import re
 import logging
 from dataclasses import dataclass, field
 
+
 logger = logging.getLogger(__name__)
+
+
+def _json_log(data) -> str:
+    return json.dumps(data, ensure_ascii=False, default=str)
+
+
 @dataclass
 class QueryIntent:
     """
@@ -80,6 +89,10 @@ class QueryAnalyzer:
     def __init__(self, default_top_k: int = 5) -> None:
         # 기본 top_k 값 (설정에서 넘겨줄 수 있도록 파라미터화)
         self.default_top_k = default_top_k
+        logger.info(
+            "[query_analyzer.py][__init__][초기 설정] %s",
+            _json_log({"default_top_k": self.default_top_k}),
+        )
 
     def analyze(self, question: str) -> QueryIntent:
         """
@@ -88,49 +101,89 @@ class QueryAnalyzer:
         """
         question = (question or "").strip()
 
+        logger.info(
+            "[query_analyzer.py][analyze][질문 분석 시작] %s",
+            _json_log({"question": question}),
+        )
+
         # 질문에서 대표 엔티티(파일/클래스/URI 등) 추출
         entity_hint = self.extract_entity(question)
-        logger.info("entity_hint : %s", entity_hint)
+        logger.info(
+            "[query_analyzer.py][analyze][엔티티 추출 완료] %s",
+            _json_log({"entity_hint": entity_hint}),
+        )
 
         # 질문에서 검색용 주요 키워드 추출
         keywords = self.extract_keywords(question)
-        for kw in keywords:
-            logger.info("keyword item: %s", kw)
+        logger.info(
+            "[query_analyzer.py][analyze][키워드 추출 완료] %s",
+            _json_log({"keywords": keywords, "keyword_count": len(keywords)}),
+        )
 
         # 불용어 제거 후 검색용 질의 문자열 생성
         search_query = self.build_search_query(question, entity_hint)
-        logger.info("search_query : %s", search_query)
-        
+        logger.info(
+            "[query_analyzer.py][analyze][검색 질의 생성 완료] %s",
+            _json_log({"search_query": search_query}),
+        )
+
         # 컨트롤러/서비스/레포지토리/매퍼 계층 추론
         layer_filter = self.detect_layer(question, entity_hint)
-        logger.info("layer_filter : %s", layer_filter)
+        logger.info(
+            "[query_analyzer.py][analyze][레이어 추론 완료] %s",
+            _json_log({"layer_filter": layer_filter}),
+        )
 
         # 확장자 필터(xml/sql/java 등) 추론
         extension_filter = self.detect_extension_filter(question, entity_hint, layer_filter)
-        logger.info("extension_filter : %s", extension_filter)
+        logger.info(
+            "[query_analyzer.py][analyze][확장자 추론 완료] %s",
+            _json_log({"extension_filter": extension_filter}),
+        )
 
         # 질의 유형(qa, diagram, api_doc, xml_analysis, table_analysis, architecture 등) 결정
         query_type = self.detect_type(question, layer_filter, extension_filter)
-        logger.info("query_type : %s", query_type)
+        logger.info(
+            "[query_analyzer.py][analyze][질의 유형 결정 완료] %s",
+            _json_log({"query_type": query_type}),
+        )
 
         # 질의 유형과 엔티티 힌트에 따라 top_k 결정
         top_k = self.decide_top_k(query_type, entity_hint)
-        logger.info("top_k : %s", top_k)
+        logger.info(
+            "[query_analyzer.py][analyze][top_k 결정 완료] %s",
+            _json_log({"top_k": top_k}),
+        )
 
         # API 문서 분석은 기본적으로 controller 레이어에 포커스
         if query_type == "api_doc":
             layer_filter = "controller"
+            logger.info(
+                "[query_analyzer.py][analyze][API 문서 레이어 보정] %s",
+                _json_log({"layer_filter": layer_filter}),
+            )
 
         # XML 분석은 mapper 레이어 + xml 확장자에 맞춰 필터링
         if query_type == "xml_analysis":
             layer_filter = layer_filter or "mapper"
             extension_filter = extension_filter or "xml"
+            logger.info(
+                "[query_analyzer.py][analyze][XML 분석 필터 보정] %s",
+                _json_log({
+                    "layer_filter": layer_filter,
+                    "extension_filter": extension_filter,
+                }),
+            )
 
         # 테이블/스키마 분석은 sql 확장자를 기본 필터로 사용
         if query_type == "table_analysis":
             extension_filter = extension_filter or "sql"
+            logger.info(
+                "[query_analyzer.py][analyze][테이블 분석 필터 보정] %s",
+                _json_log({"extension_filter": extension_filter}),
+            )
 
-        return QueryIntent(
+        intent = QueryIntent(
             query_type=query_type,
             top_k=top_k,
             layer_filter=layer_filter,
@@ -140,6 +193,21 @@ class QueryAnalyzer:
             search_query=search_query,
         )
 
+        logger.info(
+            "[query_analyzer.py][analyze][최종 결과] %s",
+            _json_log({
+                "query_type": intent.query_type,
+                "top_k": intent.top_k,
+                "layer_filter": intent.layer_filter,
+                "extension_filter": intent.extension_filter,
+                "entity_hint": intent.entity_hint,
+                "keywords": intent.keywords,
+                "search_query": intent.search_query,
+            }),
+        )
+
+        return intent
+
     def build_search_query(self, question: str, entity_hint: str | None) -> str:
         """
         검색용 질의 문자열 생성.
@@ -148,10 +216,15 @@ class QueryAnalyzer:
         - 엔티티 힌트가 있으면 앞에 붙여서 검색 정확도 향상
         """
         cleaned = question.strip()
+        original = cleaned
+        removed_noise: list[str] = []
 
         # 길이가 긴 노이즈부터 제거 (중복 패턴 방지)
         for noise in sorted(_NOISE_KW, key=len, reverse=True):
-            cleaned = re.sub(re.escape(noise), " ", cleaned, flags=re.IGNORECASE)
+            new_cleaned = re.sub(re.escape(noise), " ", cleaned, flags=re.IGNORECASE)
+            if new_cleaned != cleaned:
+                removed_noise.append(noise)
+            cleaned = new_cleaned
 
         # 다중 공백 정리
         cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
@@ -161,7 +234,20 @@ class QueryAnalyzer:
             cleaned = f"{entity_hint} {cleaned}".strip()
 
         # 모든 처리를 했는데도 빈 문자열이면 원 질문을 그대로 반환
-        return cleaned or question
+        result = cleaned or question
+
+        logger.info(
+            "[query_analyzer.py][build_search_query][검색 질의 생성] %s",
+            _json_log({
+                "question": question,
+                "original": original,
+                "entity_hint": entity_hint,
+                "removed_noise": removed_noise,
+                "search_query": result,
+            }),
+        )
+
+        return result
 
     def detect_type(self, question: str, layer_filter: str | None, extension_filter: str | None) -> str:
         """
@@ -174,20 +260,59 @@ class QueryAnalyzer:
         # 1) 키워드 기반 우선 판단
         for pattern, query_type in TYPE_PATTERNS:
             if pattern.search(question):
+                logger.info(
+                    "[query_analyzer.py][detect_type][패턴 매칭으로 질의 유형 결정] %s",
+                    _json_log({
+                        "question": question,
+                        "matched_pattern": pattern.pattern,
+                        "query_type": query_type,
+                    }),
+                )
                 return query_type
 
         # 2) 레이어 필터가 있으면 레이어 중심 검색(layer_search)로 분류
         if layer_filter:
+            logger.info(
+                "[query_analyzer.py][detect_type][레이어 기반 질의 유형 결정] %s",
+                _json_log({
+                    "question": question,
+                    "layer_filter": layer_filter,
+                    "query_type": "layer_search",
+                }),
+            )
             return "layer_search"
 
         # 3) 확장자 기반 보조 판단
         if extension_filter == "xml":
+            logger.info(
+                "[query_analyzer.py][detect_type][XML 확장자 기반 질의 유형 결정] %s",
+                _json_log({
+                    "question": question,
+                    "extension_filter": extension_filter,
+                    "query_type": "xml_analysis",
+                }),
+            )
             return "xml_analysis"
 
         if extension_filter == "sql":
+            logger.info(
+                "[query_analyzer.py][detect_type][SQL 확장자 기반 질의 유형 결정] %s",
+                _json_log({
+                    "question": question,
+                    "extension_filter": extension_filter,
+                    "query_type": "table_analysis",
+                }),
+            )
             return "table_analysis"
 
         # 4) 기본값: 일반 Q&A
+        logger.info(
+            "[query_analyzer.py][detect_type][기본 질의 유형 결정] %s",
+            _json_log({
+                "question": question,
+                "query_type": "qa",
+            }),
+        )
         return "qa"
 
     def detect_layer(self, question: str, entity_hint: str | None) -> str | None:
@@ -200,20 +325,52 @@ class QueryAnalyzer:
         # 1) 질문 텍스트에서 레이어 키워드 직접 검색
         for pattern, layer in LAYER_PATTERNS:
             if pattern.search(question):
+                logger.info(
+                    "[query_analyzer.py][detect_layer][질문 패턴으로 레이어 결정] %s",
+                    _json_log({
+                        "question": question,
+                        "matched_pattern": pattern.pattern,
+                        "layer_filter": layer,
+                    }),
+                )
                 return layer
 
         # 2) 엔티티 힌트 기반 레이어 추론
         if entity_hint:
             lowered = entity_hint.lower()
             if lowered.endswith("controller"):
+                logger.info(
+                    "[query_analyzer.py][detect_layer][엔티티 suffix로 레이어 결정] %s",
+                    _json_log({"entity_hint": entity_hint, "layer_filter": "controller"}),
+                )
                 return "controller"
             if lowered.endswith("service") or lowered.endswith("serviceimpl"):
+                logger.info(
+                    "[query_analyzer.py][detect_layer][엔티티 suffix로 레이어 결정] %s",
+                    _json_log({"entity_hint": entity_hint, "layer_filter": "service"}),
+                )
                 return "service"
             if lowered.endswith("repository") or lowered.endswith("dao"):
+                logger.info(
+                    "[query_analyzer.py][detect_layer][엔티티 suffix로 레이어 결정] %s",
+                    _json_log({"entity_hint": entity_hint, "layer_filter": "repository"}),
+                )
                 return "repository"
             if lowered.endswith("mapper"):
+                logger.info(
+                    "[query_analyzer.py][detect_layer][엔티티 suffix로 레이어 결정] %s",
+                    _json_log({"entity_hint": entity_hint, "layer_filter": "mapper"}),
+                )
                 return "mapper"
 
+        logger.info(
+            "[query_analyzer.py][detect_layer][레이어 미검출] %s",
+            _json_log({
+                "question": question,
+                "entity_hint": entity_hint,
+                "layer_filter": None,
+            }),
+        )
         return None
 
     def detect_extension_filter(self, question: str, entity_hint: str | None, layer_filter: str | None) -> str | None:
@@ -227,6 +384,13 @@ class QueryAnalyzer:
         # 1) 질문 텍스트에서 명시적 확장자 추출
         explicit = self.extract_extension_from_text(question)
         if explicit:
+            logger.info(
+                "[query_analyzer.py][detect_extension_filter][질문에서 확장자 추출 완료] %s",
+                _json_log({
+                    "question": question,
+                    "extension_filter": explicit,
+                }),
+            )
             return explicit
 
         # 2) 엔티티 힌트 기반 추론 (파일명/클래스명 suffix 등)
@@ -234,20 +398,58 @@ class QueryAnalyzer:
             # foo/bar/Example.java 같은 형식에서 확장자 추출
             file_match = re.search(r"\.([A-Za-z0-9]+)$", entity_hint)
             if file_match:
-                return file_match.group(1).lower()
+                ext = file_match.group(1).lower()
+                logger.info(
+                    "[query_analyzer.py][detect_extension_filter][엔티티 파일명으로 확장자 결정] %s",
+                    _json_log({
+                        "entity_hint": entity_hint,
+                        "extension_filter": ext,
+                    }),
+                )
+                return ext
 
             lowered = entity_hint.lower()
             # Mapper 같은 이름이면 xml로 가정
             if lowered.endswith("mapper"):
+                logger.info(
+                    "[query_analyzer.py][detect_extension_filter][엔티티 suffix로 XML 확장자 결정] %s",
+                    _json_log({
+                        "entity_hint": entity_hint,
+                        "extension_filter": "xml",
+                    }),
+                )
                 return "xml"
             # Controller/Service/Repository/DAO/Entity/DTO/VO 등은 주로 Java로 가정
             if lowered.endswith(("controller", "service", "serviceimpl", "repository", "dao", "entity", "dto", "vo")):
+                logger.info(
+                    "[query_analyzer.py][detect_extension_filter][엔티티 suffix로 Java 확장자 결정] %s",
+                    _json_log({
+                        "entity_hint": entity_hint,
+                        "extension_filter": "java",
+                    }),
+                )
                 return "java"
 
         # 3) 레이어 필터 기반 보조 추론
         if layer_filter == "mapper":
+            logger.info(
+                "[query_analyzer.py][detect_extension_filter][레이어 기반 XML 확장자 결정] %s",
+                _json_log({
+                    "layer_filter": layer_filter,
+                    "extension_filter": "xml",
+                }),
+            )
             return "xml"
 
+        logger.info(
+            "[query_analyzer.py][detect_extension_filter][확장자 미검출] %s",
+            _json_log({
+                "question": question,
+                "entity_hint": entity_hint,
+                "layer_filter": layer_filter,
+                "extension_filter": None,
+            }),
+        )
         return None
 
     def extract_extension_from_text(self, text: str) -> str | None:
@@ -261,13 +463,36 @@ class QueryAnalyzer:
         # .java, .xml 등 확장자만 단독으로 언급된 경우
         match = re.search(r"(?<!\w)\.([A-Za-z0-9]{1,12})\b", text)
         if match:
-            return match.group(1).lower()
+            ext = match.group(1).lower()
+            logger.info(
+                "[query_analyzer.py][extract_extension_from_text][단독 확장자 추출] %s",
+                _json_log({
+                    "text": text,
+                    "extension_filter": ext,
+                }),
+            )
+            return ext
 
         # 경로/파일명 전체가 언급된 경우에서 확장자만 추출
         file_match = re.search(r"\b[A-Za-z0-9_\-./]+\.(\w{1,12})\b", text)
         if file_match:
-            return file_match.group(1).lower()
+            ext = file_match.group(1).lower()
+            logger.info(
+                "[query_analyzer.py][extract_extension_from_text][파일명에서 확장자 추출] %s",
+                _json_log({
+                    "text": text,
+                    "extension_filter": ext,
+                }),
+            )
+            return ext
 
+        logger.info(
+            "[query_analyzer.py][extract_extension_from_text][확장자 미검출] %s",
+            _json_log({
+                "text": text,
+                "extension_filter": None,
+            }),
+        )
         return None
 
     def extract_entity(self, question: str) -> str | None:
@@ -282,6 +507,10 @@ class QueryAnalyzer:
         5) "/api/users/{id}" 같은 URI
         """
         if not question:
+            logger.info(
+                "[query_analyzer.py][extract_entity][질문 비어있음] %s",
+                _json_log({"entity_hint": None}),
+            )
             return None
 
         patterns = [
@@ -300,8 +529,24 @@ class QueryAnalyzer:
         for pattern in patterns:
             match = re.search(pattern, question)
             if match:
-                return match.group(1)
+                entity = match.group(1)
+                logger.info(
+                    "[query_analyzer.py][extract_entity][대표 엔티티 추출 완료] %s",
+                    _json_log({
+                        "question": question,
+                        "matched_pattern": pattern,
+                        "entity_hint": entity,
+                    }),
+                )
+                return entity
 
+        logger.info(
+            "[query_analyzer.py][extract_entity][엔티티 미검출] %s",
+            _json_log({
+                "question": question,
+                "entity_hint": None,
+            }),
+        )
         return None
 
     def extract_keywords(self, question: str) -> list[str]:
@@ -334,7 +579,19 @@ class QueryAnalyzer:
                 result.append(token)
 
         # 최대 12개까지만 사용
-        return result[:12]
+        keywords = result[:12]
+
+        logger.info(
+            "[query_analyzer.py][extract_keywords][핵심 키워드 추출 완료] %s",
+            _json_log({
+                "question": question,
+                "tokens": tokens,
+                "keywords": keywords,
+                "keyword_count": len(keywords),
+            }),
+        )
+
+        return keywords
 
     def decide_top_k(self, query_type: str, entity_hint: str | None) -> int:
         """
@@ -351,11 +608,41 @@ class QueryAnalyzer:
 
         # 다이어그램/아키텍처/테이블/XML/API 분석은 문맥을 더 넓게 보는 편이 좋아서 top_k 상향
         if query_type in {"diagram", "api_doc", "architecture", "xml_analysis", "table_analysis"}:
-            return max(k * hint_boost, 8)
+            result = max(k * hint_boost, 8)
+            logger.info(
+                "[query_analyzer.py][decide_top_k][확장 문맥용 top_k 결정] %s",
+                _json_log({
+                    "query_type": query_type,
+                    "entity_hint": entity_hint,
+                    "hint_boost": hint_boost,
+                    "top_k": result,
+                }),
+            )
+            return result
 
         # 레이어 검색은 충분한 샘플을 확보하기 위해 중간 정도 상향
         if query_type == "layer_search":
-            return max(k * hint_boost, 6)
+            result = max(k * hint_boost, 6)
+            logger.info(
+                "[query_analyzer.py][decide_top_k][레이어 검색용 top_k 결정] %s",
+                _json_log({
+                    "query_type": query_type,
+                    "entity_hint": entity_hint,
+                    "hint_boost": hint_boost,
+                    "top_k": result,
+                }),
+            )
+            return result
 
         # 일반 Q&A는 기본값 * boost
-        return k * hint_boost
+        result = k * hint_boost
+        logger.info(
+            "[query_analyzer.py][decide_top_k][기본 top_k 결정] %s",
+            _json_log({
+                "query_type": query_type,
+                "entity_hint": entity_hint,
+                "hint_boost": hint_boost,
+                "top_k": result,
+            }),
+        )
+        return result

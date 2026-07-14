@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+import time
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -59,6 +60,9 @@ logging.basicConfig(
 logging.getLogger("main").setLevel(logging.INFO)
 logging.getLogger("rag").setLevel(logging.INFO)
 logging.getLogger("database").setLevel(logging.INFO)
+logging.getLogger("parser").setLevel(logging.INFO)
+logging.getLogger("utils").setLevel(logging.INFO)
+
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
@@ -96,20 +100,28 @@ access_logger.setLevel(logging.WARNING)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("startup begin")
+    logger.info("[main.py][lifespan] startup begin")
     try:
         ensure_dir(upload_dir)
         ensure_dir(extract_dir)
+        logger.info(
+            "[main.py][lifespan] ensure_dir completed upload_dir=%s extract_dir=%s",
+            str(upload_dir),
+            str(extract_dir),
+        )
+
         init_db()
+        logger.info("[main.py][lifespan] init_db completed")
 
         rag_service = RAGService(settings)
         app.state.rag_service = rag_service
         app.state.rag_initialized = True
         app.state.init_error = None
 
-        logger.info("startup completed")
+        logger.info("[main.py][lifespan] RAGService initialized")
+        logger.info("[main.py][lifespan] startup completed")
     except Exception as error:
-        logger.exception("startup failed: %s", error)
+        logger.exception("[main.py][lifespan] startup failed error=%s", error)
         app.state.rag_service = None
         app.state.rag_initialized = False
         app.state.init_error = str(error)
@@ -117,7 +129,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    logger.info("shutdown completed")
+    logger.info("[main.py][lifespan] shutdown completed")
 
 
 app = FastAPI(
@@ -141,7 +153,10 @@ app.add_middleware(
 def get_rag_service(request: Request) -> RAGService:
     rag_service = getattr(request.app.state, "rag_service", None)
     if rag_service is None:
+        logger.error("[main.py][get_rag_service] rag_service is not ready")
         raise HTTPException(status_code=503, detail="RAG service is not ready")
+
+    logger.info("[main.py][get_rag_service] rag_service resolved")
     return rag_service
 
 
@@ -162,6 +177,12 @@ def require_user(x_user_id: str | None) -> str:
 async def save_upload_stream(upload_file: UploadFile, destination: Path) -> None:
     total_written = 0
 
+    logger.info(
+        "[main.py][save_upload_stream] start file=%s destination=%s",
+        upload_file.filename,
+        str(destination),
+    )
+
     try:
         async with aiofiles.open(destination, "wb") as output_file:
             while True:
@@ -172,6 +193,12 @@ async def save_upload_stream(upload_file: UploadFile, destination: Path) -> None
                 total_written += len(chunk)
                 if total_written > settings.max_file_size:
                     destination.unlink(missing_ok=True)
+                    logger.warning(
+                        "[main.py][save_upload_stream] max_file_size exceeded file=%s total_written=%d max_file_size=%d",
+                        upload_file.filename,
+                        total_written,
+                        settings.max_file_size,
+                    )
                     raise HTTPException(
                         status_code=413,
                         detail=f"{upload_file.filename} exceeds max file size",
@@ -179,11 +206,18 @@ async def save_upload_stream(upload_file: UploadFile, destination: Path) -> None
 
                 await output_file.write(chunk)
 
+        logger.info(
+            "[main.py][save_upload_stream] completed file=%s destination=%s total_written=%d",
+            upload_file.filename,
+            str(destination),
+            total_written,
+        )
+
     except HTTPException:
         raise
     except Exception as error:
         destination.unlink(missing_ok=True)
-        logger.exception("save_upload_stream failed file=%s", upload_file.filename)
+        logger.exception("[main.py][save_upload_stream] failed file=%s", upload_file.filename)
         raise HTTPException(status_code=500, detail=f"failed to save upload: {error}") from error
 
 
@@ -432,10 +466,27 @@ async def call_ask_with_context_stream(
 
 
 def run_index_job(rag_service: RAGService, job_id: str, targets: list[dict[str, Any]]) -> None:
+    logger.info(
+        "[main.py][run_index_job] start job_id=%s target_count=%d",
+        job_id,
+        len(targets or []),
+    )
+
     try:
         update_index_job(job_id, status="running", message="indexing started")
+        logger.info("[main.py][run_index_job] update_index_job running set job_id=%s", job_id)
 
         def progress_callback(**kwargs):
+            logger.info(
+                "[main.py][run_index_job.progress_callback] job_id=%s processed_targets=%s total_chunks=%s success_count=%s failed_count=%s message=%s error=%s",
+                job_id,
+                kwargs.get("processed_targets"),
+                kwargs.get("total_chunks"),
+                kwargs.get("success_count"),
+                kwargs.get("failed_count"),
+                kwargs.get("message"),
+                kwargs.get("error"),
+            )
             update_index_job(
                 job_id,
                 status="running",
@@ -449,6 +500,16 @@ def run_index_job(rag_service: RAGService, job_id: str, targets: list[dict[str, 
             )
 
         result = rag_service.index_files(targets, progress_callback=progress_callback)
+
+        logger.info(
+            "[main.py][run_index_job] rag_service.index_files completed job_id=%s success=%s failed=%s total_chunks=%s indexed_files=%s code_elements=%s",
+            job_id,
+            result.get("success", 0),
+            result.get("failed", 0),
+            result.get("total_chunks", 0),
+            result.get("indexed_files", 0),
+            result.get("code_elements", 0),
+        )
 
         update_index_job(
             job_id,
@@ -466,8 +527,11 @@ def run_index_job(rag_service: RAGService, job_id: str, targets: list[dict[str, 
             logs=result.get("logs", []),
             finished=True,
         )
+
+        logger.info("[main.py][run_index_job] completed job_id=%s", job_id)
+
     except Exception as error:
-        logger.exception("run_index_job failed job_id=%s", job_id)
+        logger.exception("[main.py][run_index_job] failed job_id=%s", job_id)
         update_index_job(
             job_id,
             status="failed",
@@ -523,20 +587,31 @@ async def upload(
         raise HTTPException(status_code=400, detail="files are required")
 
     if len(files) > settings.max_files_per_request:
+        logger.warning(
+            "[main.py][upload] max_files_per_request exceeded file_count=%d max=%d",
+            len(files),
+            settings.max_files_per_request,
+        )
         raise HTTPException(
             status_code=400,
             detail=f"max {settings.max_files_per_request} files are allowed",
         )
 
     ensure_dir(upload_dir)
+    logger.info("[main.py][upload] ensure_dir completed upload_dir=%s", str(upload_dir))
+
     saved_filenames: list[str] = []
     upload_name_map: dict[str, str] = {}
 
     for upload_file in files:
+        logger.info("[main.py][upload] validating file=%s", upload_file.filename)
+
         if not upload_file.filename or not upload_file.filename.strip():
+            logger.warning("[main.py][upload] empty filename detected")
             raise HTTPException(status_code=400, detail="empty filename is not allowed")
 
         if not is_allowed_upload_extension(upload_file.filename):
+            logger.warning("[main.py][upload] unsupported extension file=%s", upload_file.filename)
             raise HTTPException(
                 status_code=400,
                 detail=f"unsupported upload extension: {upload_file.filename}",
@@ -544,11 +619,31 @@ async def upload(
 
         sanitized_name = safe_filename(upload_file.filename)
         destination = upload_dir / sanitized_name
+
+        logger.info(
+            "[main.py][upload] saving file original_name=%s sanitized_name=%s destination=%s",
+            upload_file.filename,
+            sanitized_name,
+            str(destination),
+        )
+
         await save_upload_stream(upload_file, destination)
         saved_filenames.append(sanitized_name)
         upload_name_map[sanitized_name] = str(destination)
 
+        logger.info(
+            "[main.py][upload] saved file original_name=%s sanitized_name=%s",
+            upload_file.filename,
+            sanitized_name,
+        )
+
     raw_targets = await run_in_threadpool(process_uploads_and_collect, upload_dir, saved_filenames)
+
+    logger.info(
+        "[main.py][upload] process_uploads_and_collect completed saved_file_count=%d raw_target_count=%d",
+        len(saved_filenames),
+        len(raw_targets or []),
+    )
 
     projects_created: dict[str, dict[str, str]] = {}
     normalized_targets: list[dict[str, Any]] = []
@@ -559,12 +654,27 @@ async def upload(
         saved_path = getattr(target, "saved_path", None)
         root_container_name = getattr(target, "root_container_name", None)
 
+        logger.info(
+            "[main.py][upload] raw target project_id=%s project_name=%s relative_path=%s saved_path=%s extension=%s",
+            project_id,
+            project_name,
+            getattr(target, "relative_path", None),
+            saved_path,
+            getattr(target, "extension", None),
+        )
+
         if project_id and project_id not in projects_created:
             origin_saved_path = upload_name_map.get(root_container_name or "", "")
             projects_created[project_id] = {
                 "project_name": project_name or "",
                 "saved_path": origin_saved_path,
             }
+            logger.info(
+                "[main.py][upload] project created project_id=%s project_name=%s root_container_name=%s",
+                project_id,
+                project_name,
+                root_container_name,
+            )
 
         normalized_targets.append(
             {
@@ -581,15 +691,35 @@ async def upload(
             }
         )
 
+    logger.info(
+        "[main.py][upload] normalized targets completed project_count=%d target_count=%d",
+        len(projects_created),
+        len(normalized_targets),
+    )
+
     for project_id, project_info in projects_created.items():
         try:
             # SQLite에 업로드된 파일 정보 저장.
             save_uploaded_file(project_id, project_info["project_name"], project_info["saved_path"])
+            logger.info(
+                "[main.py][upload] save_uploaded_file completed project_id=%s project_name=%s saved_path=%s",
+                project_id,
+                project_info["project_name"],
+                project_info["saved_path"],
+            )
         except Exception as error:
-            logger.exception("save_uploaded_file failed project_id=%s error=%s", project_id, error)
+            logger.exception("[main.py][upload] save_uploaded_file failed project_id=%s error=%s", project_id, error)
+
+    logger.info(
+        "[main.py][upload] completed project_count=%d target_count=%d",
+        len(projects_created),
+        len(normalized_targets),
+    )
 
     return {
         "targets": normalized_targets,
+        "count": len(normalized_targets),
+        "projects": len(projects_created),
     }
 
 @app.post("/index-jobs")
@@ -601,12 +731,14 @@ async def create_job(
 ):
     user_id = require_user(x_user_id)
 
-    logger.info("/index-jobs :: 진입")
+    logger.info("[main.py][create_job] start user_id=%s", user_id)
 
     targets = payload.get("targets", [])
     if not targets:
-        logger.info("targets are required !!!")
+        logger.warning("[main.py][create_job] targets are required")
         raise HTTPException(status_code=400, detail="targets are required")
+
+    logger.info("[main.py][create_job] raw targets count=%d", len(targets))
 
     normalized_targets = [normalize_target_item(target) for target in targets]
     first_target = normalized_targets[0]
@@ -625,15 +757,29 @@ async def create_job(
         message="queued",
     )
 
-    logger.info("SQLite :: index_job 생성 완료")
+    logger.info(
+        "[main.py][create_job] create_index_job completed job_id=%s project_id=%s project_name=%s total_targets=%d",
+        job_id,
+        project_id,
+        project_name,
+        len(normalized_targets),
+    )
 
     rag_service = get_rag_service(request)
     background_tasks.add_task(run_index_job, rag_service, job_id, normalized_targets)
 
-    logger.info("SQLite :: index_job 진행")
+    logger.info(
+        "[main.py][create_job] background task registered job_id=%s target_count=%d",
+        job_id,
+        len(normalized_targets),
+    )
 
     return {
         "job_id": job_id,
+        "status": "queued",
+        "project_id": project_id,
+        "project_name": project_name,
+        "total_targets": len(normalized_targets),
     }
 
 

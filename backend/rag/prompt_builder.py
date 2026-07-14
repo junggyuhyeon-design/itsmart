@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 import logging
 
 logger = logging.getLogger(__name__)
 # score 임계값: 이 값 미만의 청크는 노이즈로 판단해 제외
 _SCORE_THRESHOLD = 0.6
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_BASE = """너는 업로드된 소스 코드를 분석하는 AI다.
 - 반드시 제공된 evidence, metadata, structure, sqlite context를 우선 참고해 답변한다.
@@ -55,13 +58,27 @@ SYSTEM_PROMPTS = {
 }
 
 
+def _preview_text(value: str, limit: int = 300) -> str:
+    text = (value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"...(truncated {len(text) - limit} chars)"
+
+
 class PromptBuilder:
     def trim_history(
             self,
             chat_history: list[dict[str, Any]],
             max_history_chars: int = 4000,
     ) -> list[dict[str, Any]]:
+        logger.info(
+            "[prompt_builder.py][trim_history][1.시작] chat_history_count=%d max_history_chars=%d",
+            len(chat_history or []),
+            max_history_chars,
+        )
+
         if not chat_history:
+            logger.info("[prompt_builder.py][trim_history][2.히스토리 없음] return empty")
             return []
 
         selected: list[dict[str, Any]] = []
@@ -73,6 +90,11 @@ class PromptBuilder:
             size = len(question) + len(answer)
 
             if selected and total + size > max_history_chars:
+                logger.info(
+                    "[prompt_builder.py][trim_history][3.길이 제한 도달] current_total=%d next_size=%d",
+                    total,
+                    size,
+                )
                 break
 
             if question or answer:
@@ -80,10 +102,22 @@ class PromptBuilder:
                 total += size
 
         selected.reverse()
+
+        logger.info(
+            "[prompt_builder.py][trim_history][4.완료] selected_count=%d total_chars=%d",
+            len(selected),
+            total,
+        )
         return selected
 
     def build_metadata_summary(self, hits: list[dict[str, Any]]) -> str:
+        logger.info(
+            "[prompt_builder.py][build_metadata_summary][1.시작] hits_count=%d",
+            len(hits or []),
+        )
+
         if not hits:
+            logger.info("[prompt_builder.py][build_metadata_summary][2.hit 없음] return empty")
             return ""
 
         seen = set()
@@ -110,10 +144,24 @@ class PromptBuilder:
             suffix = f" ({', '.join(meta_parts)})" if meta_parts else ""
             lines.append(f"- {key}{suffix}")
 
-        return "\n".join(lines)
+        result = "\n".join(lines)
+
+        logger.info(
+            "[prompt_builder.py][build_metadata_summary][3.완료] unique_file_count=%d result_len=%d preview=%s",
+            len(lines),
+            len(result),
+            _preview_text(result, 300),
+        )
+        return result
 
     def build_chunk_context(self, hits: list[dict[str, Any]]) -> str:
+        logger.info(
+            "[prompt_builder.py][build_chunk_context][1.시작] hits_count=%d",
+            len(hits or []),
+        )
+
         if not hits:
+            logger.info("[prompt_builder.py][build_chunk_context][2.hit 없음] return empty")
             return ""
 
         ext_lang_map = {
@@ -151,7 +199,14 @@ class PromptBuilder:
             lines.append("```")
             lines.append("")
 
-        return "\n".join(lines).strip()
+        result = "\n".join(lines).strip()
+
+        logger.info(
+            "[prompt_builder.py][build_chunk_context][3.완료] context_len=%d preview=%s",
+            len(result),
+            _preview_text(result, 300),
+        )
+        return result
 
     def build_messages(
             self,
@@ -166,8 +221,26 @@ class PromptBuilder:
             sqlite_context: str = "",
             max_history_chars: int = 4000,
     ) -> list[dict[str, str]]:
+        logger.info(
+            "[prompt_builder.py][build_messages][1.시작] query_type=%s project_name=%s question_len=%d hits_count=%d struct_context_len=%d chat_history_count=%d recent_entities_count=%d sqlite_context_len=%d question_preview=%s",
+            query_type,
+            project_name,
+            len(question or ""),
+            len(hits or []),
+            len(struct_context or ""),
+            len(chat_history or []),
+            len(recent_entities or []),
+            len(sqlite_context or ""),
+            _preview_text(question, 300),
+        )
+
         system_prompt = SYSTEM_PROMPTS.get(query_type, SYSTEM_BASE)
         messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+
+        logger.info(
+            "[prompt_builder.py][build_messages][2.system prompt 선택] system_prompt_len=%d",
+            len(system_prompt),
+        )
 
         trimmed = self.trim_history(chat_history or [], max_history_chars)
         for row in trimmed:
@@ -175,6 +248,12 @@ class PromptBuilder:
                 messages.append({"role": "user", "content": row["question"]})
             if row["answer"]:
                 messages.append({"role": "assistant", "content": row["answer"]})
+
+        logger.info(
+            "[prompt_builder.py][build_messages][3.history 반영완료] trimmed_count=%d message_count=%d",
+            len(trimmed),
+            len(messages),
+        )
 
         parts: list[str] = []
 
@@ -192,9 +271,11 @@ class PromptBuilder:
                 "파일명, 경로, 레이어(Controller/Service/Repository 등), 확장자 기준의 "
                 "구조 요약을 먼저 제시한 후, 부족한 부분을 언급한다."
             )
+            logger.info("[prompt_builder.py][build_messages][4.structure instruction 추가] wants_structure=True")
 
         if project_name:
             parts.append(f"[project]\n{project_name}")
+            logger.info("[prompt_builder.py][build_messages][5.project 추가] project_name=%s", project_name)
 
         if recent_entities:
             entity_lines: list[str] = []
@@ -218,22 +299,58 @@ class PromptBuilder:
 
             if entity_lines:
                 parts.append("[recent_entities]\n" + "\n".join(entity_lines))
+                logger.info(
+                    "[prompt_builder.py][build_messages][6.recent_entities 추가] entity_count=%d",
+                    len(entity_lines),
+                )
 
         if struct_context:
             parts.append("[structure]\n" + struct_context)
+            logger.info(
+                "[prompt_builder.py][build_messages][7.structure 추가] struct_context_len=%d preview=%s",
+                len(struct_context),
+                _preview_text(struct_context, 300),
+            )
 
         if sqlite_context:
             parts.append("[sqlite_context]\n" + sqlite_context)
+            logger.info(
+                "[prompt_builder.py][build_messages][8.sqlite_context 추가] sqlite_context_len=%d preview=%s",
+                len(sqlite_context),
+                _preview_text(sqlite_context, 300),
+            )
 
         metadata_summary = self.build_metadata_summary(hits)
         if metadata_summary:
             parts.append("[metadata]\n" + metadata_summary)
+            logger.info(
+                "[prompt_builder.py][build_messages][9.metadata 추가] metadata_len=%d",
+                len(metadata_summary),
+            )
 
         chunk_context = self.build_chunk_context(hits)
         if chunk_context:
             parts.append("[evidence]\n" + chunk_context)
+            logger.info(
+                "[prompt_builder.py][build_messages][10.evidence 추가] evidence_len=%d",
+                len(chunk_context),
+            )
 
         parts.append("[question]\n" + question.strip())
+        logger.info(
+            "[prompt_builder.py][build_messages][11.question 추가] question_len=%d preview=%s",
+            len(question or ""),
+            _preview_text(question, 300),
+        )
 
-        messages.append({"role": "user", "content": "\n\n".join(parts)})
+        final_user_content = "\n\n".join(parts)
+        messages.append({"role": "user", "content": final_user_content})
+
+        logger.info(
+            "[prompt_builder.py][build_messages][12.완료] parts_count=%d final_user_content_len=%d final_message_count=%d final_user_preview=%s",
+            len(parts),
+            len(final_user_content),
+            len(messages),
+            _preview_text(final_user_content, 500),
+        )
         return messages
