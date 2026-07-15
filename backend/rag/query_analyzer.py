@@ -19,13 +19,15 @@ class QueryIntent:
     """
     사용자의 자연어 질문을 분석한 결과를 담는 구조체.
 
-    - query_type        : 질의 유형(qa, diagram, api_doc, xml_analysis, table_analysis, architecture, layer_search 등)
+    - query_type        : 질의 유형(qa, diagram, api_doc, xml_analysis, table_analysis, architecture, layer_search, edit_text_one, edit_text_all 등)
     - top_k             : 벡터 검색에서 가져올 청크 수
     - layer_filter      : controller/service/repository/mapper 등 계층 필터
     - extension_filter  : 확장자 필터 (예: 'java', 'xml', 'sql')
     - entity_hint       : 질문에서 추출한 대표 엔티티/파일/클래스/URI 힌트
     - keywords          : 검색에 사용할 핵심 키워드 리스트
     - search_query      : 불용어 제거 후 만든 검색용 질의 문자열
+    - edit_source       : 편집 요청에서 변경 전 문자열
+    - edit_target       : 편집 요청에서 변경 후 문자열
     """
     query_type: str = "qa"
     top_k: int = 5
@@ -34,6 +36,8 @@ class QueryIntent:
     entity_hint: str | None = None
     keywords: list[str] = field(default_factory=list)
     search_query: str = ""
+    edit_source: str | None = None
+    edit_target: str | None = None
 
 
 # 검색 질의에서 제거하고 싶은 “말끝/완곡 표현/설명 요구” 같은 노이즈 키워드들
@@ -72,6 +76,26 @@ TYPE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(architecture|아키텍처|구조|flow|흐름)\b", re.IGNORECASE), "architecture"),
 ]
 
+EDIT_ALL_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"(전체|프로젝트 전체|전체 파일|모든 파일|전부|일괄).*(바꿔|변경|수정|치환|교체)"),
+    re.compile(r"(바꿔|변경|수정|치환|교체).*(전체|프로젝트 전체|전체 파일|모든 파일|전부|일괄)"),
+]
+
+EDIT_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"바꿔줘"),
+    re.compile(r"바꿔"),
+    re.compile(r"변경해줘"),
+    re.compile(r"변경"),
+    re.compile(r"수정해줘"),
+    re.compile(r"수정"),
+    re.compile(r"치환"),
+    re.compile(r"교체"),
+    re.compile(r"rename", re.IGNORECASE),
+    re.compile(r"타이틀"),
+    re.compile(r"문구"),
+    re.compile(r"텍스트"),
+]
+
 
 class QueryAnalyzer:
     """
@@ -106,6 +130,12 @@ class QueryAnalyzer:
             _json_log({"question": question}),
         )
 
+        edit_source, edit_target = self.extract_edit_pair(question)
+        logger.info(
+            "[query_analyzer.py][analyze][편집 대상 추출 완료] %s",
+            _json_log({"edit_source": edit_source, "edit_target": edit_target}),
+        )
+
         # 질문에서 대표 엔티티(파일/클래스/URI 등) 추출
         entity_hint = self.extract_entity(question)
         logger.info(
@@ -121,7 +151,7 @@ class QueryAnalyzer:
         )
 
         # 불용어 제거 후 검색용 질의 문자열 생성
-        search_query = self.build_search_query(question, entity_hint)
+        search_query = self.build_search_query(question, entity_hint, edit_source)
         logger.info(
             "[query_analyzer.py][analyze][검색 질의 생성 완료] %s",
             _json_log({"search_query": search_query}),
@@ -142,7 +172,7 @@ class QueryAnalyzer:
         )
 
         # 질의 유형(qa, diagram, api_doc, xml_analysis, table_analysis, architecture 등) 결정
-        query_type = self.detect_type(question, layer_filter, extension_filter)
+        query_type = self.detect_type(question, layer_filter, extension_filter, edit_source, edit_target)
         logger.info(
             "[query_analyzer.py][analyze][질의 유형 결정 완료] %s",
             _json_log({"query_type": query_type}),
@@ -191,6 +221,8 @@ class QueryAnalyzer:
             entity_hint=entity_hint,
             keywords=keywords,
             search_query=search_query,
+            edit_source=edit_source,
+            edit_target=edit_target,
         )
 
         logger.info(
@@ -203,23 +235,43 @@ class QueryAnalyzer:
                 "entity_hint": intent.entity_hint,
                 "keywords": intent.keywords,
                 "search_query": intent.search_query,
+                "edit_source": intent.edit_source,
+                "edit_target": intent.edit_target,
             }),
         )
 
         return intent
 
-    def build_search_query(self, question: str, entity_hint: str | None) -> str:
+    def build_search_query(self, question: str, entity_hint: str | None, edit_source: str | None = None) -> str:
         """
         검색용 질의 문자열 생성.
 
         - _NOISE_KW에 정의된 불필요한 표현(“설명해줘”, “알려줘” 등)을 제거
         - 엔티티 힌트가 있으면 앞에 붙여서 검색 정확도 향상
+        - edit_source가 있으면 edit_source를 우선 검색 질의로 사용
         """
+        if edit_source:
+            logger.info(
+                "[query_analyzer.py][build_search_query][편집 요청 검색 질의 생성] %s",
+                _json_log({
+                    "question": question,
+                    "entity_hint": entity_hint,
+                    "edit_source": edit_source,
+                    "search_query": edit_source,
+                }),
+            )
+            return edit_source
+
         cleaned = question.strip()
+        original = cleaned
+        removed_noise: list[str] = []
 
         # 길이가 긴 노이즈부터 제거 (중복 패턴 방지)
         for noise in sorted(_NOISE_KW, key=len, reverse=True):
-            cleaned = re.sub(re.escape(noise), " ", cleaned, flags=re.IGNORECASE)
+            new_cleaned = re.sub(re.escape(noise), " ", cleaned, flags=re.IGNORECASE)
+            if new_cleaned != cleaned:
+                removed_noise.append(noise)
+            cleaned = new_cleaned
 
         # 다중 공백 정리
         cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
@@ -229,16 +281,71 @@ class QueryAnalyzer:
             cleaned = f"{entity_hint} {cleaned}".strip()
 
         # 모든 처리를 했는데도 빈 문자열이면 원 질문을 그대로 반환
-        return cleaned or question
+        result = cleaned or question
 
-    def detect_type(self, question: str, layer_filter: str | None, extension_filter: str | None) -> str:
+        logger.info(
+            "[query_analyzer.py][build_search_query][검색 질의 생성] %s",
+            _json_log({
+                "question": question,
+                "original": original,
+                "entity_hint": entity_hint,
+                "removed_noise": removed_noise,
+                "search_query": result,
+            }),
+        )
+
+        return result
+
+    def detect_type(
+            self,
+            question: str,
+            layer_filter: str | None,
+            extension_filter: str | None,
+            edit_source: str | None = None,
+            edit_target: str | None = None,
+    ) -> str:
         """
         질의 유형 결정.
 
-        우선 TYPE_PATTERNS에서 키워드 기반으로 타입을 찾고,
+        우선 편집 요청을 먼저 판정하고,
+        이후 TYPE_PATTERNS에서 키워드 기반으로 타입을 찾고,
         없으면 layer_filter/extension_filter를 활용해 보조적으로 결정,
         최종 기본값은 'qa'.
         """
+        if edit_source and edit_target:
+            if any(pattern.search(question) for pattern in EDIT_ALL_PATTERNS):
+                logger.info(
+                    "[query_analyzer.py][detect_type][편집 요청(all) 질의 유형 결정] %s",
+                    _json_log({
+                        "question": question,
+                        "edit_source": edit_source,
+                        "edit_target": edit_target,
+                        "query_type": "edit_text_all",
+                    }),
+                )
+                return "edit_text_all"
+
+            logger.info(
+                "[query_analyzer.py][detect_type][편집 요청(one) 질의 유형 결정] %s",
+                _json_log({
+                    "question": question,
+                    "edit_source": edit_source,
+                    "edit_target": edit_target,
+                    "query_type": "edit_text_one",
+                }),
+            )
+            return "edit_text_one"
+
+        if any(pattern.search(question) for pattern in EDIT_PATTERNS):
+            logger.info(
+                "[query_analyzer.py][detect_type][편집 표현 감지, 기본 편집 질의 유형 결정] %s",
+                _json_log({
+                    "question": question,
+                    "query_type": "edit_text_one",
+                }),
+            )
+            return "edit_text_one"
+
         # 1) 키워드 기반 우선 판단
         for pattern, query_type in TYPE_PATTERNS:
             if pattern.search(question):
@@ -531,6 +638,56 @@ class QueryAnalyzer:
         )
         return None
 
+    def extract_edit_pair(self, question: str) -> tuple[str | None, str | None]:
+        """
+        편집 요청에서 변경 전/후 문자열을 추출.
+
+        예:
+        - 타이틀 "직원 프로필관리 시스템" 에서 "이력관리" 로 바꿔줘
+        - 'A'를 'B'로 변경해줘
+        """
+        if not question:
+            logger.info(
+                "[query_analyzer.py][extract_edit_pair][질문 비어있음] %s",
+                _json_log({"edit_source": None, "edit_target": None}),
+            )
+            return None, None
+
+        patterns = [
+            re.compile(r'"([^"]+)"\s*에서\s*"([^"]+)"\s*로\s*(?:바꿔|변경|수정|치환|교체)'),
+            re.compile(r"'([^']+)'\s*에서\s*'([^']+)'\s*로\s*(?:바꿔|변경|수정|치환|교체)"),
+            re.compile(r'"([^"]+)"\s*을\s*"([^"]+)"\s*로\s*(?:바꿔|변경|수정|치환|교체)'),
+            re.compile(r"'([^']+)'\s*을\s*'([^']+)'\s*로\s*(?:바꿔|변경|수정|치환|교체)"),
+            re.compile(r'"([^"]+)"\s*를\s*"([^"]+)"\s*로\s*(?:바꿔|변경|수정|치환|교체)'),
+            re.compile(r"'([^']+)'\s*를\s*'([^']+)'\s*로\s*(?:바꿔|변경|수정|치환|교체)"),
+        ]
+
+        for pattern in patterns:
+            match = pattern.search(question)
+            if match:
+                edit_source = match.group(1).strip()
+                edit_target = match.group(2).strip()
+                logger.info(
+                    "[query_analyzer.py][extract_edit_pair][편집 쌍 추출 완료] %s",
+                    _json_log({
+                        "question": question,
+                        "matched_pattern": pattern.pattern,
+                        "edit_source": edit_source,
+                        "edit_target": edit_target,
+                    }),
+                )
+                return edit_source, edit_target
+
+        logger.info(
+            "[query_analyzer.py][extract_edit_pair][편집 쌍 미검출] %s",
+            _json_log({
+                "question": question,
+                "edit_source": None,
+                "edit_target": None,
+            }),
+        )
+        return None, None
+
     def extract_keywords(self, question: str) -> list[str]:
         """
         검색에 사용할 핵심 키워드 추출.
@@ -584,9 +741,23 @@ class QueryAnalyzer:
         - diagram, api_doc, architecture, xml_analysis, table_analysis는
           좀 더 넓게 문맥을 보고 싶어 해서 최소 8 이상으로 상향
         - 레이어 검색(layer_search)는 적당히 6 이상으로 상향
+        - edit_text_one / edit_text_all 은 exact-first 검색을 우선하므로 과도하게 키우지 않음
         """
         k = self.default_top_k
         hint_boost = 2 if entity_hint else 1
+
+        if query_type in {"edit_text_one", "edit_text_all"}:
+            result = max(k, 5)
+            logger.info(
+                "[query_analyzer.py][decide_top_k][편집 요청용 top_k 결정] %s",
+                _json_log({
+                    "query_type": query_type,
+                    "entity_hint": entity_hint,
+                    "hint_boost": hint_boost,
+                    "top_k": result,
+                }),
+            )
+            return result
 
         # 다이어그램/아키텍처/테이블/XML/API 분석은 문맥을 더 넓게 보는 편이 좋아서 top_k 상향
         if query_type in {"diagram", "api_doc", "architecture", "xml_analysis", "table_analysis"}:

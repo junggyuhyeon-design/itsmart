@@ -24,3 +24,6 @@ Pygments==2.19.2
 tree-sitter-language-pack==1.12.2
 lxml==5.3.0
 sqlglot==26.12.1
+
+# FastEmbed 기반 sparse (키워드중심검색)
+fastembed==0.8.0

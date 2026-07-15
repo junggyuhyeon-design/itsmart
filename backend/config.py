@@ -32,6 +32,7 @@ class Settings:
     qdrant_url: str
     qdrant_collection: str
     embedding_model: str
+    qdrant_force_recreate: bool
 
     chunk_size: int
     chunk_overlap: int
@@ -51,6 +52,17 @@ class Settings:
     retrieval_max_chunks_per_file: int
 
     sqlite_db_path: str
+
+    # FastEmbed 기반 sparse (키워드중심검색)
+    sparse_embedding_model: str
+    hybrid_enabled: bool
+
+    #Reranker
+    reranker_enabled: bool = True
+    reranker_model_name: str = "dragonkue/bge-reranker-v2-m3-ko"
+    reranker_device: str = "cpu"
+    reranker_candidate_top_k: int = 20
+    reranker_final_top_n: int = 5
 
 
 @lru_cache
@@ -79,4 +91,31 @@ def get_settings() -> Settings:
             default=3,
         ),
         sqlite_db_path=_get_env_str("SQLITE_DB_PATH", "SQLITEDBPATH", default="data/db/app.db"),
+        qdrant_force_recreate=_get_env_int("QDRANT_FORCE_RECREATE", "QDRANTFORCERECREATE", default=0) == 1,
+
+        # FastEmbed 기반 sparse (키워드중심검색)
+        sparse_embedding_model=_get_env_str(
+            "SPARSE_EMBEDDING_MODEL",
+            "SPARSEEMBEDDINGMODEL",
+            default="Qdrant/bm25"
+        ),
+        hybrid_enabled=_get_env_int("HYBRID_ENABLED", "HYBRIDENABLED", default=1) == 1,
+        #Reranker
+        reranker_enabled=_get_env_int("RERANKER_ENABLED", "RERANKERENABLED", default=1) == 1,
+        reranker_model_name=_get_env_str(
+            "RERANKER_MODEL_NAME",
+            "RERANKERMODELNAME",
+            default="dragonkue/bge-reranker-v2-m3-ko",
+        ),
+        reranker_device=_get_env_str("RERANKER_DEVICE", "RERANKERDEVICE", default="cpu"),
+        reranker_candidate_top_k=_get_env_int(
+            "RERANKER_CANDIDATE_TOP_K",
+            "RERANKERCANDIDATETOPK",
+            default=20,
+        ),
+        reranker_final_top_n=_get_env_int(
+            "RERANKER_FINAL_TOP_N",
+            "RERANKERFINALTOPN",
+            default=5,
+        ),
     )

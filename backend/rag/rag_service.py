@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable
-
+from collections.abc import Iterable
 from config import Settings
 from database.history_repository import bulk_insert_file_index, insert_code_elements
 from embedder.embedder import EmbeddingService
@@ -11,6 +12,7 @@ from parser.file_parser import extract_static_analysis, parse_text_file
 from rag.diagram_service import DiagramService
 from rag.ollama_service import OllamaService
 from rag.qdrant_service import QdrantService
+from rag.reranker_service import RerankerService  #Reranker
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,7 @@ class RAGService:
         self.ollama_service = OllamaService(settings)
         self.diagram_service = DiagramService()
         self.chunk_service = ChunkService(settings)
+        self.reranker_service = RerankerService(settings)  #Reranker
 
         logger.info(
             "[rag_service.py][__init__] initialized services top_k=%s embedding_dimension=%s",
@@ -30,11 +33,18 @@ class RAGService:
             getattr(self.embedding_service, "dimension", None),
         )
 
-        # Qdrant 컬렉션 보장
-        self.qdrant_service.ensure_collection(self.embedding_service.dimension)
+        # 개발/테스트 단계: 기존 컬렉션 스키마를 무시하고 강제로 재생성
+        # 주의: 서버 재시작 시 Qdrant 컬렉션 데이터가 삭제되므로 반드시 재인덱싱 필요
+        logger.warning(
+            "[rag_service.py][__init__][개발모드 ★] Qdrant collection will be recreated. all previous vector data will be removed."
+        )
+        if getattr(self.settings, "qdrant_force_recreate", False):
+            self.qdrant_service.recreate_collection(self.embedding_service.dimension)
+        else:
+            self.qdrant_service.ensure_collection(self.embedding_service.dimension)
 
         logger.info(
-            "[rag_service.py][__init__] ensure_collection completed dimension=%s",
+            "[rag_service.py][__init__] recreate_collection completed dimension=%s",
             self.embedding_service.dimension,
         )
 
@@ -62,6 +72,7 @@ class RAGService:
         # root_container_name: 루트 zip 이름 등
 
         if not targets:
+            logger.warning("[rag_service.py][index_files] no targets")
             return {
                 "success": 0,
                 "failed": 0,
@@ -116,7 +127,6 @@ class RAGService:
                     relative_path,
                     parsed is not None,
                     )
-
                 # ? parsed 정보 :
                 # raw_text             : 파일 원문 텍스트
                 # project_id           : 프로젝트 아이디
@@ -140,7 +150,6 @@ class RAGService:
                 # xml_statements       : XML select/insert/update/delete id 목록
                 # template_meta        : 템플릿 파일 관련 메타데이터
                 # sql_meta             : SQL statement type / table names 등 상세 SQL 메타데이터
-
                 if not parsed:
                     failed += 1
                     logs.append(f"[skip] parse failed: {relative_path}")
@@ -254,24 +263,26 @@ class RAGService:
                         )
                     continue
 
+                texts = [(chunk.get("text") or "").strip() for chunk in valid_chunks]
+
                 # ? vectors 정보 : 각 청크 텍스트를 임베딩한 벡터 리스트
                 # [
                 #   [0.0123, -0.4421, ...],
                 #   [0.2871,  0.0311, ...],
                 #   ...
                 # ]
-                vectors = self.embedding_service.embed_texts(
-                    [(chunk.get("text") or "").strip() for chunk in valid_chunks]
-                )
+                dense_vectors = self.embedding_service.embed_texts_dense(texts)
+                sparse_vectors = self.embedding_service.embed_texts_sparse(texts)
 
                 logger.info(
-                    "[rag_service.py][index_files] embed_texts completed relative_path=%s vector_count=%d",
+                    "[rag_service.py][index_files][Sparse 벡터 생성 확인 ★] relative_path=%s sparse_vector_count=%d first_indices_len=%s",
                     relative_path,
-                    len(vectors or []),
+                    len(sparse_vectors or []),
+                    len(sparse_vectors[0].indices) if sparse_vectors else 0,
                 )
 
                 # Qdrant 저장
-                upserted = self.qdrant_service.upsert_chunks(valid_chunks, vectors)
+                upserted = self.qdrant_service.upsert_chunks(valid_chunks, dense_vectors, sparse_vectors)
                 total_chunks += upserted
 
                 logger.info(
@@ -313,7 +324,6 @@ class RAGService:
                         relative_path,
                         analysis is not None,
                         )
-
                     # ? analysis 정보        : SQLite code_elements 저장용 정적 분석 결과
                     # raw_text              : 원문 텍스트
                     # project_id            : 프로젝트 아이디
@@ -335,7 +345,6 @@ class RAGService:
                     # table_names           : SQL/DDL 등에서 추출한 테이블명 목록
                     # imports               : import 목록
                     # methods               : 메서드 목록
-
                     if analysis:
                         key = (project_id, project_name)
                         code_elements_rows_by_project.setdefault(key, []).append(analysis)
@@ -478,6 +487,195 @@ class RAGService:
 
         return result
 
+    def _normalize_hit(self, hit: Any) -> dict[str, Any] | None:
+        if hit is None:
+            return None
+
+        if isinstance(hit, dict):
+            return hit
+
+        payload = getattr(hit, "payload", None)
+        score = getattr(hit, "score", None)
+        point_id = getattr(hit, "id", None)
+
+        if isinstance(payload, dict):
+            normalized = dict(payload)
+            if score is not None and "score" not in normalized:
+                normalized["score"] = score
+            if point_id is not None and "id" not in normalized:
+                normalized["id"] = point_id
+            return normalized
+
+        return None
+
+    def _make_exact_match_hits(self, hits: list[dict[str, Any]] | None, needle: str) -> list[dict[str, Any]]:
+        """
+        검색 결과 중 exact/substring match를 우선 추려서 앞쪽으로 재배치한다.
+        """
+
+        hits = self._flatten_hits(hits)
+
+        if not hits:
+            logger.info(
+                "[rag_service.py][_make_exact_match_hits] needle=%s exact_count=0 partial_count=0 other_count=0",
+                needle,
+            )
+            return []
+
+        if not needle:
+            return hits
+
+        needle_norm = needle.strip().lower()
+        if not needle_norm:
+            return hits
+
+        exact_hits: list[dict[str, Any]] = []
+        partial_hits: list[dict[str, Any]] = []
+        others: list[dict[str, Any]] = []
+
+        for hit in hits:
+            text = str(hit.get("text") or "").strip()
+            text_norm = text.lower()
+
+            copied = dict(hit)
+
+            if text_norm == needle_norm:
+                copied["match_type"] = "exact"
+                exact_hits.append(copied)
+            elif needle_norm in text_norm:
+                copied["match_type"] = "substring"
+                partial_hits.append(copied)
+            else:
+                others.append(copied)
+
+        merged = exact_hits + partial_hits + others
+
+        logger.info(
+            "[rag_service.py][_make_exact_match_hits] needle=%s exact_count=%d partial_count=%d other_count=%d",
+            needle,
+            len(exact_hits),
+            len(partial_hits),
+            len(others),
+        )
+        return merged
+
+    def _make_line_level_exact_hits(self, hits: list[dict[str, Any]] | None, needle: str) -> list[dict[str, Any]]:
+        """
+        청크 내부 라인 기준으로 exact/substring match가 보이는 경우 해당 라인 주변만 evidence로 축약한다.
+        """
+
+        hits = self._flatten_hits(hits)
+
+        if not hits:
+            logger.info(
+                "[rag_service.py][_make_line_level_exact_hits] needle=%s result_count=0",
+                needle,
+            )
+            return []
+
+        if not needle:
+            return hits
+
+        needle_norm = needle.strip().lower()
+        if not needle_norm:
+            return hits
+
+        results: list[dict[str, Any]] = []
+        used_keys: set[tuple[str, Any]] = set()
+
+        for hit in hits:
+            text = str(hit.get("text") or "").strip()
+            if not text:
+                results.append(hit)
+                continue
+
+            lines = text.splitlines()
+            matched = False
+
+            for idx, line in enumerate(lines):
+                line_norm = line.lower()
+                if needle_norm not in line_norm:
+                    continue
+
+                start = max(0, idx - 2)
+                end = min(len(lines), idx + 3)
+                snippet = "\n".join(lines[start:end]).strip()
+
+                copied = dict(hit)
+                copied["text"] = snippet
+                copied["match_type"] = "exact_line" if line_norm.strip() == needle_norm else "substring_line"
+                copied["matched_line"] = idx + 1
+
+                dedupe_key = (
+                    copied.get("relative_path") or copied.get("file_name") or copied.get("filename"),
+                    copied.get("chunk_index"),
+                )
+                if dedupe_key not in used_keys:
+                    used_keys.add(dedupe_key)
+                    results.append(copied)
+
+                matched = True
+                break
+
+            if not matched:
+                results.append(hit)
+
+        logger.info(
+            "[rag_service.py][_make_line_level_exact_hits] needle=%s result_count=%d",
+            needle,
+            len(results),
+        )
+        return results
+
+    def _flatten_hits(self, hits: Any) -> list[dict[str, Any]]:
+        """
+        검색 결과가 list[dict]가 아니라 list[list[dict]] 형태로 들어오는 경우를 대비해 평탄화한다.
+        dict 타입만 최종 hit로 인정한다.
+        """
+        result: list[dict[str, Any]] = []
+
+        def _walk(value: Any) -> None:
+            if value is None:
+                return
+
+            normalized = self._normalize_hit(value)
+            if normalized is not None:
+                result.append(normalized)
+                return
+
+            if isinstance(value, (str, bytes)):
+                return
+
+            if isinstance(value, Iterable):
+                for item in value:
+                    _walk(item)
+
+        _walk(hits)
+
+        logger.info(
+            "[rag_service.py][_flatten_hits] input_type=%s flattened_count=%d",
+            type(hits).__name__,
+            len(result),
+        )
+        return result
+
+    def _safe_first_hit(self, hits: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+        """
+        첫 번째 hit를 안전하게 반환한다.
+        """
+        if not hits:
+            return None
+
+        first = hits[0]
+        if isinstance(first, dict):
+            return first
+
+        logger.warning(
+            "[rag_service.py][_safe_first_hit] first hit is not dict type=%s",
+            type(first).__name__,
+        )
+        return None
+
     async def ask_with_context_stream(
             self,
             question: str,
@@ -547,11 +745,10 @@ class RAGService:
 
                     return mermaid_generator(), []
             except Exception as error:
-                logger.warning("DiagramService fallback to LLM: %s", error)
+                logger.warning("[rag_service.py][ask_with_context_stream] DiagramService fallback to LLM error=%s", error)
 
         # 검색용 질의문 결정
         retrieval_text = (retrieval_question or question or "").strip()
-        logger.info("검색용 질의문 ::: %s", retrieval_text)
         if not retrieval_text:
             retrieval_text = (question or "").strip()
 
@@ -562,29 +759,98 @@ class RAGService:
         )
 
         # 질의 임베딩
-        query_vector = self.embedding_service.embed_query(retrieval_text)
+        dense_query_vector = self.embedding_service.embed_query_dense(retrieval_text)
+        sparse_query_vector = self.embedding_service.embed_query_sparse(retrieval_text)
 
         logger.info(
-            "[rag_service.py][ask_with_context_stream] embed_query completed vector_dim=%d",
-            len(query_vector or []),
+            "[rag_service.py][ask_with_context_stream][Sparse 질의 벡터 확인 ★] indices_len=%s values_len=%s",
+            len(sparse_query_vector.indices) if sparse_query_vector else 0,
+            len(sparse_query_vector.values) if sparse_query_vector else 0,
         )
-
-        ## pgy : 확인 로그
-        logger.info("layer_filter ::: %s", layer_filter)
-        logger.info("extension_filter ::: %s", extension_filter)
 
         # ? query_vector 정보 :
         # 사용자의 질문을 임베딩 모델로 변환한 검색용 벡터
         # Qdrant 유사도 검색 입력값으로 사용됨
 
+        candidate_top_k = max(top_k or self.settings.top_k, self.settings.reranker_candidate_top_k) #Reranker
+
         # Qdrant 유사도 검색
         hits = self.qdrant_service.search(
-            query_vector,
+            dense_query_vector,
+            sparse_query_vector,
             project_id=project_id,
-            top_k=top_k,
+            top_k=candidate_top_k,  #Reranker
             layer_filter=layer_filter,
             extension_filter=extension_filter,
         )
+
+        raw_hit_count = len(hits or []) if isinstance(hits, list) else 0
+        if isinstance(hits, list) and hits:
+            logger.info(
+                "[rag_service.py][ask_with_context_stream] raw first hit type=%s repr=%s",
+                type(hits[0]).__name__,
+                str(hits[0])[:500],
+            )
+
+        hits = self._flatten_hits(hits)
+
+        logger.info(
+            "[rag_service.py][ask_with_context_stream] qdrant search completed raw_hit_count=%d flattened_hit_count=%d",
+            raw_hit_count,
+            len(hits or []),
+        )
+
+        # edit 계열 요청이면 exact-first 재정렬
+        if query_type in {"edit_text_one", "edit_text_all"}:
+            hits = self._make_exact_match_hits(hits, retrieval_text)
+            hits = self._make_line_level_exact_hits(hits, retrieval_text)
+            hits = self._flatten_hits(hits)
+            logger.info(
+                "[rag_service.py][ask_with_context_stream] exact-first reorder completed query_type=%s hit_count=%d",
+                query_type,
+                len(hits or []),
+            )
+
+        if self.settings.reranker_enabled and hits and query_type not in {"edit_text_one", "edit_text_all"}:
+            reranked_hits = self.reranker_service.rerank(
+                query=retrieval_text,
+                hits=hits,
+                final_top_n=top_k or self.settings.reranker_final_top_n,
+            )
+            hits = self._flatten_hits(reranked_hits)
+            logger.info(
+                "ragservice.py ask_with_context_stream rerank completed before=%d after=%d",
+                len(reranked_hits or []),
+                len(hits or []),
+            )
+        else:
+            hits = list(hits or [])
+            hits = hits[: top_k or self.settings.top_k]
+            logger.info(
+                "ragservice.py ask_with_context_stream rerank skipped enabled=%s query_type=%s hit_count=%d final_hit_count=%d",
+                self.settings.reranker_enabled,
+                query_type,
+                len(hits or []),
+                len(hits or []),
+            )
+
+        first_hit = self._safe_first_hit(hits)
+        if first_hit:
+            logger.info(
+                "[rag_service.py][ask_with_context_stream] first_hit relative_path=%s file_name=%s extension=%s layer_type=%s class_name=%s chunk_index=%s match_type=%s",
+                first_hit.get("relative_path"),
+                first_hit.get("file_name"),
+                first_hit.get("extension"),
+                first_hit.get("layer_type"),
+                first_hit.get("class_name"),
+                first_hit.get("chunk_index"),
+                first_hit.get("match_type"),
+            )
+        else:
+            logger.info(
+                "[rag_service.py][ask_with_context_stream] first_hit unavailable hit_count=%d",
+                len(hits or []),
+            )
 
         # ? hits 정보 : Qdrant 검색 결과 문서/청크 리스트
         # 각 hit에는 보통 청크 본문(text)과 메타(project_id, file_name, relative_path,

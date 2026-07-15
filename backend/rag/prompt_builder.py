@@ -21,6 +21,22 @@ SYSTEM_BASE = """너는 업로드된 소스 코드를 분석하는 AI다.
 - Java, XML, SQL, Markdown, 설정 파일도 문맥에 맞게 설명한다.
 """
 
+SYSTEM_EDIT = """너는 업로드된 소스 코드에서 문자열/문구/타이틀 변경 위치를 찾아 안내하는 AI다.
+- 반드시 제공된 evidence, metadata, structure, sqlite context를 우선 참고해 답변한다.
+- 사용자가 "A를 B로 바꿔줘" 같은 요청을 하면, 설명형 답변보다 수정 위치 안내를 우선한다.
+- exact match가 보이면 그 파일과 근거 코드를 가장 먼저 제시한다.
+- exact match가 없으면 유사 후보 파일을 제시하고, "정확한 문자열 일치는 미발견"이라고 명확히 말한다.
+- "최신 소스를 달라", "URL을 달라", "레포지토리 주소가 필요하다" 같은 답변은 하지 않는다.
+- 답변은 가능하면 아래 순서를 따른다:
+  1) 변경 전 문자열
+  2) 변경 후 문자열
+  3) 후보 파일 또는 exact match 파일
+  4) 근거 코드
+  5) 적용 방법 또는 주의점
+- evidence가 부족해도, 현재 evidence 안에서 확인 가능한 범위까지는 반드시 안내한다.
+- 가능하면 한국어로 자세히 설명한다.
+"""
+
 SYSTEM_DIAGRAM = """너는 Mermaid 다이어그램 생성 AI다.
 1. 답변은 mermaid 코드 블록 중심으로 작성한다.
 2. Mermaid 문법 오류가 없도록 한다.
@@ -53,6 +69,8 @@ SYSTEM_PROMPTS = {
     "layer_search": SYSTEM_LAYER,
     "xml_analysis": SYSTEM_XML,
     "architecture": SYSTEM_LAYER,
+    "edit_text_one": SYSTEM_EDIT,
+    "edit_text_all": SYSTEM_EDIT,
     "qa": SYSTEM_BASE,
     "listing": SYSTEM_BASE,
 }
@@ -140,6 +158,8 @@ class PromptBuilder:
                 meta_parts.append(f"type={hit['content_type']}")
             if hit.get("chunk_type"):
                 meta_parts.append(f"chunk_type={hit['chunk_type']}")
+            if hit.get("match_type"):
+                meta_parts.append(f"match_type={hit['match_type']}")
 
             suffix = f" ({', '.join(meta_parts)})" if meta_parts else ""
             lines.append(f"- {key}{suffix}")
@@ -175,6 +195,10 @@ class PromptBuilder:
             "json": "json",
             "yml": "yaml",
             "yaml": "yaml",
+            "jsp": "html",
+            "jspx": "html",
+            "html": "html",
+            "htm": "html",
         }
 
         lines: list[str] = []
@@ -263,7 +287,18 @@ class PromptBuilder:
             for token in ["소스", "파일", "구조", "설명", "프로젝트", "source", "file", "structure"]
         )
 
-        if wants_structure:
+        if query_type in {"edit_text_one", "edit_text_all"}:
+            parts.append(
+                "[instruction]\n"
+                "이번 요청은 문자열/타이틀/문구 수정 요청이다.\n"
+                "설명형 답변보다 변경 위치 안내를 우선한다.\n"
+                "정확한 문자열 일치가 있으면 exact match 파일을 먼저 제시하고,\n"
+                "없으면 유사 후보 파일과 이유를 제시한다.\n"
+                "답변은 가능하면 '변경 전 / 변경 후 / 후보 파일 / 근거 코드 / 적용 방법' 순서로 정리한다."
+            )
+            logger.info("[prompt_builder.py][build_messages][4.edit instruction 추가] query_type=%s", query_type)
+
+        elif wants_structure:
             parts.append(
                 "[instruction]\n"
                 "소스/파일/구조/프로젝트 설명 요청일 때는, "
@@ -295,7 +330,6 @@ class PromptBuilder:
                 if entity.get("relative_path"):
                     label += f" ({entity['relative_path']})"
                 entity_lines.append(label)
-                logger.info("===============================================")
 
             if entity_lines:
                 parts.append("[recent_entities]\n" + "\n".join(entity_lines))
