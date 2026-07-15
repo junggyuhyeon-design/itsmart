@@ -552,6 +552,7 @@ class RAGService:
 
         # 검색용 질의문 결정
         retrieval_text = (retrieval_question or question or "").strip()
+        logger.info("검색용 질의문 ::: %s", retrieval_text)
         if not retrieval_text:
             retrieval_text = (question or "").strip()
 

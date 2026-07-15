@@ -106,24 +106,16 @@ def get_history(user_id: str, project_id: str, limit: int) -> list[dict[str, Any
         return []
 
 
-def delete_history(project_id: str, user_id: str | None = None) -> int:
+def delete_history(project_id: str) -> int:
     try:
-        if not user_id:
-            with get_connection() as conn:
-                cur = conn.execute(
-                    "DELETE FROM chat_history WHERE project_id = ?",
-                    (project_id,)
-                )
-                return int(cur.rowcount or 0)
-        else:
-            with get_connection() as conn:
-                cur = conn.execute(
-                    "DELETE FROM chat_history WHERE user_id = ? AND project_id = ?",
-                    (user_id, project_id)
-                )
-                return int(cur.rowcount or 0)
+        with get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM chat_history WHERE project_id = ?",
+                (project_id,),
+            )
+            return int(cur.rowcount or 0)
     except Exception:
-        logger.exception("delete_history failed user_id=%s project_id=%s", user_id, project_id)
+        logger.exception("delete_history failed project_id=%s", project_id)
         return 0
 
 
@@ -131,14 +123,14 @@ def delete_history(project_id: str, user_id: str | None = None) -> int:
 # Uploaded Files / Projects
 # ─────────────────────────────────────────────────────────────
 
-def save_uploaded_file(project_id: str, project_name: str, saved_path: str) -> str:
+def save_uploaded_file(project_id: str, project_name: str, user_id: str, saved_path: str) -> str:
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT OR REPLACE INTO uploaded_files (project_id, project_name, saved_path)
-            VALUES (?, ?, ?)
+            INSERT OR REPLACE INTO uploaded_files (project_id, project_name, user_id, saved_path)
+            VALUES (?, ?, ?, ?)
             """,
-            (project_id, project_name, saved_path),
+            (project_id, project_name, user_id, saved_path),
         )
     return project_id
 
@@ -155,15 +147,17 @@ def delete_uploaded_file(project_id: str) -> int:
         return 0
 
 
-def get_all_projects() -> list[dict[str, Any]]:
+def get_all_projects(user_id: str) -> list[dict[str, Any]]:
     try:
         with get_connection() as conn:
             rows = conn.execute(
                 """
                 SELECT project_id, project_name, uploaded_at
                 FROM uploaded_files
+                WHERE user_id = ?
                 ORDER BY uploaded_at DESC
-                """
+                """,
+                (user_id,)
             ).fetchall()
             return [dict(row) for row in rows]
     except Exception:
@@ -171,19 +165,40 @@ def get_all_projects() -> list[dict[str, Any]]:
         return []
 
 
-def get_project_by_name(project_name: str) -> dict[str, Any] | None:
-    """동일한 프로젝트명 존재여부 확인 후 ID 반환"""
+def get_project_by_name(user_id: str, project_name: str) -> dict[str, Any] | None:
+    """사용자별 동일한 프로젝트명 존재여부 확인 후 ID 반환"""
     try:
         with get_connection() as conn:
             row = conn.execute(
-                "SELECT project_id, project_name, uploaded_at FROM uploaded_files WHERE project_name = ?",
-                (project_name.strip(),),
+                """
+                SELECT project_id, project_name, uploaded_at
+                FROM uploaded_files
+                WHERE user_id = ? AND project_name = ?
+                """,
+                (user_id, project_name.strip(),),
             ).fetchone()
             return dict(row) if row else None
     except Exception:
-        logger.exception("get_project_by_name failed project_name=%s", project_name)
+        logger.exception("get_project_by_name failed user_id=%s ,project_name=%s", user_id, project_name)
         return None
 
+
+def get_project_by_id(project_id: str) -> dict[str, Any] | None:
+    """프로젝트 ID 로 프로젝트 NAME 조회"""
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT project_name, saved_path
+                FROM uploaded_files
+                WHERE project_id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+            return dict(row) if row else None
+    except Exception:
+        logger.exception("get_project_by_id failed user_id=%s ,project_id=%s", project_id)
+        return None
 
 # ─────────────────────────────────────────────────────────────
 # File Index
@@ -610,81 +625,6 @@ def delete_index_job(project_id: str) -> int:
 # ─────────────────────────────────────────────────────────────
 # Admin / Purge
 # ─────────────────────────────────────────────────────────────
-
-def purge_all_runtime_data() -> dict[str, int]:
-    with get_connection() as conn:
-        chat_history_deleted = conn.execute("DELETE FROM chat_history").rowcount
-        uploaded_files_deleted = conn.execute("DELETE FROM uploaded_files").rowcount
-        file_index_deleted = conn.execute("DELETE FROM file_index").rowcount
-        code_elements_deleted = conn.execute("DELETE FROM code_elements").rowcount
-        turn_entities_deleted = conn.execute("DELETE FROM turn_entities").rowcount
-        index_jobs_deleted = conn.execute("DELETE FROM index_jobs").rowcount
-
-    return {
-        "chat_history_deleted": int(chat_history_deleted or 0),
-        "uploaded_files_deleted": int(uploaded_files_deleted or 0),
-        "file_index_deleted": int(file_index_deleted or 0),
-        "code_elements_deleted": int(code_elements_deleted or 0),
-        "turn_entities_deleted": int(turn_entities_deleted or 0),
-        "index_jobs_deleted": int(index_jobs_deleted or 0),
-    }
-
-
-def list_db_tables() -> list[dict[str, Any]]:
-    try:
-        with get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT name
-                FROM sqlite_master
-                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-                ORDER BY name
-                """
-            ).fetchall()
-
-            result = []
-            for row in rows:
-                table_name = row["name"]
-                count_row = conn.execute(f"SELECT COUNT(*) AS cnt FROM {table_name}").fetchone()
-                result.append(
-                    {
-                        "table_name": table_name,
-                        "row_count": int(count_row["cnt"]) if count_row else 0,
-                    }
-                )
-            return result
-    except Exception:
-        logger.exception("list_db_tables failed")
-        return []
-
-
-def get_table_rows_for_admin(table_name: str, limit: int = 200) -> list[dict[str, Any]]:
-    if not table_name or not table_name.strip():
-        raise ValueError("table_name is required")
-
-    safe_table_name = table_name.strip()
-
-    with get_connection() as conn:
-        allowed_tables = {
-            row["name"]
-            for row in conn.execute(
-                """
-                SELECT name
-                FROM sqlite_master
-                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-                """
-            ).fetchall()
-        }
-
-        if safe_table_name not in allowed_tables:
-            raise ValueError(f"unknown table: {safe_table_name}")
-
-        safe_limit = max(1, min(int(limit or 200), 1000))
-        rows = conn.execute(
-            f"SELECT * FROM {safe_table_name} ORDER BY 1 DESC LIMIT ?",
-            (safe_limit,),
-        ).fetchall()
-        return [dict(row) for row in rows]
 
 
 def get_relationship_edges(project_id: str, relation: str | None = None) -> list[dict[str, Any]]:

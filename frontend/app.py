@@ -36,7 +36,8 @@ _cookie_mgr = stx.CookieManager(key="codeMind_cookie_mgr")
 def cookie_get(key: str) -> str:
     try:
         val = (_cookie_mgr.get(key) or "").strip()
-        logger.info("[COOKIE] get key=%s → '%s'", key, val)
+        # logger.info("[COOKIE] get key=%s → '%s'", key, val)
+        # logger.info("============================================================")
         return val
     except Exception as e:
         logger.warning("[COOKIE] get failed key=%s: %s", key, e)
@@ -46,7 +47,8 @@ def cookie_get(key: str) -> str:
 def cookie_set(key: str, value: str) -> None:
     try:
         _cookie_mgr.set(key, value, max_age=COOKIE_MAX_AGE)
-        logger.info("[COOKIE] set key=%s value='%s'", key, value)
+        # logger.info("[COOKIE] set key=%s value='%s'", key, value)
+        # logger.info("============================================================")
     except Exception as e:
         logger.warning("[COOKIE] set failed key=%s: %s", key, e)
 
@@ -62,7 +64,8 @@ def cookie_delete(key: str) -> None:
     ]:
         try:
             fn()
-            logger.info("[COOKIE] delete step '%s' key=%s ok", method_name, key)
+            # logger.info("[COOKIE] delete step '%s' key=%s ok", method_name, key)
+            # logger.info("============================================================")
         except Exception as e:
             logger.warning("[COOKIE] delete step '%s' key=%s failed: %s", method_name, key, e)
 
@@ -74,7 +77,7 @@ def cookie_delete(key: str) -> None:
 def init_session_state():
     defaults = {
         "user_id": None,
-        "admin_role": False,
+        # "admin_role": False,
         "projects": [],
         "projects_error": None,
         "system_status": None,
@@ -121,9 +124,9 @@ def do_login(uid: str) -> None:
     """로그인 처리: session + 쿠키에 user_id 저장. _logged_out 플래그 해제."""
     logger.info("[LOGIN] do_login uid='%s'", uid)
     st.session_state.user_id = uid
-    st.session_state.admin_role = (uid.lower() == "admin")
+    # st.session_state.admin_role = (uid.lower() == "admin")
     st.session_state["_logged_out"] = False   # 로그아웃 차단 플래그 해제
-    logger.info("[LOGIN] admin_role=%s _logged_out=False", st.session_state.admin_role)
+    # logger.info("[LOGIN] admin_role=%s _logged_out=False", st.session_state.admin_role)
     cookie_set(COOKIE_KEY, uid)
 
 
@@ -135,13 +138,14 @@ def do_logout() -> None:
     3. _logged_out 플래그를 session 에 보존 — 쿠키가 남아있어도 복원 차단
     4. _logout_pending 으로 세션 초기화 트리거
     """
-    logger.info("[LOGOUT] do_logout 시작 current_user='%s'", st.session_state.get("user_id"))
+    # logger.info("[LOGOUT] do_logout 시작 current_user='%s'", st.session_state.get("user_id"))
     cookie_delete(COOKIE_KEY)
     st.session_state.user_id = None
-    st.session_state.admin_role = False
+    # st.session_state.admin_role = False
     st.session_state["_logged_out"] = True   # 쿠키 복원 차단 플래그
     st.session_state["_logout_pending"] = True
-    logger.info("[LOGOUT] _logout_pending=True _logged_out=True, rerun")
+    # logger.info("[LOGOUT] _logout_pending=True _logged_out=True, rerun")
+    # logger.info("============================================================")
     st.rerun()
 
 
@@ -507,7 +511,8 @@ def rebuild_project_histories_from_server():
             messages.append({"role": "assistant", "content": answer, "ts": ts})
 
     st.session_state.project_histories[key] = messages
-    logger.info("[HISTORY] rebuild 완료 key=%s messages=%d", key, len(messages))
+    # logger.info("[HISTORY] rebuild 완료 key=%s messages=%d", key, len(messages))
+    # logger.info("============================================================")
 
 
 # ─────────────────────────────────────────────
@@ -690,41 +695,9 @@ def render_user_box():
     """사이드바 하단: 로그인 사용자 정보 + 로그아웃 버튼."""
     st.sidebar.divider()
     uid = st.session_state.get("user_id", "")
-    role_label = "👑 admin" if st.session_state.get("admin_role") else "👤 사용자"
-    st.sidebar.caption(f"{role_label}: **{uid}**")
+    st.sidebar.caption(f"👤 사용자 : **{uid}**")
     if st.sidebar.button("🔓 로그아웃 / 계정 전환", key="logout_btn", use_container_width=True):
         do_logout()
-
-
-def render_reset_box():
-    st.sidebar.subheader("데이터 초기화")
-    st.sidebar.caption("Qdrant + SQLite 전체 데이터 삭제")
-
-    if not st.session_state.show_reset_confirm:
-        if st.sidebar.button("전체 Reset", type="secondary", use_container_width=True):
-            st.session_state.show_reset_confirm = True
-            st.rerun()
-        return
-
-    st.sidebar.warning("정말 초기화하려면 아래 버튼을 누르세요.")
-    col1, col2 = st.sidebar.columns(2)
-
-    with col1:
-        if st.button("RESET 실행", key="do_reset_btn", use_container_width=True):
-            try:
-                response = api_delete("/reset", params={"confirm_text": "RESET"}, timeout=120)
-                response.raise_for_status()
-                reset_local_state_after_reset()
-                st.sidebar.success("초기화 완료")
-                time.sleep(1)
-                st.rerun()
-            except Exception as error:
-                st.sidebar.error(f"초기화 실패: {error}")
-
-    with col2:
-        if st.button("취소", key="cancel_reset_btn", use_container_width=True):
-            st.session_state.show_reset_confirm = False
-            st.rerun()
 
 
 # ─────────────────────────────────────────────
@@ -1038,11 +1011,9 @@ def render_chat_area():
     with col_btn:
         # 프로젝트가 선택된 경우에만 삭제 버튼 표시
         if pid:
-            is_admin = st.session_state.get("admin_role", False)
-            btn_label = "🗑 프로젝트 삭제" if is_admin else "🗑 히스토리 삭제"
             confirm_key = f"delete_confirm_{pid}"
 
-            if st.button(btn_label, key="del_action_btn", use_container_width=True):
+            if st.button("🗑 프로젝트 삭제", key="del_action_btn", use_container_width=True):
                 # 버튼 클릭 시 confirm 플래그 토글
                 st.session_state[confirm_key] = not st.session_state.get(confirm_key, False)
                 st.rerun()
@@ -1051,47 +1022,25 @@ def render_chat_area():
     if pid:
         confirm_key = f"delete_confirm_{pid}"
         if st.session_state.get(confirm_key, False):
-            is_admin = st.session_state.get("admin_role", False)
-            if is_admin:
-                st.warning(
-                    f"⚠️ **'{pname}'** 프로젝트의 모든 데이터(소스·벡터·히스토리·인덱스)를 삭제합니다.\n\n"
-                    "이 작업은 되돌릴 수 없습니다."
-                )
-            else:
-                st.warning(
-                    f"⚠️ **'{pname}'** 프로젝트의 대화 히스토리를 삭제합니다."
-                )
+            st.warning(
+                f"⚠️ **'{pname}'** 프로젝트의 모든 데이터(소스·벡터·히스토리·인덱스)를 삭제합니다.\n\n"
+                "이 작업은 되돌릴 수 없습니다."
+            )
 
             c1, c2, _ = st.columns([1, 1, 3])
             with c1:
                 if st.button("✅ 확인", key="del_ok_btn", type="primary", use_container_width=True):
                     st.session_state[confirm_key] = False
-                    if is_admin:
-                        # admin: 프로젝트 전체 데이터 삭제 (SQLite 전 테이블 + Qdrant)
-                        try:
-                            r = api_delete(
-                                f"/projects/{pid}",
-                                timeout=30,
-                            )
-                            r.raise_for_status()
-                            _clear_project_session(pid)
-                            st.success(f"'{pname}' 프로젝트가 삭제되었습니다.")
-                        except Exception as e:
-                            st.error(f"프로젝트 삭제 실패: {e}")
-                    else:
-                        # 일반 사용자: 본인의 히스토리만 삭제
-                        try:
-                            r = api_delete(
-                                f"/history/{pid}",
-                                timeout=20,
-                            )
-                            r.raise_for_status()
-                            key = project_key(pid)
-                            st.session_state.project_histories.pop(key, None)
-                            st.session_state.history_items = []
-                            st.success("히스토리가 삭제되었습니다.")
-                        except Exception as e:
-                            st.error(f"히스토리 삭제 실패: {e}")
+                    try:
+                        r = api_delete(
+                            f"/projects/{pid}",
+                            timeout=30,
+                        )
+                        r.raise_for_status()
+                        _clear_project_session(pid)
+                        st.success(f"'{pname}' 프로젝트가 삭제되었습니다.")
+                    except Exception as e:
+                        st.error(f"프로젝트 삭제 실패: {e}")
                     time.sleep(0.8)
                     st.rerun()
             with c2:
@@ -1176,14 +1125,15 @@ def trigger_live_refresh():
 #    세션 전체 초기화 후 _logged_out 플래그를 재주입해서
 #    쿠키가 아직 브라우저에 남아있어도 복원 경로(③)를 차단.
 if st.session_state.pop("_logout_pending", False):
-    logger.info("[LOGOUT] _logout_pending 처리 — 세션 전체 초기화")
+    # logger.info("[LOGOUT] _logout_pending 처리 — 세션 전체 초기화")
     cookie_val_at_logout = cookie_get(COOKIE_KEY)
-    logger.info("[LOGOUT] 이 시점 쿠키 값(삭제 미반영 가능): '%s'", cookie_val_at_logout)
+    # logger.info("[LOGOUT] 이 시점 쿠키 값(삭제 미반영 가능): '%s'", cookie_val_at_logout)
     for k in list(st.session_state.keys()):
         del st.session_state[k]
     init_session_state()
     st.session_state["_logged_out"] = True   # 재주입: 쿠키 복원 차단 유지
-    logger.info("[LOGOUT] 로그인 화면으로 이동 (_logged_out=True 유지)")
+    # logger.info("[LOGOUT] 로그인 화면으로 이동 (_logged_out=True 유지)")
+    # logger.info("============================================================")
     render_login_page()
     st.stop()
 
@@ -1204,7 +1154,7 @@ if not st.session_state.get("user_id"):
     # logger.info("[AUTH] 쿠키 복원 시도 → '%s'", uid_from_cookie)
     if uid_from_cookie:
         st.session_state.user_id = uid_from_cookie
-        st.session_state.admin_role = (uid_from_cookie.lower() == "admin")
+        # st.session_state.admin_role = (uid_from_cookie.lower() == "admin")
         # logger.info("[AUTH] 쿠키 복원 완료 user_id='%s' admin_role=%s",
                     # uid_from_cookie, st.session_state.admin_role)
     else:
@@ -1225,9 +1175,6 @@ with st.sidebar:
     render_system_status()
     st.divider()
     render_sidebar_projects()
-    if st.session_state.get("admin_role"):
-        st.divider()
-        render_reset_box()
     render_user_box()   # 항상 최하단에 위치
 
 if not st.session_state.get("chat_project_select"):

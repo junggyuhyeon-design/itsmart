@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+import logging
+
+logger = logging.getLogger(__name__)
+# score 임계값: 이 값 미만의 청크는 노이즈로 판단해 제외
+_SCORE_THRESHOLD = 0.6
 
 logger = logging.getLogger(__name__)
 
@@ -175,11 +180,16 @@ class PromptBuilder:
         lines: list[str] = []
 
         for index, hit in enumerate(hits, start=1):
+            score = hit.get("score", 1.0)
+            logger.info("적중 score ::: %.2f", score)
+
             text = (hit.get("text") or "").strip()
             if not text:
                 continue
 
-            relative_path = hit.get("relative_path") or hit.get("file_name") or hit.get("filename") or f"chunk-{index}"
+            logger.info("가져온 청크 ::: %s", text)
+
+            relative_path = hit.get("relative_path") or hit.get("file_name") or f"chunk-{index}"
             extension = (hit.get("extension") or "").lower().strip(".")
             language = ext_lang_map.get(extension, "")
 
@@ -285,6 +295,7 @@ class PromptBuilder:
                 if entity.get("relative_path"):
                     label += f" ({entity['relative_path']})"
                 entity_lines.append(label)
+                logger.info("===============================================")
 
             if entity_lines:
                 parts.append("[recent_entities]\n" + "\n".join(entity_lines))

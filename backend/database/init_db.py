@@ -75,6 +75,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS uploaded_files (
                 project_id TEXT PRIMARY KEY,
                 project_name TEXT NOT NULL,
+                user_id TEXT NOT NULL,
                 saved_path TEXT NOT NULL,
                 uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )

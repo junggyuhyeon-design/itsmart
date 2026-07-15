@@ -83,16 +83,18 @@ def _collect_regular_file(saved_path: Path) -> list[AnalysisTargetFile]:
     ]
 
 
-def _extract_zip(saved_zip: Path, extract_root: Path) -> list[AnalysisTargetFile]:
-    ensure_dir(extract_root)
+def _extract_zip(saved_zip: Path, extract_root: Path, user_id: str) -> list[AnalysisTargetFile]:
     project_id = _make_project_id()
     project_name = _make_project_name(saved_zip.name)
-    target_root = extract_root / f"{project_name}" # 동일한 프로젝트(name으로 구분)인 경우 제거 후 재 생성
+    target_root = extract_root / f"{user_id}" / f"{project_name}" # user_id 별로 프로젝트 경로 설정
+
+    # logger.info("_extract_zip 경로 ::: %s", target_root)   # /data/extracted/admin/board_final-master
+    # logger.info("saved_path ::: %s", str(saved_zip))       # /data/uploads/admin/board_final-master.zip
 
     if target_root.exists():
         logger.info("[INFO] 기존 디렉토리를 제거: %s", target_root)
         shutil.rmtree(target_root, ignore_errors=True)
-    ensure_dir(target_root)
+    ensure_dir(target_root) # 경로 생성
 
     results: list[AnalysisTargetFile] = []
 
@@ -127,22 +129,22 @@ def _extract_zip(saved_zip: Path, extract_root: Path) -> list[AnalysisTargetFile
     return results
 
 
-def process_uploads_and_collect(upload_dir: Path, saved_filenames: list[str]) -> list[AnalysisTargetFile]:
+def process_uploads_and_collect(saved_path: Path, saved_filenames: list[str], user_id: str) -> list[AnalysisTargetFile]:
     settings = get_settings()
     extract_dir = Path(settings.extract_dir)
-    ensure_dir(upload_dir)
-    ensure_dir(extract_dir)
 
     collected: list[AnalysisTargetFile] = []
 
     for filename in saved_filenames:
-        saved_path = upload_dir / filename
+        # logger.info("saved_path=%s", saved_path) # /data/uploads/admin/board_final-master.zip
+        # logger.info("filename=%s", filename)     # board_final-master.zip
+
         if not saved_path.exists() or not saved_path.is_file():
             continue
 
         suffix = saved_path.suffix.lower()
         if suffix == ".zip":
-            collected.extend(_extract_zip(saved_path, extract_dir))
+            collected.extend(_extract_zip(saved_path, extract_dir, user_id))
         elif suffix in ANALYSIS_TARGET_EXTENSIONS:
             collected.extend(_collect_regular_file(saved_path))
 
