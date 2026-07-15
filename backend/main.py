@@ -5,6 +5,7 @@ import re
 import sys
 import time
 import uuid
+import shutil
 from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -27,10 +28,8 @@ from database.history_repository import (
     get_index_job,
     get_project_by_name,
     get_recent_entities,
-    get_table_rows_for_admin,
-    list_db_tables,
     list_index_jobs,
-    purge_all_runtime_data,
+    get_project_by_id,
     save_history,
     save_turn_entities,
     save_uploaded_file,
@@ -156,7 +155,8 @@ def get_rag_service(request: Request) -> RAGService:
         logger.error("[main.py][get_rag_service] rag_service is not ready")
         raise HTTPException(status_code=503, detail="RAG service is not ready")
 
-    logger.info("[main.py][get_rag_service] rag_service resolved")
+    # logger.info("[main.py][get_rag_service] rag_service resolved")
+    # logger.info("============================================================")
     return rag_service
 
 
@@ -177,11 +177,11 @@ def require_user(x_user_id: str | None) -> str:
 async def save_upload_stream(upload_file: UploadFile, destination: Path) -> None:
     total_written = 0
 
-    logger.info(
-        "[main.py][save_upload_stream] start file=%s destination=%s",
-        upload_file.filename,
-        str(destination),
-    )
+    # logger.info(
+    #     "[main.py][save_upload_stream] start file=%s destination=%s",
+    #     upload_file.filename,
+    #     str(destination),
+    # )
 
     try:
         async with aiofiles.open(destination, "wb") as output_file:
@@ -205,13 +205,14 @@ async def save_upload_stream(upload_file: UploadFile, destination: Path) -> None
                     )
 
                 await output_file.write(chunk)
-
+        
         logger.info(
             "[main.py][save_upload_stream] completed file=%s destination=%s total_written=%d",
             upload_file.filename,
             str(destination),
             total_written,
         )
+        logger.info("============================================================")
 
     except HTTPException:
         raise
@@ -581,7 +582,7 @@ async def upload(
         files: list[UploadFile] = File(...),
         x_user_id: str | None = Header(default=None),
 ):
-    require_user(x_user_id)
+    user_id = require_user(x_user_id)
 
     if not files:
         raise HTTPException(status_code=400, detail="files are required")
@@ -596,9 +597,6 @@ async def upload(
             status_code=400,
             detail=f"max {settings.max_files_per_request} files are allowed",
         )
-
-    ensure_dir(upload_dir)
-    logger.info("[main.py][upload] ensure_dir completed upload_dir=%s", str(upload_dir))
 
     saved_filenames: list[str] = []
     upload_name_map: dict[str, str] = {}
@@ -616,34 +614,41 @@ async def upload(
                 status_code=400,
                 detail=f"unsupported upload extension: {upload_file.filename}",
             )
+        sanitized_name = safe_filename(upload_file.filename) # 안전한 파일명으로 변환
 
-        sanitized_name = safe_filename(upload_file.filename)
-        destination = upload_dir / sanitized_name
+        user_upload_dir = upload_dir / user_id
+        ensure_dir(user_upload_dir)            # 해당 경로 directory 생성
 
-        logger.info(
-            "[main.py][upload] saving file original_name=%s sanitized_name=%s destination=%s",
-            upload_file.filename,
-            sanitized_name,
-            str(destination),
-        )
+        destination = user_upload_dir / sanitized_name
+        
+        if destination.is_dir():
+            logger.warning(
+                "[main.py][upload] removing existing directory before save file=%s destination=%s",
+                upload_file.filename,
+                str(destination),
+            )
+            shutil.rmtree(destination, ignore_errors=True)
+        
+        # logger.info("destination path ::: %s", destination)
 
         await save_upload_stream(upload_file, destination)
         saved_filenames.append(sanitized_name)
         upload_name_map[sanitized_name] = str(destination)
 
-        logger.info(
-            "[main.py][upload] saved file original_name=%s sanitized_name=%s",
-            upload_file.filename,
-            sanitized_name,
-        )
+        # logger.info(
+        #     "[main.py][upload] saved file original_name=%s sanitized_name=%s",
+        #     upload_file.filename,
+        #     sanitized_name,
+        # )
 
-    raw_targets = await run_in_threadpool(process_uploads_and_collect, upload_dir, saved_filenames)
+    raw_targets = await run_in_threadpool(process_uploads_and_collect, destination, saved_filenames, user_id)
 
-    logger.info(
-        "[main.py][upload] process_uploads_and_collect completed saved_file_count=%d raw_target_count=%d",
-        len(saved_filenames),
-        len(raw_targets or []),
-    )
+    # logger.info(
+    #     "[main.py][upload] process_uploads_and_collect completed saved_file_count=%d raw_target_count=%d",
+    #     len(saved_filenames),
+    #     len(raw_targets or []),
+    # )
+    # logger.info("============================================================")
 
     projects_created: dict[str, dict[str, str]] = {}
     normalized_targets: list[dict[str, Any]] = []
@@ -662,6 +667,7 @@ async def upload(
             saved_path,
             getattr(target, "extension", None),
         )
+        logger.info("============================================================")
 
         if project_id and project_id not in projects_created:
             origin_saved_path = upload_name_map.get(root_container_name or "", "")
@@ -669,12 +675,13 @@ async def upload(
                 "project_name": project_name or "",
                 "saved_path": origin_saved_path,
             }
-            logger.info(
-                "[main.py][upload] project created project_id=%s project_name=%s root_container_name=%s",
-                project_id,
-                project_name,
-                root_container_name,
-            )
+            # logger.info(
+            #     "[main.py][upload] project created project_id=%s project_name=%s root_container_name=%s",
+            #     project_id,
+            #     project_name,
+            #     root_container_name,
+            # )
+            # logger.info("============================================================")
 
         normalized_targets.append(
             {
@@ -691,30 +698,26 @@ async def upload(
             }
         )
 
-    logger.info(
-        "[main.py][upload] normalized targets completed project_count=%d target_count=%d",
-        len(projects_created),
-        len(normalized_targets),
-    )
+    # logger.info(
+    #     "[main.py][upload] normalized targets completed project_count=%d target_count=%d",
+    #     len(projects_created),
+    #     len(normalized_targets),
+    # )
+    # logger.info("============================================================")
 
     for project_id, project_info in projects_created.items():
         try:
             # SQLite에 업로드된 파일 정보 저장.
-            save_uploaded_file(project_id, project_info["project_name"], project_info["saved_path"])
-            logger.info(
-                "[main.py][upload] save_uploaded_file completed project_id=%s project_name=%s saved_path=%s",
-                project_id,
-                project_info["project_name"],
-                project_info["saved_path"],
-            )
+            save_uploaded_file(project_id, project_info["project_name"], user_id, project_info["saved_path"])
         except Exception as error:
-            logger.exception("[main.py][upload] save_uploaded_file failed project_id=%s error=%s", project_id, error)
+            logger.exception("save_uploaded_file failed user_id=%s, project_id=%s error=%s", user_id, project_id, error)
 
-    logger.info(
-        "[main.py][upload] completed project_count=%d target_count=%d",
-        len(projects_created),
-        len(normalized_targets),
-    )
+    # logger.info(
+    #     "[main.py][upload] completed project_count=%d target_count=%d",
+    #     len(projects_created),
+    #     len(normalized_targets),
+    # )
+    # logger.info("============================================================")
 
     return {
         "targets": normalized_targets,
@@ -739,13 +742,12 @@ async def create_job(
         raise HTTPException(status_code=400, detail="targets are required")
 
     logger.info("[main.py][create_job] raw targets count=%d", len(targets))
+    logger.info("============================================================")
 
     normalized_targets = [normalize_target_item(target) for target in targets]
     first_target = normalized_targets[0]
     project_id = first_target.get("project_id")
     project_name = first_target.get("project_name")
-
-    logger.info("target 생성 건수 : %s", len(normalized_targets))
 
     job_id = str(uuid.uuid4())
     create_index_job(
@@ -757,22 +759,24 @@ async def create_job(
         message="queued",
     )
 
-    logger.info(
-        "[main.py][create_job] create_index_job completed job_id=%s project_id=%s project_name=%s total_targets=%d",
-        job_id,
-        project_id,
-        project_name,
-        len(normalized_targets),
-    )
+    # logger.info(
+    #     "[main.py][create_job] create_index_job completed job_id=%s project_id=%s project_name=%s total_targets=%d",
+    #     job_id,
+    #     project_id,
+    #     project_name,
+    #     len(normalized_targets),
+    # )
+    # logger.info("============================================================")
 
     rag_service = get_rag_service(request)
     background_tasks.add_task(run_index_job, rag_service, job_id, normalized_targets)
 
-    logger.info(
-        "[main.py][create_job] background task registered job_id=%s target_count=%d",
-        job_id,
-        len(normalized_targets),
-    )
+    # logger.info(
+    #     "[main.py][create_job] background task registered job_id=%s target_count=%d",
+    #     job_id,
+    #     len(normalized_targets),
+    # )
+    # logger.info("============================================================")
 
     return {
         "job_id": job_id,
@@ -811,9 +815,14 @@ def get_index_job_detail(
 # ── Projects ──────────────────────────────────────────────────
 
 @app.get("/projects")
-def get_projects():
+def get_projects(
+    x_user_id: str | None = Header(default=None),
+):
+    """사용자별 프로젝트 목록 조회"""
+    user_id = require_user(x_user_id)
+
     try:
-        projects = get_all_projects()
+        projects = get_all_projects(user_id)
         normalized = [normalize_project_item(project) for project in projects]
         return {
             "projects": normalized,
@@ -829,11 +838,12 @@ def get_project(
         project_name: str,
         x_user_id: str | None = Header(default=None),
 ):
-    """프로젝트명으로 기존 project_id 조회 (중복 확인용)"""
+    """사용자별 프로젝트명으로 기존 project_id 조회 (중복 확인용)"""
+    user_id = require_user(x_user_id)
     name = (project_name or "").strip()
     logger.info("/projects/%s 진입", name)
     try:
-        exists = get_project_by_name(project_name=name)
+        exists = get_project_by_name(user_id=user_id, project_name=name)
         dup_project_id = exists.get("project_id") if exists else None
         logger.info("중복 확인 dup_project_id : %s", dup_project_id)
         return {"project_id": dup_project_id, "exists": dup_project_id is not None}
@@ -850,21 +860,40 @@ def delete_project(
         project_id: str,
         x_user_id: str | None = Header(default=None),
 ):
-    """project_id 관련 모든 데이터 삭제 (SQLite 전 테이블 + Qdrant)."""
-    logger.info("프로젝트 삭제 진입 project_id=%s", project_id)
+    """프로젝트 모든 데이터 삭제 (SQLite 전 테이블 + Qdrant)."""
+    user_id = require_user(x_user_id)
+    logger.info("프로젝트 삭제 진입 user_id=%s, project_id=%s", user_id, project_id)
 
     if not project_id:
         raise HTTPException(status_code=400, detail="project_id is required !!!")
 
     try:
+        project = get_project_by_id(project_id=project_id)
+        pname = project.get("project_name") if project else None
+        saved_path = Path(project.get("saved_path") if project else None)
+
         deleted = {
-            "chat_history":   delete_history(project_id=project_id), # 히스토리 삭제
+            "chat_history":   delete_history(project_id=project_id),       # 히스토리 삭제
             "uploaded_files": delete_uploaded_file(project_id=project_id), # 업로드 파일정보 삭제
-            "file_index":     delete_file_index(project_id=project_id),   # 업로드 파일정보 삭제
+            "file_index":     delete_file_index(project_id=project_id),    # 업로드 파일정보 삭제
             "index_jobs":     delete_index_job(project_id=project_id),
             "code_elements":  delete_code_elements(project_id=project_id),
             "turn_entities":  delete_turn_entities(project_id=project_id),
         }
+
+        target_extract_dir = extract_dir / user_id / pname
+
+        try:
+            if saved_path.exists() and saved_path.is_file():
+                saved_path.unlink()  # 파일 삭제
+        except Exception:
+            logger.exception("failed to remove upload file: %s", saved_path)
+
+        try:
+            if target_extract_dir.exists() and target_extract_dir.is_dir():
+                shutil.rmtree(target_extract_dir)
+        except Exception:
+            logger.exception("failed to remove extracted file: %s", target_extract_dir)
 
         # Qdrant 벡터 삭제
         qdrant_deleted = 0
@@ -875,7 +904,7 @@ def delete_project(
             logger.warning("Qdrant delete_by_project_id failed (non-fatal): %s", qerr)
 
         deleted["qdrant_vectors"] = qdrant_deleted
-        logger.info("delete_project done pid=%s deleted=%s", project_id, deleted)
+        logger.info("delete_project done user_id=%s pid=%s deleted=%s", user_id, project_id, deleted)
         return {"deleted": deleted, "old_project_id": project_id}
 
     except HTTPException:
@@ -893,15 +922,6 @@ async def ask(
         payload: dict[str, Any] = Body(...),
         x_user_id: str | None = Header(default=None),
 ):
-    # pgy : 확인용[payload]
-    # "question": question,
-    # "top_k": 5,
-    #  project_id
-    #  project_name
-    # "extra_context": "",  --> extract_context 는 없음.
-
-    # read csv and plot graph
-
     user_id = require_user(x_user_id)
 
     question = (payload.get("question") or "").strip()
@@ -1016,78 +1036,7 @@ def clear_history(
         x_user_id: str | None = Header(default=None),
         project_id: str = None,
 ):
-    user_id = require_user(x_user_id)
     logger.info("@app.delete(/history) 진입!!!")
-    deleted = delete_history(user_id=user_id, project_id=project_id)
+    deleted = delete_history(project_id=project_id)
     return {"deleted": deleted}
 
-
-# ── DB Admin ─────────────────────────────────────────────────
-
-@app.get("/db/tables")
-def db_tables():
-    rows = list_db_tables()
-    return {
-        "tables": [normalize_table_item(row) for row in rows],
-        "count": len(rows),
-    }
-
-
-@app.get("/db/tables/{table_name}")
-def db_table_rows(
-        table_name: str,
-        limit: int = Query(default=200, ge=1, le=1000),
-):
-    try:
-        rows = get_table_rows_for_admin(table_name, limit)
-        return {
-            "table_name": table_name,
-            "rows": rows,
-            "count": len(rows),
-        }
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-
-
-# ── Reset ─────────────────────────────────────────────────────
-
-@app.delete("/reset")
-def reset_all_data(
-        confirm_text: str = Query(default=""),
-):
-    if confirm_text != "RESET":
-        raise HTTPException(status_code=400, detail="confirm_text=RESET is required")
-
-    try:
-        result = purge_all_runtime_data()
-
-        rag_service = getattr(app.state, "rag_service", None)
-        if rag_service is not None:
-            try:
-                rag_service.qdrant_service.recreate_collection(
-                    rag_service.embedding_service.dimension
-                )
-            except Exception as error:
-                logger.exception("qdrant reset failed: %s", error)
-                result["qdrant_reset_error"] = str(error)
-
-        for path in upload_dir.glob("*"):
-            try:
-                if path.is_file():
-                    path.unlink(missing_ok=True)
-            except Exception:
-                logger.exception("failed to remove upload file: %s", path)
-
-        for path in extract_dir.glob("*"):
-            try:
-                if path.is_file():
-                    path.unlink(missing_ok=True)
-            except Exception:
-                logger.exception("failed to remove extracted file: %s", path)
-
-        result["reset"] = True
-        return result
-
-    except Exception as error:
-        logger.exception("reset_all_data failed")
-        raise HTTPException(status_code=500, detail=f"reset failed: {error}") from error

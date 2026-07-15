@@ -71,8 +71,8 @@ class QdrantService:
         points: list[PointStruct] = []
 
         for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
-            point_id = hashlib.md5(
-                f"{chunk.get('project_name','')}|{chunk.get('relative_path','')}|{chunk.get('chunk_index', index)}".encode()
+            point_id = hashlib.md5( # project_id 로 관리
+                f"{chunk.get('project_id','')}|{chunk.get('relative_path','')}|{chunk.get('chunk_index', index)}".encode()
             ).hexdigest()
 
             payload = {
