@@ -6,14 +6,20 @@ from typing import Any
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import (
-    Distance,
-    FieldCondition,
-    FilterSelector,
-    Filter,
-    MatchValue,
-    PointStruct,
-    VectorParams,
-    SparseVectorParams,
+    Distance,            # 벡터 간 거리 계산 방식 (COSINE, DOT, EUCLID 등)
+    FieldCondition,      # payload(메타데이터) 필터 조건 1개 정의
+    FilterSelector,      # 필터를 지정하여 삭제/조회 등에서 사용할 대상 선택
+    Filter,              # 여러 FieldCondition을 조합한 전체 필터
+    MatchValue,          # 특정 값과 일치하는 조건 (예: file_type="py")
+    PointStruct,         # Qdrant에 저장할 데이터(벡터 + payload + id)
+    VectorParams,        # Dense Vector 컬렉션 생성 시 벡터 크기, 거리 방식 설정
+
+    #######검색강화
+    SparseVectorParams,  # Sparse Vector(BM25 등) 설정
+    Fusion,              # Dense + Sparse 검색 결과를 결합하는 방식(RRF 등)
+    FusionQuery,         # Hybrid Search(Dense + Sparse)를 수행하는 쿼리
+    Prefetch,            # Fusion 검색 전 각각(Dense/Sparse) 미리 검색할 조건
+    SparseVector,        # Sparse Vector(인덱스, 값) 데이터 구조
 )
 
 from config import Settings
@@ -86,7 +92,7 @@ class QdrantService:
                     "dense": VectorParams(size=vector_size, distance=Distance.COSINE),
                 },
                 sparse_vectors_config={
-                    "sparse": SparseVectorParams(),
+                    "sparse": self._sparse_vector_params(),
                 },
             )
             logger.info(
@@ -122,7 +128,7 @@ class QdrantService:
                 "dense": VectorParams(size=vector_size, distance=Distance.COSINE),
             },
             sparse_vectors_config={
-                "sparse": SparseVectorParams(),
+                "sparse": self._sparse_vector_params(),
             },
         )
 
@@ -267,6 +273,46 @@ class QdrantService:
             )
             return 0
 
+    #sparse 변환 헬퍼
+    def _sparse_vector_params(self) -> SparseVectorParams:
+        """
+        sparse 벡터 설정 반환.
+        - sparse_embedding_model == 'Qdrant/bm25' 인 경우 Modifier.IDF 를 적용하여
+          진짜 BM25 점수(Inverse Document Frequency 가중) 가 나오도록 구성.
+        - 그 외 모델은 기본값 사용.
+        주의: modifier 변경은 컬렉션 재생성 + 재인덱싱이 필요 (기존 컬렉션 스키마는 유지됨).
+        """
+        sparse_model = str(getattr(self.settings, "sparse_embedding_model", "") or "").lower()
+        if sparse_model == "qdrant/bm25":
+            return SparseVectorParams(modifier=Modifier.IDF)
+        return SparseVectorParams()
+
+    def _to_qdrant_sparse_vector(self, sparse_query_vector: Any) -> SparseVector | None:
+        """
+        fastembed sparse 결과(.indices/.values)를 Qdrant SparseVector 로 변환한다.
+        indices/values 가 numpy array 인 경우 tolist() 로 list 로 정규화.
+        비어있거나 None 이면 None 반환 (→ dense-only fallback).
+        """
+        if sparse_query_vector is None:
+            return None
+
+        indices = getattr(sparse_query_vector, "indices", None)
+        values = getattr(sparse_query_vector, "values", None)
+
+        if indices is None or values is None:
+            return None
+
+        indices = indices.tolist() if hasattr(indices, "tolist") else list(indices)
+        values = values.tolist() if hasattr(values, "tolist") else list(values)
+
+        if not indices or not values:
+            return None
+
+        return SparseVector(
+            indices=[int(i) for i in indices],
+            values=[float(v) for v in values],
+        )
+
     def search(
             self,
             dense_query_vector: list[float],
@@ -321,32 +367,99 @@ class QdrantService:
             query_filter is not None,
             )
 
-        try:
-            logger.info(
-                "[qdrant_service.py][search][query_points(dense) 호출 시작 ★] collection=%s using=%s limit=%d",
-                self.settings.qdrant_collection,
-                "dense",
-                max(1, top_k),
-            )
+        limit = max(1, top_k)
+        sparse_vector = self._to_qdrant_sparse_vector(sparse_query_vector)
+        # config 의 hybrid_enabled(기본 True) 가 켜져있고 sparse 질의 벡터가 있으면
+        # sparse(BM25) + dense(vector) 를 Qdrant RRF 로 퓨전(hybrid) 검색.
+        hybrid_enabled = getattr(self.settings, "hybrid_enabled", True)
 
-            response = self.client.query_points(
-                collection_name=self.settings.qdrant_collection,
-                query=dense_query_vector,
-                using="dense",
-                query_filter=query_filter,
-                limit=max(1, top_k),
-                with_payload=True,
-                with_vectors=False,
-            )
+        retrieval_mode = "dense_only"
+
+        try:
+            if hybrid_enabled and sparse_vector is not None and dense_query_vector:
+                prefetch_limit = max(limit * 2, 20)
+
+                logger.info(
+                    "[qdrant_service.py][search][query_points(hybrid RRF) 호출 시작 ★] collection=%s prefetch_limit=%d final_limit=%d",
+                    self.settings.qdrant_collection,
+                    prefetch_limit,
+                    limit,
+                )
+
+                try:
+                    response = self.client.query_points(
+                        collection_name=self.settings.qdrant_collection,
+                        prefetch=[
+                            # sparse(BM25) 후보
+                            Prefetch(
+                                query=sparse_vector,
+                                using="sparse",
+                                filter=query_filter,
+                                limit=prefetch_limit,
+                            ),
+                            # dense(vector) 후보
+                            Prefetch(
+                                query=dense_query_vector,
+                                using="dense",
+                                filter=query_filter,
+                                limit=prefetch_limit,
+                            ),
+                        ],
+                        # RRF(Reciprocal Rank Fusion) 로 두 후보군 병합
+                        query=FusionQuery(fusion=Fusion.RRF),
+                        query_filter=query_filter,
+                        limit=limit,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    retrieval_mode = "hybrid_rrf"
+                except Exception:
+                    # hybrid 호출 실패 시 dense-only 로 fallback
+                    logger.exception(
+                        "[qdrant_service.py][search][hybrid RRF 실패 → dense fallback ★] collection=%s",
+                        self.settings.qdrant_collection,
+                    )
+                    response = self.client.query_points(
+                        collection_name=self.settings.qdrant_collection,
+                        query=dense_query_vector,
+                        using="dense",
+                        query_filter=query_filter,
+                        limit=limit,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    retrieval_mode = "dense_fallback"
+            else:
+                logger.info(
+                    "[qdrant_service.py][search][query_points(dense) 호출 시작 ★] collection=%s using=%s limit=%d hybrid_enabled=%s has_sparse=%s",
+                    self.settings.qdrant_collection,
+                    "dense",
+                    limit,
+                    hybrid_enabled,
+                    sparse_vector is not None,
+                    )
+
+                response = self.client.query_points(
+                    collection_name=self.settings.qdrant_collection,
+                    query=dense_query_vector,
+                    using="dense",
+                    query_filter=query_filter,
+                    limit=limit,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                retrieval_mode = "dense_only"
 
             hits: list[dict[str, Any]] = []
             for result in response.points:
                 payload = dict(result.payload or {})
                 payload["score"] = float(result.score)
+                payload["retrieval_mode"] = retrieval_mode
                 hits.append(payload)
 
             logger.info(
-                "[qdrant_service.py][search][query_points(dense) 호출 완료 ★] hit_count=%d",
+                "[qdrant_service.py][search][query_points 호출 완료 ★] retrieval_mode=%s hit_count=%d",
+                retrieval_mode,
                 len(hits),
             )
 
@@ -354,7 +467,8 @@ class QdrantService:
 
         except Exception as e:
             logger.exception(
-                "[qdrant_service.py][search][query_points(dense) 실패 ★] error_type=%s error=%s",
+                "[qdrant_service.py][search][query_points 실패 ★] retrieval_mode=%s error_type=%s error=%s",
+                retrieval_mode,
                 type(e).__name__,
                 str(e),
             )

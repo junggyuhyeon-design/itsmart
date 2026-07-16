@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 import logging
 
@@ -27,12 +28,21 @@ SYSTEM_EDIT = """너는 업로드된 소스 코드에서 문자열/문구/타이
 - exact match가 보이면 그 파일과 근거 코드를 가장 먼저 제시한다.
 - exact match가 없으면 유사 후보 파일을 제시하고, "정확한 문자열 일치는 미발견"이라고 명확히 말한다.
 - "최신 소스를 달라", "URL을 달라", "레포지토리 주소가 필요하다" 같은 답변은 하지 않는다.
-- 답변은 가능하면 아래 순서를 따른다:
-  1) 변경 전 문자열
-  2) 변경 후 문자열
-  3) 후보 파일 또는 exact match 파일
-  4) 근거 코드
-  5) 적용 방법 또는 주의점
+- [edit_candidates]가 제공되면 이것을 최우선 근거로 사용한다. evidence보다 우선한다.
+- 변경 전/변경 후 값은 새로 추측하지 말고 [edit_candidates]의 값을 그대로 사용한다.
+- 변경 후는 변경 전 라인에서 edit_source(변경 전)를 edit_target(변경 후)으로 치환한 결과여야 한다.
+- [edit_candidates]가 "정확한 문자열 일치 미발견"이면 파일/줄/전후값을 확정하지 말고 그대로 안내한다.
+- 답변은 가능하면 아래 순서/형식을 따른다 (블록형, 표는 긴 코드 라인이 깨지므로 사용하지 않는다):
+
+  ## 변경 대상
+  1) 파일경로
+     - 줄: N
+     - 변경 전: ...
+     - 변경 후: ...
+  2) ...
+
+  ## 적용 방법
+  - 위 각 라인의 변경 전 문자열을 변경 후 문자열로 치환
 - evidence가 부족해도, 현재 evidence 안에서 확인 가능한 범위까지는 반드시 안내한다.
 - 가능하면 한국어로 자세히 설명한다.
 """
@@ -217,7 +227,23 @@ class PromptBuilder:
             extension = (hit.get("extension") or "").lower().strip(".")
             language = ext_lang_map.get(extension, "")
 
-            lines.append(f"[evidence {index}] {relative_path}")
+            # edit grep hit 는 줄 번호(matched_line/start_line~end_line)를 헤더에 명시
+            line_meta = ""
+            matched_line = hit.get("matched_line")
+            start_line = hit.get("start_line")
+            end_line = hit.get("end_line")
+            if matched_line:
+                line_meta = f" (line {matched_line})"
+            elif start_line and end_line:
+                line_meta = f" (lines {start_line}-{end_line})"
+            elif start_line:
+                line_meta = f" (line {start_line})"
+
+            match_type = hit.get("match_type")
+            if match_type:
+                line_meta += f" [{match_type}]" if not line_meta else f" [{match_type}]"
+
+            lines.append(f"[evidence {index}] {relative_path}{line_meta}")
             lines.append(f"```{language}" if language else "```")
             lines.append(text)
             lines.append("```")
@@ -227,6 +253,139 @@ class PromptBuilder:
 
         logger.info(
             "[prompt_builder.py][build_chunk_context][3.완료] context_len=%d preview=%s",
+            len(result),
+            _preview_text(result, 300),
+        )
+        return result
+
+    def _replace_literal_case_insensitive(
+            self,
+            line: str,
+            edit_source: str,
+            edit_target: str,
+            *,
+            replace_all: bool = False,
+    ) -> tuple[str, int]:
+        """
+        line 내에서 edit_source 를 edit_target 으로 치환 (대소문자 무시 리터럴).
+        grep 이 대소문자 무시로 매칭하므로 원문 casing 이 다를 수 있어 case-insensitive 로 처리.
+        반환: (치환된 라인, 치환 횟수)
+        - replace_all=False: 한 라인에서 첫 1회만 치환 (edit_text_one)
+        - replace_all=True: 한 라인의 모든 발생 치환 (edit_text_all)
+        """
+        if not line or not edit_source or edit_target is None:
+            return line, 0
+
+        pattern = re.compile(re.escape(edit_source), re.IGNORECASE)
+        count = 0 if replace_all else 1
+        return pattern.subn(edit_target, line, count=count)
+
+    def _extract_marked_line(self, text: str) -> str:
+        """
+        exact_grep hit 의 text(snippet) 에서 >> 표시된 매칭 라인을 추출.
+        snippet 형식: ">> L12: <line content>"
+        """
+        for line in (text or "").splitlines():
+            match = re.match(r"\s*>>\s*L\d+:\s(.*)$", line)
+            if match:
+                return match.group(1).rstrip()
+        return ""
+
+    def build_edit_candidates(
+            self,
+            hits: list[dict[str, Any]],
+            *,
+            edit_source: str | None,
+            edit_target: str | None,
+            query_type: str,
+    ) -> str:
+        """
+        edit 계열 요청에서 각 exact_grep hit 의
+        파일/줄/변경전/변경후 를 deterministic 하게 계산하여 구조화된 블록으로 반환.
+        - 변경후는 변경전 라인에서 edit_source→edit_target 치환한 결과 (LLM 이 추측하지 않음).
+        - exact_grep hit(match_type=="exact_grep")만 확정 변경 대상으로 사용.
+          vector fallback hit(match_type 이 exact_line/substring_line 등)은 "유사 후보" 표시.
+        """
+        logger.info(
+            "[prompt_builder.py][build_edit_candidates][1.시작] hits_count=%d query_type=%s has_source=%s has_target=%s",
+            len(hits or []),
+            query_type,
+            bool(edit_source),
+            edit_target is not None,
+            )
+
+        if query_type not in {"edit_text_one", "edit_text_all"}:
+            return ""
+
+        if not edit_source or edit_target is None:
+            return (
+                "변경 전/후 문자열 파싱 실패.\n"
+                "변경 파일/줄/전후값을 확정하지 말고, 사용자에게 변경 전/후 문자열을 다시 확인해야 한다."
+            )
+
+        exact_hits = [
+            hit for hit in (hits or [])
+            if (hit.get("match_type") or "") == "exact_grep"
+        ]
+
+        if not exact_hits:
+            # exact_grep hit 이 없으면 확정 불가. match_type 이 있는 비-grep 후보는 유사 후보로만 안내.
+            has_similar = any(
+                (hit.get("match_type") or "") not in {"exact_grep", "", None}
+                for hit in (hits or [])
+            )
+            if has_similar:
+                msg = "정확한 문자열 일치 미발견. 아래 evidence는 유사 후보일 뿐이며, 변경 파일/줄/전후값으로 확정하지 말 것."
+            else:
+                msg = "정확한 문자열 일치 미발견. 변경 파일/줄/전후값을 확정하지 말 것."
+            logger.info(
+                "[prompt_builder.py][build_edit_candidates][2.exact_grep 미발견] has_similar=%s",
+                has_similar,
+            )
+            return msg
+
+        replace_all = query_type == "edit_text_all"
+        lines: list[str] = [f"총 exact match: {len(exact_hits)}건"]
+
+        for index, hit in enumerate(exact_hits, start=1):
+            relative_path = (
+                    hit.get("relative_path")
+                    or hit.get("file_name")
+                    or hit.get("filename")
+                    or "unknown"
+            )
+            matched_line = hit.get("matched_line") or hit.get("start_line") or ""
+            before_line = (
+                    hit.get("line_text")
+                    or self._extract_marked_line(hit.get("text") or "")
+                    or ""
+            ).rstrip()
+
+            after_line, replace_count = self._replace_literal_case_insensitive(
+                before_line,
+                edit_source,
+                edit_target,
+                replace_all=replace_all,
+            )
+
+            lines.append(f"\n[candidate {index}]")
+            lines.append(f"- 파일: {relative_path}")
+            lines.append(f"- 줄: {matched_line}")
+            lines.append(f"- match_type: {hit.get('match_type') or ''}")
+            lines.append(f"- 변경 전: {before_line}")
+
+            if replace_count > 0:
+                lines.append(f"- 변경 후: {after_line}")
+                lines.append(f"- 치환 횟수: {replace_count}")
+            else:
+                lines.append("- 변경 후: (치환 실패: 해당 라인에서 변경 전 문자열을 찾지 못함)")
+                lines.append("- 상태: replace_failed")
+
+        result = "\n".join(lines).strip()
+
+        logger.info(
+            "[prompt_builder.py][build_edit_candidates][3.완료] exact_count=%d result_len=%d preview=%s",
+            len(exact_hits),
             len(result),
             _preview_text(result, 300),
         )
@@ -244,6 +403,8 @@ class PromptBuilder:
             recent_entities: list[dict[str, Any]] | None = None,
             sqlite_context: str = "",
             max_history_chars: int = 4000,
+            edit_source: str | None = None, #변경 파일/줄/전후값 중심 답변 패치
+            edit_target: str | None = None, #변경 파일/줄/전후값 중심 답변 패치
     ) -> list[dict[str, str]]:
         logger.info(
             "[prompt_builder.py][build_messages][1.시작] query_type=%s project_name=%s question_len=%d hits_count=%d struct_context_len=%d chat_history_count=%d recent_entities_count=%d sqlite_context_len=%d question_preview=%s",
@@ -292,11 +453,40 @@ class PromptBuilder:
                 "[instruction]\n"
                 "이번 요청은 문자열/타이틀/문구 수정 요청이다.\n"
                 "설명형 답변보다 변경 위치 안내를 우선한다.\n"
-                "정확한 문자열 일치가 있으면 exact match 파일을 먼저 제시하고,\n"
-                "없으면 유사 후보 파일과 이유를 제시한다.\n"
-                "답변은 가능하면 '변경 전 / 변경 후 / 후보 파일 / 근거 코드 / 적용 방법' 순서로 정리한다."
+                "[edit_candidates]가 제공되면 그것이 최우선 근거이며 evidence보다 우선한다.\n"
+                "변경 전/후 값은 추측하지 말고 [edit_candidates]의 값을 그대로 사용한다.\n"
+                "변경 후는 변경 전 라인에서 edit_source를 edit_target으로 치환한 결과다.\n"
+                "[edit_candidates]가 '정확한 문자열 일치 미발견'이면 파일/줄/전후값을 확정하지 않는다.\n"
+                "답변은 '## 변경 대상(파일/줄/변경 전/변경 후) → ## 적용 방법' 블록형으로 정리한다."
             )
             logger.info("[prompt_builder.py][build_messages][4.edit instruction 추가] query_type=%s", query_type)
+
+            # [edit_pair]: 변경 전(검색어)/변경 후(치환값) 명시
+            if edit_source or edit_target is not None:
+                parts.append(
+                    "[edit_pair]\n"
+                    f"변경 전(검색어): {edit_source or ''}\n"
+                    f"변경 후(치환값): {edit_target if edit_target is not None else ''}"
+                )
+                logger.info(
+                    "[prompt_builder.py][build_messages][4-1.edit_pair 추가] edit_source_len=%d has_target=%s",
+                    len(edit_source or ""),
+                    edit_target is not None,
+                    )
+
+            # [edit_candidates]: 각 exact_grep hit 의 파일/줄/전후값 (deterministic)
+            edit_candidates = self.build_edit_candidates(
+                hits,
+                edit_source=edit_source,
+                edit_target=edit_target,
+                query_type=query_type,
+            )
+            if edit_candidates:
+                parts.append("[edit_candidates]\n" + edit_candidates)
+                logger.info(
+                    "[prompt_builder.py][build_messages][4-2.edit_candidates 추가] edit_candidates_len=%d",
+                    len(edit_candidates),
+                )
 
         elif wants_structure:
             parts.append(
