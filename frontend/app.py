@@ -1013,7 +1013,7 @@ def render_chat_area():
         if pid:
             c1, c2 = st.columns([1, 1])
             with c1:
-                confirm_key = f"delete_history_{pid}"
+                confirm_key = f"delete_confirm_{pid}"
                 if st.button("🗑 프로젝트 삭제", key="del_action_btn", use_container_width=True):
                     st.session_state[confirm_key] = not st.session_state.get(confirm_key, False)
                     st.rerun()
