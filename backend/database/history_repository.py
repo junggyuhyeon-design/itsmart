@@ -672,3 +672,26 @@ def get_relationship_edges(project_id: str, relation: str | None = None) -> list
     except Exception:
         logger.exception("get_relationship_edges failed project_id=%s relation=%s", project_id, relation)
         return []
+
+
+#exact grep (독립 리터럴 검색)
+def get_project_upload_info(project_id: str) -> dict[str, Any] | None:
+    """
+    project_id 로 업로드 메타(user_id, project_name, saved_path)를 조회.
+    exact grep 이 소스 루트(extract_dir/<user_id>/<project_name> 또는 단일 파일 saved_path)를
+    해석할 때 사용한다.
+    """
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT project_name, user_id, saved_path
+                FROM uploaded_files
+                WHERE project_id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+            return dict(row) if row else None
+    except Exception:
+        logger.exception("get_project_upload_info failed project_id=%s", project_id)
+        return None
