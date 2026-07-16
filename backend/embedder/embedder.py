@@ -29,7 +29,7 @@ class EmbeddingService:
 
     @property
     def dimension(self) -> int:
-        value = self.dense_model.get_sentence_embedding_dimension()
+        value = self.dense_model.get_embedding_dimension()
 
         logger.info(
             "[embedder.py][dimension][차원 조회 ★] dimension=%s",
