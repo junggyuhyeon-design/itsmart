@@ -13,6 +13,7 @@ from rag.diagram_service import DiagramService
 from rag.ollama_service import OllamaService
 from rag.qdrant_service import QdrantService
 from rag.reranker_service import RerankerService  #Reranker
+from rag.exact_grep_service import ExactGrepService  #exact grep (독립 리터럴 검색)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class RAGService:
         self.diagram_service = DiagramService()
         self.chunk_service = ChunkService(settings)
         self.reranker_service = RerankerService(settings)  #Reranker
+        self.exact_grep_service = ExactGrepService(settings)  #exact grep (독립 리터럴 검색)
 
         logger.info(
             "[rag_service.py][__init__] initialized services top_k=%s embedding_dimension=%s",
@@ -690,6 +692,8 @@ class RAGService:
             query_type: str = "qa",
             chat_history: list[dict[str, Any]] | None = None,
             recent_entities: list[dict[str, Any]] | None = None,
+            edit_source: str | None = None, #exact grep (독립 리터럴 검색)
+            edit_target: str | None = None, #step3 변경 후 문자열
     ):
         if top_k is None:
             top_k = self.settings.top_k
@@ -800,15 +804,59 @@ class RAGService:
             len(hits or []),
         )
 
-        # edit 계열 요청이면 exact-first 재정렬
+        # exact grep (독립 리터럴 검색), Reranker
+        # edit 계열 요청: vector 전(우선) exact grep 리터럴 검색 → 최우선 증거로 병합
         if query_type in {"edit_text_one", "edit_text_all"}:
-            hits = self._make_exact_match_hits(hits, retrieval_text)
-            hits = self._make_line_level_exact_hits(hits, retrieval_text)
-            hits = self._flatten_hits(hits)
+            grep_needle = (edit_source or retrieval_text or "").strip()
+
+            # 1) vector 검색과 무관하게 프로젝트 전체 소스에서 리터럴 grep
+            grep_hits: list[dict[str, Any]] = []
+            if grep_needle and project_id:
+                try:
+                    grep_hits = self.exact_grep_service.search(
+                        grep_needle,
+                        project_id=project_id,
+                        project_name=project_name,
+                    )
+                    grep_hits = self._flatten_hits(grep_hits)
+                except Exception:
+                    logger.exception(
+                        "[rag_service.py][ask_with_context_stream] exact grep failed needle=%s",
+                        grep_needle,
+                    )
+                    grep_hits = []
+
+                logger.info(
+                    "[rag_service.py][ask_with_context_stream] exact grep completed query_type=%s grep_hit_count=%d vector_hit_count=%d",
+                    query_type,
+                    len(grep_hits),
+                    len(hits),
+                )
+
+            # 2) vector hit 에 대해서만 기존 exact-first 라인레벨 재정렬 적용
+            #    (grep hit 의 text/line_no 는 그대로 보존하여 step3 정확한 줄/전후값 답변에 사용)
+            vector_hits = self._make_exact_match_hits(hits, grep_needle)
+            vector_hits = self._make_line_level_exact_hits(vector_hits, grep_needle)
+            vector_hits = self._flatten_hits(vector_hits)
+
+            # 3) 병합: grep 결과 최우선. grep hit 있으면 vector 후보는 보조(fallback)로 제한.
+            if grep_hits:
+                if query_type == "edit_text_all":
+                    kept_grep = grep_hits  # 전체 발생 위치 유지
+                else:
+                    kept_grep = grep_hits[:3]  # edit_text_one: 상위 3건
+                target_total = top_k or self.settings.top_k
+                remaining = max(0, target_total - len(kept_grep))
+                hits = kept_grep + vector_hits[:remaining]
+            else:
+                # grep 미발견: vector 후보를 그대로 사용(정확한 문자열 일치 미발견 fallback)
+                hits = vector_hits[: top_k or self.settings.top_k]
+
             logger.info(
-                "[rag_service.py][ask_with_context_stream] exact-first reorder completed query_type=%s hit_count=%d",
+                "[rag_service.py][ask_with_context_stream] exact-first merge completed query_type=%s hit_count=%d grep_count=%d",
                 query_type,
                 len(hits or []),
+                len(grep_hits),
             )
 
         if self.settings.reranker_enabled and hits and query_type not in {"edit_text_one", "edit_text_all"}:
@@ -825,7 +873,10 @@ class RAGService:
             )
         else:
             hits = list(hits or [])
-            hits = hits[: top_k or self.settings.top_k]
+            # edit_text_all 은 grep 발생 위치 전체를 보존 (step3 전체 변경 답변용). 그 외만 top_k 로 절단.
+            if query_type != "edit_text_all":
+                hits = hits[: top_k or self.settings.top_k]
+
             logger.info(
                 "ragservice.py ask_with_context_stream rerank skipped enabled=%s query_type=%s hit_count=%d final_hit_count=%d",
                 self.settings.reranker_enabled,
@@ -867,6 +918,8 @@ class RAGService:
             chat_history=chat_history,
             recent_entities=recent_entities,
             sqlite_context=sqlite_context,
+            edit_source=edit_source, #변경 파일/줄/전후값 중심 답변 패치
+            edit_target=edit_target, #변경 파일/줄/전후값 중심 답변 패치
         )
 
         logger.info(

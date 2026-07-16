@@ -449,6 +449,8 @@ async def call_ask_with_context_stream(
         query_type: str,
         chat_history: list[dict[str, Any]],
         recent_entities: list[dict[str, Any]],
+        edit_source: str | None = None,     #exact grep (독립 리터럴 검색)
+        edit_target: str | None = None,     #변경 파일/줄/전후값 중심 답변 패치
 ):
     return await rag_service.ask_with_context_stream(
         question=question,
@@ -463,6 +465,8 @@ async def call_ask_with_context_stream(
         query_type=query_type,
         chat_history=chat_history,
         recent_entities=recent_entities,
+        edit_source=edit_source,            #exact grep (독립 리터럴 검색)
+        edit_target=edit_target,            #변경 파일/줄/전후값 중심 답변 패치
     )
 
 
@@ -977,6 +981,8 @@ async def ask(
         query_type=intent.query_type,
         chat_history=chat_history,
         recent_entities=recent_entities,
+        edit_source=intent.edit_source,         #exact grep (독립 리터럴 검색)
+        edit_target=intent.edit_target,         #변경 파일/줄/전후값 중심 답변 패치
     )
 
     async def safe_stream():

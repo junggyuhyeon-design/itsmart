@@ -34,6 +34,8 @@ class OllamaService:
             chat_history: list[dict] | None = None,
             recent_entities: list[dict] | None = None,
             sqlite_context: str = "",
+            edit_source: str | None = None, #변경 파일/줄/전후값 중심 답변 패치
+            edit_target: str | None = None, #변경 파일/줄/전후값 중심 답변 패치
     ):
         logger.info(
             "[ollama_service.py][generate_response_stream][1.시작] query_type=%s project_name=%s question_len=%d hits=%d struct_context_len=%d chat_history_count=%d recent_entities_count=%d sqlite_context_len=%d question_preview=%s",
@@ -58,6 +60,8 @@ class OllamaService:
             recent_entities=recent_entities,
             sqlite_context=sqlite_context,
             max_history_chars=self.settings.chat_history_max_chars,
+            edit_source=edit_source, #변경 파일/줄/전후값 중심 답변 패치
+            edit_target=edit_target, #변경 파일/줄/전후값 중심 답변 패치
         )
 
         logger.info(
