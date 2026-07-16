@@ -1004,29 +1004,36 @@ def render_chat_area():
     pname = current_project_name()
 
     # ── 헤더: 제목 + 삭제 버튼 ───────────────────────────────
-    col_title, col_btn = st.columns([4, 1])
+    col_title, col_btn = st.columns([3, 2])
     with col_title:
         st.subheader("질문")
 
     with col_btn:
         # 프로젝트가 선택된 경우에만 삭제 버튼 표시
         if pid:
-            confirm_key = f"delete_confirm_{pid}"
-
-            if st.button("🗑 프로젝트 삭제", key="del_action_btn", use_container_width=True):
-                # 버튼 클릭 시 confirm 플래그 토글
-                st.session_state[confirm_key] = not st.session_state.get(confirm_key, False)
-                st.rerun()
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                confirm_key = f"delete_history_{pid}"
+                if st.button("🗑 프로젝트 삭제", key="del_action_btn", use_container_width=True):
+                    st.session_state[confirm_key] = not st.session_state.get(confirm_key, False)
+                    st.rerun()
+            with c2:
+                confirm_key = f"delete_history_{pid}"
+                if st.button("🗑 히스토리 삭제", key="del_history_btn", use_container_width=True):
+                    st.session_state[confirm_key] = not st.session_state.get(confirm_key, False)
+                    st.rerun()
 
     # ── 삭제 확인 다이얼로그 ─────────────────────────────────
     if pid:
-        confirm_key = f"delete_confirm_{pid}"
-        if st.session_state.get(confirm_key, False):
+
+        confirm_project_key = f"delete_confirm_{pid}"
+        confirm_history_key = f"delete_history_{pid}"
+
+        if st.session_state.get(confirm_project_key, False):
             st.warning(
                 f"⚠️ **'{pname}'** 프로젝트의 모든 데이터(소스·벡터·히스토리·인덱스)를 삭제합니다.\n\n"
                 "이 작업은 되돌릴 수 없습니다."
             )
-
             c1, c2, _ = st.columns([1, 1, 3])
             with c1:
                 if st.button("✅ 확인", key="del_ok_btn", type="primary", use_container_width=True):
@@ -1041,6 +1048,32 @@ def render_chat_area():
                         st.success(f"'{pname}' 프로젝트가 삭제되었습니다.")
                     except Exception as e:
                         st.error(f"프로젝트 삭제 실패: {e}")
+                    time.sleep(0.8)
+                    st.rerun()
+            with c2:
+                if st.button("❌ 취소", key="del_cancel_btn", use_container_width=True):
+                    st.session_state[confirm_key] = False
+                    st.rerun()
+
+        if st.session_state.get(confirm_history_key, False):
+            st.warning(
+                f"⚠️ **'{pname}'** 프로젝트의 히스토리 데이터를 삭제합니다.\n\n"
+                "이 작업은 되돌릴 수 없습니다."
+            )
+            c1, c2, _ = st.columns([1, 1, 3])
+            with c1:
+                if st.button("✅ 확인", key="del_ok_btn", type="primary", use_container_width=True):
+                    st.session_state[confirm_key] = False
+                    try:
+                        r = api_delete(
+                            f"/history/{pid}",
+                            timeout=30,
+                        )
+                        r.raise_for_status()
+                        st.success(f"'{pname}' 히스토리가 삭제되었습니다.")
+                    except Exception as e:
+                        st.error(f"히스토리 삭제 실패: {e}")
+                    fetch_history(project_id=pid, force=True)
                     time.sleep(0.8)
                     st.rerun()
             with c2:
