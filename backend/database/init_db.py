@@ -47,12 +47,13 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS chat_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
                 project_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                history_idx INTEGER NOT NULL,
                 question TEXT NOT NULL,
                 answer TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (project_id, user_id, history_idx)
             )
             """
         )
@@ -84,14 +85,14 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS file_index (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id TEXT NOT NULL,
-                project_name TEXT NOT NULL,
+                file_idx INTEGER NOT NULL,
                 file_name TEXT NOT NULL,
                 relative_path TEXT NOT NULL,
                 extension TEXT NOT NULL,
                 file_size INTEGER DEFAULT 0,
-                indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (project_id, file_idx)
             )
             """
         )
@@ -110,9 +111,7 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS code_elements (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id TEXT NOT NULL,
-                project_name TEXT,
                 file_name TEXT,
                 relative_path TEXT,
                 extension TEXT,
@@ -152,12 +151,13 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS turn_entities (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL,
                 user_id TEXT NOT NULL,
+                entities_idx INTEGER NOT NULL,
                 entity_name TEXT NOT NULL,
                 entity_type TEXT DEFAULT '',
-                project_id TEXT DEFAULT '',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (project_id, user_id, entities_idx)
             )
             """
         )
