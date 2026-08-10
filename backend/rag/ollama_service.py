@@ -72,13 +72,10 @@ class OllamaService:
             _preview_text((messages[-1].get("content") if messages else "") or "", 500),
         )
 
-
-        logger.info("--------------------------규현---------------------------------------------------------------------------")
         logger.info(
             "[ollama_service.py][generate_response_stream][messages 전체 덤프] %s",
             json.dumps(messages, ensure_ascii=False, indent=2),
         )
-        logger.info("--------------------------규현---------------------------------------------------------------------------")
 
         url = f"{self.settings.ollama_base_url}/api/chat"
         payload = {

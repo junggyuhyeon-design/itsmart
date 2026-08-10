@@ -9,7 +9,6 @@ from database.history_repository import bulk_insert_file_index, insert_code_elem
 from embedder.embedder import EmbeddingService
 from parser.chunk_service import ChunkService
 from parser.file_parser import extract_static_analysis, parse_text_file
-from rag.diagram_service import DiagramService
 from rag.ollama_service import OllamaService
 from rag.qdrant_service import QdrantService
 from rag.reranker_service import RerankerService  #Reranker
@@ -24,7 +23,6 @@ class RAGService:
         self.embedding_service = EmbeddingService(settings)
         self.qdrant_service = QdrantService(settings)
         self.ollama_service = OllamaService(settings)
-        self.diagram_service = DiagramService()
         self.chunk_service = ChunkService(settings)
         self.reranker_service = RerankerService(settings)  #Reranker
         self.exact_grep_service = ExactGrepService(settings)  #exact grep (독립 리터럴 검색)
@@ -711,45 +709,6 @@ class RAGService:
             len(chat_history or []),
             len(recent_entities or []),
         )
-
-        # diagram 요청이면 LLM 대신 mermaid를 바로 생성 시도
-        if query_type == "diagram" and project_id:
-            try:
-                q = (question or "").lower()
-
-                logger.info(
-                    "[rag_service.py][ask_with_context_stream] diagram branch entered project_id=%s question=%s",
-                    project_id,
-                    question,
-                )
-
-                if any(token in q for token in ["erd", "db", "table", "schema", "mermaid"]):
-                    logger.info(
-                        "[rag_service.py][ask_with_context_stream] build_table_erd called project_id=%s",
-                        project_id,
-                    )
-                    mermaid = self.diagram_service.build_table_erd(project_id)
-                else:
-                    logger.info(
-                        "[rag_service.py][ask_with_context_stream] build_flow_mermaid called project_id=%s",
-                        project_id,
-                    )
-                    mermaid = self.diagram_service.build_flow_mermaid(project_id)
-
-                if mermaid and len(mermaid.splitlines()) > 1:
-                    logger.info(
-                        "[rag_service.py][ask_with_context_stream] diagram generated line_count=%d",
-                        len(mermaid.splitlines()),
-                    )
-
-                    async def mermaid_generator():
-                        yield "```mermaid\n"
-                        yield mermaid
-                        yield "\n```"
-
-                    return mermaid_generator(), []
-            except Exception as error:
-                logger.warning("[rag_service.py][ask_with_context_stream] DiagramService fallback to LLM error=%s", error)
 
         # 검색용 질의문 결정
         retrieval_text = (retrieval_question or question or "").strip()

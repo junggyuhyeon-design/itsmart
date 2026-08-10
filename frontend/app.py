@@ -1,4 +1,5 @@
 import os
+import html
 import re
 import time
 from datetime import datetime
@@ -223,84 +224,141 @@ def api_delete(path: str, params: dict | None = None, timeout: int = 30):
 # ─────────────────────────────────────────────
 # Mermaid 코드 추출 및 렌더링
 # ─────────────────────────────────────────────
+
 def extract_mermaid_blocks(text: str) -> list[str]:
+    """
+    응답 전체에서 ```mermaid ... ``` 코드 블록 내부만 추출한다.
+
+    Mermaid 엔진에는 일반 설명 문장, Markdown 코드 펜스가 아닌
+    Mermaid 본문만 전달해야 한다.
+    """
     if not text:
         return []
+
+    matches = re.findall(
+        r"```mermaid\s*\n(.*?)```",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
     return [
         match.strip()
-        for match in re.findall(r"```mermaid\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+        for match in matches
+        if match and match.strip()
     ]
 
 
 def strip_mermaid_blocks(text: str) -> str:
+    """
+    Mermaid 코드 블록을 제거하고 일반 설명 Markdown만 남긴다.
+    """
     if not text:
         return ""
-    return re.sub(r"```mermaid\s*.*?```", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+
+    return re.sub(
+        r"```mermaid\s*\n.*?```",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
 
 
-def render_mermaid(mermaid_code: str, height: int = 650):
-    safe_code = (
-        mermaid_code.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
+def is_valid_mermaid_start(code: str) -> bool:
+    """
+    Mermaid 세부 문법은 브라우저 Mermaid 라이브러리가 검사한다.
+    여기서는 다이어그램 선언만 최소 확인한다.
+    """
+    if not code:
+        return False
+
+    code = code.strip()
+
+    valid_prefixes = (
+        "flowchart ",
+        "graph ",
+        "erDiagram",
+        "sequenceDiagram",
+        "classDiagram",
+        "stateDiagram",
+        "stateDiagram-v2",
     )
 
-    html = f"""
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8"/>
-        <script type="module">
-          import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
-          mermaid.initialize({{
-            startOnLoad: true,
-            securityLevel: 'loose',
-            theme: 'default',
-            flowchart: {{ useMaxWidth: true, htmlLabels: true }},
-            er: {{ useMaxWidth: true }},
-            sequence: {{ useMaxWidth: true }}
-          }});
-        </script>
-        <style>
-          html, body {{ margin:0; padding:0; background:#fff; }}
-          body {{ padding:8px; }}
-          .wrap {{
-            width:100%;
-            overflow:auto;
-            border:1px solid #e5e7eb;
-            border-radius:8px;
-            padding:12px;
-            box-sizing:border-box;
-            background:#fff;
-          }}
-          .mermaid {{ min-width:900px; }}
-        </style>
-      </head>
-      <body>
-        <div class="wrap">
-          <pre class="mermaid">{safe_code}</pre>
-        </div>
-      </body>
-    </html>
+    return code.startswith(valid_prefixes)
+
+
+def render_mermaid_code(code: str, height: int = 650) -> bool:
     """
-    components.html(html, height=height, scrolling=True)
+    Mermaid 코드 본문만 SVG 다이어그램으로 렌더링한다.
+
+    정상 입력 예시:
+        flowchart LR
+            A --> B
+
+    비정상 입력 예시:
+        설명 문장
+        ```mermaid
+        flowchart LR
+        ```
+    """
+    code = (code or "").strip()
+
+    if not is_valid_mermaid_start(code):
+        return False
+
+    escaped_code = html.escape(code)
+
+    components.html(
+        f"""
+        <div class="mermaid">
+{escaped_code}
+        </div>
+
+        <script type="module">
+            import mermaid from
+                "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+
+            mermaid.initialize({{
+                startOnLoad: true,
+                securityLevel: "strict",
+                theme: "default"
+            }});
+        </script>
+        """,
+        height=height,
+        scrolling=True,
+    )
+
+    return True
 
 
-def render_answer(content: str):
+def render_answer(content: str) -> None:
+    """
+    채팅 답변을 일반 텍스트와 Mermaid 코드로 분리 출력한다.
+    Mermaid 오류의 핵심 방지 로직이다.
+    """
+    content = content or ""
+
     text_part = strip_mermaid_blocks(content)
     mermaid_blocks = extract_mermaid_blocks(content)
 
     if text_part:
         st.markdown(text_part)
 
-    for index, block in enumerate(mermaid_blocks, start=1):
-        st.caption(f"Diagram {index}")
-        render_mermaid(block)
+    for index, mermaid_code in enumerate(mermaid_blocks, start=1):
+        if len(mermaid_blocks) > 1:
+            st.caption(f"Diagram {index}")
 
+        rendered = render_mermaid_code(
+            code=mermaid_code,
+            height=650,
+        )
 
-# ─────────────────────────────────────────────
-# 유틸
-# ─────────────────────────────────────────────
+        if not rendered:
+            st.warning("Mermaid 다이어그램 시작 형식을 확인할 수 없습니다.")
+            st.code(
+                mermaid_code,
+                language="mermaid",
+            )
 
 def parse_created_at_to_ts(value: str | None) -> float:
     if not value:
@@ -945,7 +1003,7 @@ def render_upload_area():
 def ask_backend(question: str, project_name: str | None, project_id: str | None) -> str:
     payload = {
         "question": question,
-        "top_k": 5,
+        "top_k": 15,
         "extra_context": "",
     }
 

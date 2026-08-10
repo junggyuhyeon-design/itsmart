@@ -80,11 +80,23 @@ def user_exists(user_id: str) -> bool:
 
 def save_history(user_id: str, project_id: str, question: str, answer: str) -> int:
     with get_connection() as conn:
-        cur = conn.execute(
-            "INSERT INTO chat_history (user_id, project_id, question, answer) VALUES (?, ?, ?, ?)",
-            (user_id, project_id, question, answer),
+        row = conn.execute(
+            """
+            SELECT COALESCE(MAX(history_idx), 0) + 1 AS next_idx
+            FROM chat_history
+            WHERE project_id = ? AND user_id = ?
+            """,
+            (project_id, user_id),
+        ).fetchone()
+        next_idx = int(row["next_idx"])
+        conn.execute(
+            """
+            INSERT INTO chat_history (project_id, user_id, history_idx, question, answer)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (project_id, user_id, next_idx, question, answer),
         )
-        return int(cur.lastrowid)
+        return next_idx
 
 
 def get_history(user_id: str, project_id: str, limit: int) -> list[dict[str, Any]]:
@@ -92,10 +104,10 @@ def get_history(user_id: str, project_id: str, limit: int) -> list[dict[str, Any
         with get_connection() as conn:
             rows = conn.execute(
                 """
-                SELECT id, project_id, question, answer, created_at
+                SELECT history_idx, project_id, question, answer, created_at
                 FROM chat_history
                 WHERE user_id = ? AND project_id = ?
-                ORDER BY created_at DESC, id DESC
+                ORDER BY created_at DESC, history_idx DESC
                 LIMIT ?
                 """,
                 (user_id, project_id, limit),
@@ -208,28 +220,42 @@ def bulk_insert_file_index(files: list[dict[str, Any]]) -> int:
     if not files:
         return 0
 
-    rows = []
+    parsed = []
     project_ids = set()
 
     for file in files:
         project_id = file.get("project_id", "")
-        project_name = file.get("project_name", "")
         file_name = file.get("file_name", "")
         relative_path = file.get("relative_path", "")
         extension = (file.get("extension", "") or "").lower().lstrip(".")
         file_size = int(file.get("file_size", 0) or 0)
 
-        rows.append((project_id, project_name, file_name, relative_path, extension, file_size))
-        if project_id:
-            project_ids.add(project_id)
+        parsed.append((project_id, file_name, relative_path, extension, file_size))
+        project_ids.add(project_id)
 
     with get_connection() as conn:
         for project_id in project_ids:
             conn.execute("DELETE FROM file_index WHERE project_id = ?", (project_id,))
+
+        next_idx: dict[str, int] = {}
+        for project_id in project_ids:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(file_idx), 0) AS max_idx FROM file_index WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+            next_idx[project_id] = int(row["max_idx"])
+
+        rows = []
+        for project_id, file_name, relative_path, extension, file_size in parsed:
+            next_idx[project_id] = next_idx.get(project_id, 0) + 1
+            rows.append(
+                (project_id, next_idx[project_id], file_name, relative_path, extension, file_size)
+            )
+
         conn.executemany(
             """
             INSERT INTO file_index (
-                project_id, project_name, file_name, relative_path, extension, file_size
+                project_id, file_idx, file_name, relative_path, extension, file_size
             ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             rows,
@@ -315,7 +341,11 @@ def delete_file_index(project_id: str) -> int:
 # Code Elements
 # ─────────────────────────────────────────────────────────────
 
-def insert_code_elements(project_id: str, project_name: str, elements: list[dict[str, Any]]) -> int:
+def insert_code_elements(
+        project_id: str,
+        project_name: str,
+        elements: list[dict[str, Any]],
+) -> int:
     if not elements:
         return 0
 
@@ -330,7 +360,6 @@ def insert_code_elements(project_id: str, project_name: str, elements: list[dict
         rows.append(
             (
                 project_id,
-                project_name,
                 element.get("file_name", ""),
                 relative_path,
                 element.get("extension", ""),
@@ -349,22 +378,24 @@ def insert_code_elements(project_id: str, project_name: str, elements: list[dict
         )
 
     with get_connection() as conn:
-        for relative_path in paths:
+        for relative_path in set(paths):
             conn.execute(
                 "DELETE FROM code_elements WHERE project_id = ? AND relative_path = ?",
                 (project_id, relative_path),
             )
+
         conn.executemany(
             """
             INSERT INTO code_elements (
-                project_id, project_name, file_name, relative_path, extension,
+                project_id, file_name, relative_path, extension,
                 layer_type, content_type, class_name, package,
                 table_names_json, imports_json, methods_json, xml_statements_json,
                 raw_text_preview, content_hash, line_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
+
     return len(rows)
 
 
@@ -417,25 +448,41 @@ def save_turn_entities(user_id: str, entities: list[dict[str, Any]], project_id:
         return 0
 
     try:
-        rows = []
+        pid = project_id or ""
+        names = []
         for entity in entities:
             entity_name = (entity.get("entity_name", "") or "").strip()
             entity_type = (entity.get("entity_type", "") or "").strip()
             if entity_name:
-                rows.append((user_id, entity_name, entity_type, project_id or ""))
+                names.append((entity_name, entity_type))
 
-        if not rows:
+        if not names:
             return 0
 
         with get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(MAX(entities_idx), 0) AS max_idx
+                FROM turn_entities
+                WHERE project_id = ? AND user_id = ?
+                """,
+                (pid, user_id),
+            ).fetchone()
+            next_idx = int(row["max_idx"]) + 1
+
+            insert_rows = []
+            for entity_name, entity_type in names:
+                insert_rows.append((pid, user_id, next_idx, entity_name, entity_type))
+                next_idx += 1
+
             conn.executemany(
                 """
-                INSERT INTO turn_entities (user_id, entity_name, entity_type, project_id)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO turn_entities (project_id, user_id, entities_idx, entity_name, entity_type)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                rows,
+                insert_rows,
             )
-        return len(rows)
+        return len(insert_rows)
     except Exception:
         logger.exception("save_turn_entities failed user_id=%s", user_id)
         return 0
@@ -450,7 +497,7 @@ def get_recent_entities(user_id: str, limit: int = 20, project_id: str | None = 
                     SELECT entity_name, entity_type, project_id, created_at
                     FROM turn_entities
                     WHERE user_id = ? AND project_id = ?
-                    ORDER BY created_at DESC, id DESC
+                    ORDER BY created_at DESC, entities_idx DESC
                     LIMIT ?
                     """,
                     (user_id, project_id, limit),
@@ -461,7 +508,7 @@ def get_recent_entities(user_id: str, limit: int = 20, project_id: str | None = 
                     SELECT entity_name, entity_type, project_id, created_at
                     FROM turn_entities
                     WHERE user_id = ?
-                    ORDER BY created_at DESC, id DESC
+                    ORDER BY created_at DESC, entities_idx DESC
                     LIMIT ?
                     """,
                     (user_id, limit),
