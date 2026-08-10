@@ -638,56 +638,6 @@ class QueryAnalyzer:
         )
         return None
 
-    def extract_edit_pair(self, question: str) -> tuple[str | None, str | None]:
-        """
-        편집 요청에서 변경 전/후 문자열을 추출.
-
-        예:
-        - 타이틀 "직원 프로필관리 시스템" 에서 "이력관리" 로 바꿔줘
-        - 'A'를 'B'로 변경해줘
-        """
-        if not question:
-            logger.info(
-                "[query_analyzer.py][extract_edit_pair][질문 비어있음] %s",
-                _json_log({"edit_source": None, "edit_target": None}),
-            )
-            return None, None
-
-        patterns = [
-            re.compile(r'"([^"]+)"\s*에서\s*"([^"]+)"\s*로\s*(?:전체|모두|전부|일괄|다)?\s*(?:바꿔|변경|수정|치환|교체)'),
-            re.compile(r"\'([^\']+)\'\s*에서\s*\'([^\']+)\'\s*로\s*(?:전체|모두|전부|일괄|다)?\s*(?:바꿔|변경|수정|치환|교체)"),
-            re.compile(r'"([^"]+)"\s*을\s*"([^"]+)"\s*로\s*(?:전체|모두|전부|일괄|다)?\s*(?:바꿔|변경|수정|치환|교체)'),
-            re.compile(r"\'([^\']+)\'\s*을\s*\'([^\']+)\'\s*로\s*(?:전체|모두|전부|일괄|다)?\s*(?:바꿔|변경|수정|치환|교체)"),
-            re.compile(r'"([^"]+)"\s*를\s*"([^"]+)"\s*로\s*(?:전체|모두|전부|일괄|다)?\s*(?:바꿔|변경|수정|치환|교체)'),
-            re.compile(r"\'([^\']+)\'\s*를\s*\'([^\']+)\'\s*로\s*(?:전체|모두|전부|일괄|다)?\s*(?:바꿔|변경|수정|치환|교체)"),
-        ]
-
-        for pattern in patterns:
-            match = pattern.search(question)
-            if match:
-                edit_source = match.group(1).strip()
-                edit_target = match.group(2).strip()
-                logger.info(
-                    "[query_analyzer.py][extract_edit_pair][편집 쌍 추출 완료] %s",
-                    _json_log({
-                        "question": question,
-                        "matched_pattern": pattern.pattern,
-                        "edit_source": edit_source,
-                        "edit_target": edit_target,
-                    }),
-                )
-                return edit_source, edit_target
-
-        logger.info(
-            "[query_analyzer.py][extract_edit_pair][편집 쌍 미검출] %s",
-            _json_log({
-                "question": question,
-                "edit_source": None,
-                "edit_target": None,
-            }),
-        )
-        return None, None
-
     def extract_keywords(self, question: str) -> list[str]:
         """
         검색에 사용할 핵심 키워드 추출.
@@ -799,3 +749,126 @@ class QueryAnalyzer:
             }),
         )
         return result
+
+    def extract_edit_pair(
+            self,
+            question: str,
+    ) -> tuple[str | None, str | None]:
+        """
+        사용자의 문자열 치환 요청에서 변경 전/후 문자열을 추출한다.
+
+        지원 예시:
+        - "직원 프로필관리 시스템" 에서 "이력관리" 로 바꾸고 싶어
+        - "직원 프로필관리 시스템"을 "이력관리"로 변경해줘
+        - "<title>직원 프로필관리 시스템</title>"를
+          "<title>이력관리</title>"로 수정해줘
+        - 'old' -> 'new'으로 변경
+        - 변경 전: "old" / 변경 후: "new"
+        """
+        text = (question or "").strip()
+
+        if not text:
+            return None, None
+
+        patterns = [
+            # "A" 에서 "B" 로 바꾸고 싶어
+            # "A" 를 "B" 로 변경/수정/치환/교체해줘
+            re.compile(
+                r"""
+                ["“']
+                (?P<source>[^"”'\r\n]+)
+                ["”']
+                \s*
+                (?:에서|을|를)
+                \s*
+                ["“']
+                (?P<target>[^"”'\r\n]+)
+                ["”']
+                \s*
+                (?:으?로\s*)?
+                (?:
+                    바꾸(?:고)?(?:\s*싶어)?
+                    | 변경(?:해|하고|해줘)?
+                    | 수정(?:해|하고|해줘)?
+                    | 치환(?:해|하고|해줘)?
+                    | 교체(?:해|하고|해줘)?
+                )
+                """,
+                re.IGNORECASE | re.VERBOSE,
+                ),
+
+            # "A" -> "B"
+            # "A" → "B"
+            re.compile(
+                r"""
+                ["“']
+                (?P<source>[^"”'\r\n]+)
+                ["”']
+                \s*
+                (?:->|=>|→)
+                \s*
+                ["“']
+                (?P<target>[^"”'\r\n]+)
+                ["”']
+                """,
+                re.IGNORECASE | re.VERBOSE,
+                ),
+
+            # 변경 전: "A"
+            # 변경 후: "B"
+            re.compile(
+                r"""
+                변경\s*전\s*[:：]
+                \s*
+                ["“']?
+                (?P<source>.+?)
+                ["”']?
+                \s*
+                (?:변경\s*후|수정\s*후)
+                \s*[:：]
+                \s*
+                ["“']?
+                (?P<target>.+?)
+                ["”']?
+                (?:\s|$)
+                """,
+                re.IGNORECASE | re.VERBOSE | re.DOTALL,
+                ),
+        ]
+
+        for pattern in patterns:
+            match = pattern.search(text)
+
+            if not match:
+                continue
+
+            source = (match.group("source") or "").strip()
+            target = (match.group("target") or "").strip()
+
+            if not source or not target:
+                continue
+
+            if source == target:
+                logger.warning(
+                    "[query_analyzer.py][extract_edit_pair] "
+                    "source and target are identical source=%s",
+                    source,
+                )
+                return None, None
+
+            logger.info(
+                "[query_analyzer.py][extract_edit_pair] "
+                "edit pair extracted source=%s target=%s",
+                source,
+                target,
+            )
+
+            return source, target
+
+        logger.info(
+            "[query_analyzer.py][extract_edit_pair] "
+            "edit pair not found question=%s",
+            text[:300],
+        )
+
+        return None, None

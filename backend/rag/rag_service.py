@@ -792,31 +792,81 @@ class RAGService:
                     len(hits),
                 )
 
-            # 2) vector hit 에 대해서만 기존 exact-first 라인레벨 재정렬 적용
-            #    (grep hit 의 text/line_no 는 그대로 보존하여 step3 정확한 줄/전후값 답변에 사용)
-            vector_hits = self._make_exact_match_hits(hits, grep_needle)
-            vector_hits = self._make_line_level_exact_hits(vector_hits, grep_needle)
-            vector_hits = self._flatten_hits(vector_hits)
+                # 2) 변경 전/후 문자열이 명확한 "리터럴 치환" 요청인지 판별
+                # 이 경우에는 grep으로 실제 문자열이 존재하는 파일만 수정 대상이다.
+                # vector 검색 결과를 섞으면 Controller, Service, SQL 등
+                # 의미상 유사한 엉뚱한 파일이 수정 후보로 들어올 수 있다.
+                is_literal_replace_request = bool(
+                    edit_source
+                    and edit_source.strip()
+                    and edit_target is not None
+                )
 
-            # 3) 병합: grep 결과 최우선. grep hit 있으면 vector 후보는 보조(fallback)로 제한.
-            if grep_hits:
-                if query_type == "edit_text_all":
-                    kept_grep = grep_hits  # 전체 발생 위치 유지
+                if is_literal_replace_request:
+                    # 3-A) 정확한 문자열 교체 요청:
+                    #      exact grep 결과만 사용하고 vector 검색 결과는 절대 병합하지 않는다.
+                    #
+                    # edit_text_all:
+                    #   동일 문자열이 나온 모든 파일/라인을 변경 대상으로 유지
+                    #
+                    # edit_text_one:
+                    #   최대 3개 파일/라인만 대상으로 유지
+                    if query_type == "edit_text_all":
+                        hits = grep_hits
+                    else:
+                        hits = grep_hits[:3]
+
+                    logger.info(
+                        "[rag_service.py][ask_with_context_stream] "
+                        "literal replace exact-only mode query_type=%s "
+                        "edit_source=%s edit_target=%s exact_grep_hit_count=%d",
+                        query_type,
+                        edit_source,
+                        edit_target,
+                        len(hits),
+                    )
+
                 else:
-                    kept_grep = grep_hits[:3]  # edit_text_one: 상위 3건
-                target_total = top_k or self.settings.top_k
-                remaining = max(0, target_total - len(kept_grep))
-                hits = kept_grep + vector_hits[:remaining]
-            else:
-                # grep 미발견: vector 후보를 그대로 사용(정확한 문자열 일치 미발견 fallback)
-                hits = vector_hits[: top_k or self.settings.top_k]
+                    # 3-B) edit intent이지만 정확한 변경 전/후 문자열을
+                    #      파싱하지 못한 자연어 요청은 기존 vector + grep 병합 방식을 유지한다.
+                    #
+                    # 예:
+                    #   프로필 기능 이름을 이력관리로 개편하려면 영향 파일 알려줘
+                    #
+                    # 이런 질문은 문자열 치환이 아니라 영향도 분석 성격이므로
+                    # vector 검색 결과를 사용하는 것이 맞다.
+                    vector_hits = self._make_exact_match_hits(
+                        hits,
+                        grep_needle,
+                    )
+                    vector_hits = self._make_line_level_exact_hits(
+                        vector_hits,
+                        grep_needle,
+                    )
+                    vector_hits = self._flatten_hits(vector_hits)
 
-            logger.info(
-                "[rag_service.py][ask_with_context_stream] exact-first merge completed query_type=%s hit_count=%d grep_count=%d",
-                query_type,
-                len(hits or []),
-                len(grep_hits),
-            )
+                    if grep_hits:
+                        if query_type == "edit_text_all":
+                            kept_grep = grep_hits
+                        else:
+                            kept_grep = grep_hits[:3]
+
+                        target_total = top_k or self.settings.top_k
+                        remaining = max(0, target_total - len(kept_grep))
+
+                        hits = kept_grep + vector_hits[:remaining]
+                    else:
+                        hits = vector_hits[: top_k or self.settings.top_k]
+
+                    logger.info(
+                        "[rag_service.py][ask_with_context_stream] "
+                        "non-literal edit vector-assisted mode query_type=%s "
+                        "hit_count=%d grep_count=%d vector_count=%d",
+                        query_type,
+                        len(hits),
+                        len(grep_hits),
+                        len(vector_hits),
+                    )
 
         if self.settings.reranker_enabled and hits and query_type not in {"edit_text_one", "edit_text_all"}:
             reranked_hits = self.reranker_service.rerank(
