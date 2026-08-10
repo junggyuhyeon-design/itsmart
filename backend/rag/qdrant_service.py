@@ -86,14 +86,14 @@ class QdrantService:
             vector_size,
         )
 
-        if not self.collection_exists():
-            self.client.create_collection(
+        if not self.collection_exists(): # 기존 컬렉션이 존재하지 않는다면
+            self.client.create_collection( # 컬렉션을 신규로 생성
                 collection_name=self.settings.qdrant_collection,
                 vectors_config={
                     "dense": VectorParams(size=vector_size, distance=Distance.COSINE),
                 },
-                sparse_vectors_config={
-                    "sparse": self._sparse_vector_params(),
+                sparse_vectors_config={ # sparse 모델
+                    "sparse": SparseVectorParams(),
                 },
             )
             logger.info(
@@ -109,37 +109,38 @@ class QdrantService:
                 self.settings.qdrant_collection,
             )
 
-    def recreate_collection(self, vector_size: int) -> None:
-        logger.info(
-            "[qdrant_service.py][recreate_collection][컬렉션 재생성 시작 ★] collection=%s vector_size=%s",
-            self.settings.qdrant_collection,
-            vector_size,
-        )
+    # TODO :: pgy : 재생성 할 이유가 없어서 주석함
+    # def recreate_collection(self, vector_size: int) -> None:
+    #     logger.info(
+    #         "[qdrant_service.py][recreate_collection][컬렉션 재생성 시작 ★] collection=%s vector_size=%s",
+    #         self.settings.qdrant_collection,
+    #         vector_size,
+    #     )
 
-        if self.collection_exists():
-            self.client.delete_collection(self.settings.qdrant_collection)
-            logger.info(
-                "[qdrant_service.py][recreate_collection][기존 컬렉션 삭제 완료 ★] collection=%s",
-                self.settings.qdrant_collection,
-            )
+    #     if self.collection_exists():
+    #         self.client.delete_collection(self.settings.qdrant_collection)
+    #         logger.info(
+    #             "[qdrant_service.py][recreate_collection][기존 컬렉션 삭제 완료 ★] collection=%s",
+    #             self.settings.qdrant_collection,
+    #         )
 
-        self.client.create_collection(
-            collection_name=self.settings.qdrant_collection,
-            vectors_config={
-                "dense": VectorParams(size=vector_size, distance=Distance.COSINE),
-            },
-            sparse_vectors_config={
-                "sparse": self._sparse_vector_params(),
-            },
-        )
+    #     self.client.create_collection(
+    #         collection_name=self.settings.qdrant_collection,
+    #         vectors_config={
+    #             "dense": VectorParams(size=vector_size, distance=Distance.COSINE),
+    #         },
+    #         sparse_vectors_config={
+    #             "sparse": SparseVectorParams(),
+    #         },
+    #     )
 
-        logger.info(
-            "[qdrant_service.py][recreate_collection][컬렉션 재생성 완료 ★] collection=%s dense_name=%s sparse_name=%s vector_size=%s",
-            self.settings.qdrant_collection,
-            "dense",
-            "sparse",
-            vector_size,
-        )
+    #     logger.info(
+    #         "[qdrant_service.py][recreate_collection][컬렉션 재생성 완료 ★] collection=%s dense_name=%s sparse_name=%s vector_size=%s",
+    #         self.settings.qdrant_collection,
+    #         "dense",
+    #         "sparse",
+    #         vector_size,
+    #     )
 
     def upsert_chunks(
             self,

@@ -14,8 +14,8 @@ class EmbeddingService:
     def __init__(self, settings: Settings) -> None:
         logger.info(
             "[embedder.py][__init__][초기화 시작 ★] embedding_model=%s sparse_embedding_model=%s",
-            getattr(settings, "embedding_model", None),
-            getattr(settings, "sparse_embedding_model", None),
+            getattr(settings, "embedding_model", None),        # BAAI/bge-m3
+            getattr(settings, "sparse_embedding_model", None), # Qdrant/bm25 [Sparse Embedding(BM25 기반 가중치 생성기)]
         )
 
         self.dense_model = SentenceTransformer(settings.embedding_model)

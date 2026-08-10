@@ -1112,19 +1112,30 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
     # logger.info(
     #     "[file_parser.py][parse_text_file] start project_id=%s project_name=%s relative_path=%s saved_path=%s",
     #     file_info.get("project_id", ""),
-    #     file_info.get("project_name", ""),
     #     file_info.get("relative_path", ""),
     #     file_info.get("saved_path", ""),
     # )
+    # logger.info(
+    #     "[file_parser.py][parse_text_file] start project_id=%s project_name=%s relative_path=%s saved_path=%s",
+    #     file_info.get("project_id", file_info.get("projectid", "")),
+    #     file_info.get("project_name", file_info.get("projectname", "")),
+    #     file_info.get("relative_path", file_info.get("relativepath", "")),
+    #     file_info.get("saved_path", file_info.get("savedpath", "")),
+    # )
+    # logger.info("============================================================")
 
     try:
         # logger.info("[file_parser.py][parse_text_file] resolved saved_path=%s", saved_path)
+
+        # logger.info("[file_parser.py][parse_text_file] resolved saved_path=%s", saved_path)
+        # logger.info("============================================================")
 
         # 파일 원문 전체 텍스트
         saved_path = file_info.get("saved_path")
 
         raw_text = read_text_file(saved_path)
-#         logger.info("[file_parser.py][parse_text_file] read_text_file completed saved_path=%s text_length=%d", saved_path, len(raw_text))
+        # logger.info("[file_parser.py][parse_text_file] read_text_file completed saved_path=%s text_length=%d", saved_path, len(raw_text))
+        # logger.info("============================================================")
 
         if not raw_text.strip():
 #             logger.warning("[file_parser.py][parse_text_file] empty file saved_path=%s", saved_path)
@@ -1145,34 +1156,41 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
         #     relative_path,
         #     extension,
         # )
+        # logger.info("============================================================")
 
         # MIME 타입 추정
         mime_type = detect_mime_type(saved_path)
-        logger.info("[file_parser.py][parse_text_file] detect_mime_type completed mime_type=%s", mime_type)
+        # logger.info("[file_parser.py][parse_text_file] detect_mime_type completed mime_type=%s", mime_type)
+        # logger.info("============================================================")
 
         # 프로그래밍 언어 또는 문서 유형 추정   (USE pygments)
         language = detect_language(file_name, raw_text)
-        logger.info("[file_parser.py][parse_text_file] detect_language completed language=%s", language)
+        # logger.info("[file_parser.py][parse_text_file] detect_language completed language=%s", language)
+        # logger.info("============================================================")
 
         # controller/service/repository/mapper/config/ddl 등 레이어 분류
         layer_type = detect_layer(raw_text, extension, language, relative_path)
-        logger.info("[file_parser.py][parse_text_file] detect_layer completed layer_type=%s", layer_type)
+        # logger.info("[file_parser.py][parse_text_file] detect_layer completed layer_type=%s", layer_type)
+        # logger.info("============================================================")
 
         # api_endpoint / sql_select / ddl_create 등 콘텐츠 성격 분류 (USE XML파일일경우:lxml, SQL파일일경우: sqlglot)
         # SQL,XML 일경우 우선수위 SELECT -> INSERT -> UPDATE -> DELETE
         content_type = detect_content_type(raw_text, extension)
-        logger.info("[file_parser.py][parse_text_file] detect_content_type completed content_type=%s", content_type)
+        # logger.info("[file_parser.py][parse_text_file] detect_content_type completed content_type=%s", content_type)
+        # logger.info("============================================================")
 
         # 대표 클래스/타입명 추출
         # - tree-sitter 우선
         # - 실패 시 regex fallback
         # (USE tree-sitter)
         class_name = extract_class_name_tree_sitter(raw_text, language) or extract_class_name_regex(raw_text, extension)
-        logger.info("[file_parser.py][parse_text_file] class_name resolved class_name=%s", class_name)
+        # logger.info("[file_parser.py][parse_text_file] class_name resolved class_name=%s", class_name)
+        # logger.info("============================================================")
 
         # 대표 package/namespace 추출 (USE tree-sitter)
         package = extract_package_tree_sitter(raw_text, language) or extract_package_regex(raw_text, extension)
-        logger.info("[file_parser.py][parse_text_file] package resolved package=%s", package)
+        # logger.info("[file_parser.py][parse_text_file] package resolved package=%s", package)
+        # logger.info("============================================================")
 
         # 파일 종류별 상세 메타데이터
         # xml_meta = {
@@ -1202,16 +1220,19 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
         #     len(sql_meta.get("table_names", [])),
         #     template_meta.get("script_blocks", 0) if template_meta else 0,
         # )
+        # logger.info("============================================================")
 
         # mapper XML의 경우 namespace만 있고 class_name이 없으면 namespace 마지막 토큰을 대표명으로 사용
         if extension == "xml" and xml_meta.get("namespace") and not class_name:
             class_name = str(xml_meta["namespace"]).split(".")[-1]
-            logger.info("[file_parser.py][parse_text_file] class_name adjusted from xml namespace class_name=%s", class_name)
+            # logger.info("[file_parser.py][parse_text_file] class_name adjusted from xml namespace class_name=%s", class_name)
+            # logger.info("============================================================")
 
         # SQL 파일은 sqlglot에서 얻은 statement_type을 content_type으로 보정
         if extension == "sql" and sql_meta.get("statement_type") and not content_type:
             content_type = sql_meta["statement_type"]
-            logger.info("[file_parser.py][parse_text_file] content_type adjusted from sql metadata content_type=%s", content_type)
+            # logger.info("[file_parser.py][parse_text_file] content_type adjusted from sql metadata content_type=%s", content_type)
+            # logger.info("============================================================")
 
         result = {
             "raw_text": raw_text,  # 파일 원문 전체 텍스트, 추가 분석의 기준 데이터
@@ -1250,6 +1271,7 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
         #     "[파일파싱 결과 JSON] %s",
         #     _to_log_json(result),
         # )
+        # logger.info("============================================================")
 
 
         return result
@@ -1367,6 +1389,7 @@ def extract_static_analysis(parsed: dict[str, Any]) -> dict[str, Any]:
     #     "[file_parser.py][parse_text_file][result_json] %s",
     #     _to_log_json(result),
     # )
+    # logger.info("============================================================")
 
     return result
 

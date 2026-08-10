@@ -32,7 +32,8 @@ class Settings:
     qdrant_url: str
     qdrant_collection: str
     embedding_model: str
-    qdrant_force_recreate: bool
+    # TODO :: pgy : 재생성 불필요
+    # qdrant_force_recreate: bool
 
     chunk_size: int
     chunk_overlap: int
@@ -91,7 +92,8 @@ def get_settings() -> Settings:
             default=3,
         ),
         sqlite_db_path=_get_env_str("SQLITE_DB_PATH", "SQLITEDBPATH", default="data/db/app.db"),
-        qdrant_force_recreate=_get_env_int("QDRANT_FORCE_RECREATE", "QDRANTFORCERECREATE", default=0) == 1,
+        # TODO :: pgy : 재생성 불필요
+        # qdrant_force_recreate=_get_env_int("QDRANT_FORCE_RECREATE", "QDRANT_FORCE_RECREATE", default=0) == 1,
 
         # FastEmbed 기반 sparse (키워드중심검색)
         sparse_embedding_model=_get_env_str(

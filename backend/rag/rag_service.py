@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Callable
 from collections.abc import Iterable
 from config import Settings
@@ -33,18 +32,21 @@ class RAGService:
             getattr(self.embedding_service, "dimension", None),
         )
 
+        # TODO :: pgy : 컬렉션을 다시 생성할 필요가 없음.
         # 개발/테스트 단계: 기존 컬렉션 스키마를 무시하고 강제로 재생성
         # 주의: 서버 재시작 시 Qdrant 컬렉션 데이터가 삭제되므로 반드시 재인덱싱 필요
-        logger.warning(
-            "[rag_service.py][__init__][개발모드 ★] Qdrant collection will be recreated. all previous vector data will be removed."
-        )
-        if getattr(self.settings, "qdrant_force_recreate", False):
-            self.qdrant_service.recreate_collection(self.embedding_service.dimension)
-        else:
-            self.qdrant_service.ensure_collection(self.embedding_service.dimension)
+        # logger.warning(
+        #     "[rag_service.py][__init__][개발모드 ★] Qdrant collection will be recreated. all previous vector data will be removed."
+        # )
+        # if getattr(self.settings, "qdrant_force_recreate", False):
+        #     self.qdrant_service.recreate_collection(self.embedding_service.dimension)
+        # else:
+        #     self.qdrant_service.ensure_collection(self.embedding_service.dimension)
+
+        self.qdrant_service.ensure_collection(self.embedding_service.dimension)
 
         logger.info(
-            "[rag_service.py][__init__] recreate_collection completed dimension=%s",
+            "[rag_service.py][__init__] create_collection completed dimension=%s",
             self.embedding_service.dimension,
         )
 
@@ -53,11 +55,12 @@ class RAGService:
             targets: list[dict[str, Any]],
             progress_callback: Callable[..., None] | None = None,
     ) -> dict[str, Any]:
-        logger.info(
-            "[rag_service.py][index_files] start total_targets=%d progress_callback=%s",
-            len(targets or []),
-            progress_callback is not None,
-            )
+        # logger.info(
+        #     "[rag_service.py][index_files] start total_targets=%d progress_callback=%s",
+        #     len(targets or []),
+        #     progress_callback is not None,
+        #     )
+        # logger.info("============================================================")
 
         # ? targets 정보 : /upload 응답 -> /index-jobs 로 넘어온 인덱싱 대상 리스트
         # project_id         : 프로젝트 아이디
@@ -117,11 +120,14 @@ class RAGService:
             try:
                 # 파일 읽기 + 기본 메타/언어/계층/클래스 정보 파싱
                 parsed = parse_text_file(target)
+
                 # logger.info(
                 #     "[rag_service.py][index_files] parse_text_file returned relative_path=%s parsed=%s",
                 #     relative_path,
                 #     parsed is not None,
                 #     )
+                # logger.info("============================================================")
+
                 # ? parsed 정보 :
                 # raw_text             : 파일 원문 텍스트
                 # project_id           : 프로젝트 아이디
@@ -173,6 +179,7 @@ class RAGService:
                 #     parsed.get("class_name"),
                 #     parsed.get("package"),
                 # )
+                # logger.info("============================================================")
 
                 # 파일 청킹
                 chunks = self.chunk_service.chunk_parsed_file(parsed)
@@ -182,6 +189,7 @@ class RAGService:
                 #     relative_path,
                 #     len(chunks or []),
                 # )
+                # logger.info("============================================================")
 
                 # ? chunks 정보 : 벡터DB(Qdrant)에 저장할 청크 리스트
                 # project_id         : 프로젝트 아이디
@@ -232,6 +240,7 @@ class RAGService:
                 #     len(chunks or []),
                 #     len(valid_chunks),
                 # )
+                # logger.info("============================================================")
 
                 if not valid_chunks:
                     failed += 1
@@ -307,16 +316,19 @@ class RAGService:
                 #     parsed.get("relative_path", "") or target.get("relative_path", ""),
                 #     len(file_index_rows),
                 #     )
+                # logger.info("============================================================")
 
                 try:
                     # 정적 분석 추출
                     analysis = extract_static_analysis(parsed)
 
-                    logger.info(
-                        "[rag_service.py][index_files] extract_static_analysis returned relative_path=%s analysis=%s",
-                        relative_path,
-                        analysis is not None,
-                        )
+                    # logger.info(
+                    #     "[rag_service.py][index_files] extract_static_analysis returned relative_path=%s analysis=%s",
+                    #     relative_path,
+                    #     analysis is not None,
+                    #     )
+                    # logger.info("============================================================")
+
                     # ? analysis 정보        : SQLite code_elements 저장용 정적 분석 결과
                     # raw_text              : 원문 텍스트
                     # project_id            : 프로젝트 아이디
@@ -339,18 +351,19 @@ class RAGService:
                     if analysis:
                         key = (project_id, project_name)
                         code_elements_rows_by_project.setdefault(key, []).append(analysis)
-                        # logger.debug(
-                        #     "static analysis prepared: %s / layer=%s / class=%s",
-                        #     analysis.get("relative_path"),
-                        #     analysis.get("layer_type"),
-                        #     analysis.get("class_name"),
-                        # )
+                        logger.debug(
+                            "static analysis prepared: %s / layer=%s / class=%s",
+                            analysis.get("relative_path"),
+                            analysis.get("layer_type"),
+                            analysis.get("class_name"),
+                        )
                         # logger.info(
                         #     "[rag_service.py][index_files] code_elements_rows_by_project appended project_id=%s project_name=%s current_project_elements=%d",
                         #     project_id,
                         #     project_name,
                         #     len(code_elements_rows_by_project.get(key, [])),
                         # )
+                        # logger.info("============================================================")
                 except Exception:
                     logger.exception("[rag_service.py][index_files] extract_static_analysis failed relative_path=%s", relative_path)
 
@@ -366,6 +379,7 @@ class RAGService:
                 #     failed,
                 #     total_chunks,
                 # )
+                # logger.info("============================================================")
 
                 if progress_callback:
                     # ? progress_callback kwargs :
@@ -386,14 +400,15 @@ class RAGService:
                         logs=logs[-20:],
                     )
 
-                    logger.info(
-                        "[rag_service.py][index_files] progress_callback called step=%d/%d success=%d failed=%d total_chunks=%d",
-                        index,
-                        total_targets,
-                        success,
-                        failed,
-                        total_chunks,
-                    )
+                    # logger.info(
+                    #     "[rag_service.py][index_files] progress_callback called step=%d/%d success=%d failed=%d total_chunks=%d",
+                    #     index,
+                    #     total_targets,
+                    #     success,
+                    #     failed,
+                    #     total_chunks,
+                    # )
+                    # logger.info("============================================================")
 
             except Exception as error:
                 failed += 1
@@ -412,14 +427,15 @@ class RAGService:
                         logs=logs[-20:],
                     )
 
-                    logger.info(
-                        "[rag_service.py][index_files] progress_callback called after error step=%d/%d success=%d failed=%d total_chunks=%d",
-                        index,
-                        total_targets,
-                        success,
-                        failed,
-                        total_chunks,
-                    )
+                    # logger.info(
+                    #     "[rag_service.py][index_files] progress_callback called after error step=%d/%d success=%d failed=%d total_chunks=%d",
+                    #     index,
+                    #     total_targets,
+                    #     success,
+                    #     failed,
+                    #     total_chunks,
+                    # )
+                    # logger.info("============================================================")
 
         indexed_files = 0
         code_elements_count = 0
@@ -429,14 +445,16 @@ class RAGService:
         #     len(file_index_rows),
         #     len(code_elements_rows_by_project),
         # )
+        # logger.info("============================================================")
 
         try:
             # SQLite file_index 테이블 일괄 저장
             indexed_files = bulk_insert_file_index(file_index_rows)
-            logger.info(
-                "[rag_service.py][index_files] bulk_insert_file_index completed indexed_files=%d",
-                indexed_files,
-            )
+            # logger.info(
+            #     "[rag_service.py][index_files] bulk_insert_file_index completed indexed_files=%d",
+            #     indexed_files,
+            # )
+            # logger.info("============================================================")
         except Exception as error:
             logger.exception("[rag_service.py][index_files] bulk_insert_file_index failed")
             logs.append(f"[error] bulk_insert_file_index: {error}")
@@ -453,6 +471,7 @@ class RAGService:
                 #     inserted,
                 #     code_elements_count,
                 # )
+                # logger.info("============================================================")
         except Exception as error:
             logger.exception("[rag_service.py][index_files] insert_code_elements failed")
             logs.append(f"[error] insert_code_elements: {error}")
@@ -475,6 +494,7 @@ class RAGService:
         #     result["code_elements"],
         #     len(result["logs"]),
         # )
+        # logger.info("============================================================")
 
         return result
 
