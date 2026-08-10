@@ -255,10 +255,10 @@ class PromptBuilder:
         return selected
 
     def build_metadata_summary(self, hits: list[dict[str, Any]]) -> str:
-        logger.info(
-            "[prompt_builder.py][build_metadata_summary][1.시작] hits_count=%d",
-            len(hits or []),
-        )
+        # logger.info(
+        #     "[prompt_builder.py][build_metadata_summary][1.시작] hits_count=%d",
+        #     len(hits or []),
+        # )
 
         if not hits:
             logger.info("[prompt_builder.py][build_metadata_summary][2.hit 없음] return empty")
@@ -268,7 +268,7 @@ class PromptBuilder:
         lines: list[str] = []
 
         for hit in hits:
-            key = hit.get("relative_path") or hit.get("file_name") or hit.get("filename") or ""
+            key = hit.get("relative_path")
             if not key or key in seen:
                 continue
             seen.add(key)
@@ -291,20 +291,22 @@ class PromptBuilder:
             lines.append(f"- {key}{suffix}")
 
         result = "\n".join(lines)
+        logger.info("=== result2 ===")
+        logger.info(_preview_text(result, 300),)
 
-        logger.info(
-            "[prompt_builder.py][build_metadata_summary][3.완료] unique_file_count=%d result_len=%d preview=%s",
-            len(lines),
-            len(result),
-            _preview_text(result, 300),
-        )
+        # logger.info(
+        #     "[prompt_builder.py][build_metadata_summary][3.완료] unique_file_count=%d result_len=%d preview=%s",
+        #     len(lines),
+        #     len(result),
+        #     _preview_text(result, 300),
+        # )
         return result
 
     def build_chunk_context(self, hits: list[dict[str, Any]]) -> str:
-        logger.info(
-            "[prompt_builder.py][build_chunk_context][1.시작] hits_count=%d",
-            len(hits or []),
-        )
+        # logger.info(
+        #     "[prompt_builder.py][build_chunk_context][1.시작] hits_count=%d",
+        #     len(hits or []),
+        # )
 
         if not hits:
             logger.info("[prompt_builder.py][build_chunk_context][2.hit 없음] return empty")
@@ -337,9 +339,7 @@ class PromptBuilder:
             if not text:
                 continue
 
-            logger.info("가져온 청크 ::: %s", text)
-
-            relative_path = hit.get("relative_path") or hit.get("file_name") or f"chunk-{index}"
+            relative_path = hit.get("relative_path")
             extension = (hit.get("extension") or "").lower().strip(".")
             language = ext_lang_map.get(extension, "")
 
@@ -366,12 +366,14 @@ class PromptBuilder:
             lines.append("")
 
         result = "\n".join(lines).strip()
+        logger.info("=== result3 ===")
+        logger.info(_preview_text(result, 300),)
 
-        logger.info(
-            "[prompt_builder.py][build_chunk_context][3.완료] context_len=%d preview=%s",
-            len(result),
-            _preview_text(result, 300),
-        )
+        # logger.info(
+        #     "[prompt_builder.py][build_chunk_context][3.완료] context_len=%d preview=%s",
+        #     len(result),
+        #     _preview_text(result, 300),
+        # )
         return result
 
     def _replace_literal_case_insensitive(
@@ -464,12 +466,7 @@ class PromptBuilder:
         lines: list[str] = [f"총 exact match: {len(exact_hits)}건"]
 
         for index, hit in enumerate(exact_hits, start=1):
-            relative_path = (
-                    hit.get("relative_path")
-                    or hit.get("file_name")
-                    or hit.get("filename")
-                    or "unknown"
-            )
+            relative_path = hit.get("relative_path")
             matched_line = hit.get("matched_line") or hit.get("start_line") or ""
             before_line = (
                     hit.get("line_text")
@@ -499,12 +496,14 @@ class PromptBuilder:
 
         result = "\n".join(lines).strip()
 
-        logger.info(
-            "[prompt_builder.py][build_edit_candidates][3.완료] exact_count=%d result_len=%d preview=%s",
-            len(exact_hits),
-            len(result),
-            _preview_text(result, 300),
-        )
+        # logger.info(
+        #     "[prompt_builder.py][build_edit_candidates][3.완료] exact_count=%d result_len=%d preview=%s",
+        #     len(exact_hits),
+        #     len(result),
+        #     _preview_text(result, 300),
+        # )
+        logger.info("=== result ===")
+        logger.info(result)
         return result
 
     def build_messages(
@@ -522,26 +521,26 @@ class PromptBuilder:
             edit_source: str | None = None, #변경 파일/줄/전후값 중심 답변 패치
             edit_target: str | None = None, #변경 파일/줄/전후값 중심 답변 패치
     ) -> list[dict[str, str]]:
-        logger.info(
-            "[prompt_builder.py][build_messages][1.시작] query_type=%s project_name=%s question_len=%d hits_count=%d struct_context_len=%d chat_history_count=%d recent_entities_count=%d sqlite_context_len=%d question_preview=%s",
-            query_type,
-            project_name,
-            len(question or ""),
-            len(hits or []),
-            len(struct_context or ""),
-            len(chat_history or []),
-            len(recent_entities or []),
-            len(sqlite_context or ""),
-            _preview_text(question, 300),
-        )
+        # logger.info(
+        #     "[prompt_builder.py][build_messages][1.시작] query_type=%s project_name=%s question_len=%d hits_count=%d struct_context_len=%d chat_history_count=%d recent_entities_count=%d sqlite_context_len=%d question_preview=%s",
+        #     query_type,
+        #     project_name,
+        #     len(question or ""),
+        #     len(hits or []),
+        #     len(struct_context or ""),
+        #     len(chat_history or []),
+        #     len(recent_entities or []),
+        #     len(sqlite_context or ""),
+        #     _preview_text(question, 300),
+        # )
 
         system_prompt = SYSTEM_PROMPTS.get(query_type, SYSTEM_BASE)
         messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
-        logger.info(
-            "[prompt_builder.py][build_messages][2.system prompt 선택] system_prompt_len=%d",
-            len(system_prompt),
-        )
+        # logger.info(
+        #     "[prompt_builder.py][build_messages][2.system prompt 선택] system_prompt_len=%d",
+        #     len(system_prompt),
+        # )
 
         trimmed = self.trim_history(chat_history or [], max_history_chars)
         for row in trimmed:
@@ -550,11 +549,11 @@ class PromptBuilder:
             if row["answer"]:
                 messages.append({"role": "assistant", "content": row["answer"]})
 
-        logger.info(
-            "[prompt_builder.py][build_messages][3.history 반영완료] trimmed_count=%d message_count=%d",
-            len(trimmed),
-            len(messages),
-        )
+        # logger.info(
+        #     "[prompt_builder.py][build_messages][3.history 반영완료] trimmed_count=%d message_count=%d",
+        #     len(trimmed),
+        #     len(messages),
+        # )
 
         parts: list[str] = []
 
@@ -564,6 +563,7 @@ class PromptBuilder:
             for token in ["소스", "파일", "구조", "설명", "프로젝트", "source", "file", "structure"]
         )
 
+        # 치환 관련 질문
         if query_type in {"edit_text_one", "edit_text_all"}:
             parts.append(
                 "[instruction]\n"
@@ -575,7 +575,7 @@ class PromptBuilder:
                 "[edit_candidates]가 '정확한 문자열 일치 미발견'이면 파일/줄/전후값을 확정하지 않는다.\n"
                 "답변은 '## 변경 대상(파일/줄/변경 전/변경 후) → ## 적용 방법' 블록형으로 정리한다."
             )
-            logger.info("[prompt_builder.py][build_messages][4.edit instruction 추가] query_type=%s", query_type)
+            # logger.info("[prompt_builder.py][build_messages][4.edit instruction 추가] query_type=%s", query_type)
 
             # [edit_pair]: 변경 전(검색어)/변경 후(치환값) 명시
             if edit_source or edit_target is not None:
@@ -584,11 +584,11 @@ class PromptBuilder:
                     f"변경 전(검색어): {edit_source or ''}\n"
                     f"변경 후(치환값): {edit_target if edit_target is not None else ''}"
                 )
-                logger.info(
-                    "[prompt_builder.py][build_messages][4-1.edit_pair 추가] edit_source_len=%d has_target=%s",
-                    len(edit_source or ""),
-                    edit_target is not None,
-                    )
+                # logger.info(
+                #     "[prompt_builder.py][build_messages][4-1.edit_pair 추가] edit_source_len=%d has_target=%s",
+                #     len(edit_source or ""),
+                #     edit_target is not None,
+                #     )
 
             # [edit_candidates]: 각 exact_grep hit 의 파일/줄/전후값 (deterministic)
             edit_candidates = self.build_edit_candidates(
@@ -599,11 +599,12 @@ class PromptBuilder:
             )
             if edit_candidates:
                 parts.append("[edit_candidates]\n" + edit_candidates)
-                logger.info(
-                    "[prompt_builder.py][build_messages][4-2.edit_candidates 추가] edit_candidates_len=%d",
-                    len(edit_candidates),
-                )
+                # logger.info(
+                #     "[prompt_builder.py][build_messages][4-2.edit_candidates 추가] edit_candidates_len=%d",
+                #     len(edit_candidates),
+                # )
 
+        # 구조 관련 질문
         elif wants_structure:
             parts.append(
                 "[instruction]\n"
@@ -612,13 +613,14 @@ class PromptBuilder:
                 "파일명, 경로, 레이어(Controller/Service/Repository 등), 확장자 기준의 "
                 "구조 요약을 먼저 제시한 후, 부족한 부분을 언급한다."
             )
-            logger.info("[prompt_builder.py][build_messages][4.structure instruction 추가] wants_structure=True")
+            # logger.info("[prompt_builder.py][build_messages][4.structure instruction 추가] wants_structure=True")
 
         if project_name:
             parts.append(f"[project]\n{project_name}")
-            logger.info("[prompt_builder.py][build_messages][5.project 추가] project_name=%s", project_name)
+            # logger.info("[prompt_builder.py][build_messages][5.project 추가] project_name=%s", project_name)
 
         if recent_entities:
+            logger.info("최근 엔티티 존재함 !!!")
             entity_lines: list[str] = []
             seen = set()
 
@@ -639,58 +641,60 @@ class PromptBuilder:
 
             if entity_lines:
                 parts.append("[recent_entities]\n" + "\n".join(entity_lines))
-                logger.info(
-                    "[prompt_builder.py][build_messages][6.recent_entities 추가] entity_count=%d",
-                    len(entity_lines),
-                )
+                # logger.info(
+                #     "[prompt_builder.py][build_messages][6.recent_entities 추가] entity_count=%d",
+                #     len(entity_lines),
+                # )
 
         if struct_context:
+            logger.info(_preview_text(struct_context, 300))
             parts.append("[structure]\n" + struct_context)
-            logger.info(
-                "[prompt_builder.py][build_messages][7.structure 추가] struct_context_len=%d preview=%s",
-                len(struct_context),
-                _preview_text(struct_context, 300),
-            )
+            # logger.info(
+            #     "[prompt_builder.py][build_messages][7.structure 추가] struct_context_len=%d preview=%s",
+            #     len(struct_context),
+            #     _preview_text(struct_context, 300),
+            # )
 
         if sqlite_context:
+            logger.info(_preview_text(sqlite_context, 300))
             parts.append("[sqlite_context]\n" + sqlite_context)
-            logger.info(
-                "[prompt_builder.py][build_messages][8.sqlite_context 추가] sqlite_context_len=%d preview=%s",
-                len(sqlite_context),
-                _preview_text(sqlite_context, 300),
-            )
+            # logger.info(
+            #     "[prompt_builder.py][build_messages][8.sqlite_context 추가] sqlite_context_len=%d preview=%s",
+            #     len(sqlite_context),
+            #     _preview_text(sqlite_context, 300),
+            # )
 
         metadata_summary = self.build_metadata_summary(hits)
         if metadata_summary:
             parts.append("[metadata]\n" + metadata_summary)
-            logger.info(
-                "[prompt_builder.py][build_messages][9.metadata 추가] metadata_len=%d",
-                len(metadata_summary),
-            )
+            # logger.info(
+            #     "[prompt_builder.py][build_messages][9.metadata 추가] metadata_len=%d",
+            #     len(metadata_summary),
+            # )
 
         chunk_context = self.build_chunk_context(hits)
         if chunk_context:
             parts.append("[evidence]\n" + chunk_context)
-            logger.info(
-                "[prompt_builder.py][build_messages][10.evidence 추가] evidence_len=%d",
-                len(chunk_context),
-            )
+            # logger.info(
+            #     "[prompt_builder.py][build_messages][10.evidence 추가] evidence_len=%d",
+            #     len(chunk_context),
+            # )
 
         parts.append("[question]\n" + question.strip())
-        logger.info(
-            "[prompt_builder.py][build_messages][11.question 추가] question_len=%d preview=%s",
-            len(question or ""),
-            _preview_text(question, 300),
-        )
+        # logger.info(
+        #     "[prompt_builder.py][build_messages][11.question 추가] question_len=%d preview=%s",
+        #     len(question or ""),
+        #     _preview_text(question, 300),
+        # )
 
         final_user_content = "\n\n".join(parts)
         messages.append({"role": "user", "content": final_user_content})
 
-        logger.info(
-            "[prompt_builder.py][build_messages][12.완료] parts_count=%d final_user_content_len=%d final_message_count=%d final_user_preview=%s",
-            len(parts),
-            len(final_user_content),
-            len(messages),
-            _preview_text(final_user_content, 500),
-        )
+        # logger.info(
+        #     "[prompt_builder.py][build_messages][12.완료] parts_count=%d final_user_content_len=%d final_message_count=%d final_user_preview=%s",
+        #     len(parts),
+        #     len(final_user_content),
+        #     len(messages),
+        #     _preview_text(final_user_content, 500),
+        # )
         return messages

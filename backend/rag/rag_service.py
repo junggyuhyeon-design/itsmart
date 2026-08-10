@@ -64,12 +64,9 @@ class RAGService:
         # project_name       : 프로젝트명
         # saved_path         : 업로드된 원본 zip/파일 저장 경로
         # relative_path      : 프로젝트 내부 상대경로 (예: backend/main.py)
-        # original_name      : 원본 파일명
-        # filename           : 파일명
+        # file_name           : 파일명
         # extension          : 확장자
-        # filesize           : 파일 크기
-        # source_type        : 원본 유형 (zip_entry, single_file 등)
-        # root_container_name: 루트 zip 이름 등
+        # file_size           : 파일 크기
 
         if not targets:
             logger.warning("[rag_service.py][index_files] no targets")
@@ -104,29 +101,27 @@ class RAGService:
         code_elements_rows_by_project: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
         for index, target in enumerate(targets, start=1):
-            relative_path = target.get("relative_path") or target.get("file_name") or target.get("filename") or "unknown"
+            relative_path = target.get("relative_path")
 
-            logger.info(
-                "[rag_service.py][index_files] target start step=%d/%d project_id=%s project_name=%s relative_path=%s extension=%s filesize=%s source_type=%s",
-                index,
-                total_targets,
-                target.get("project_id"),
-                target.get("project_name"),
-                relative_path,
-                target.get("extension"),
-                target.get("filesize"),
-                target.get("source_type"),
-            )
+            # logger.info(
+            #     "[rag_service.py][index_files] target start step=%d/%d project_id=%s project_name=%s relative_path=%s extension=%s file_size=%s",
+            #     index,
+            #     total_targets,
+            #     target.get("project_id"),
+            #     target.get("project_name"),
+            #     relative_path,
+            #     target.get("extension"),
+            #     target.get("filesize"),
+            # )
 
             try:
                 # 파일 읽기 + 기본 메타/언어/계층/클래스 정보 파싱
                 parsed = parse_text_file(target)
-
-                logger.info(
-                    "[rag_service.py][index_files] parse_text_file returned relative_path=%s parsed=%s",
-                    relative_path,
-                    parsed is not None,
-                    )
+                # logger.info(
+                #     "[rag_service.py][index_files] parse_text_file returned relative_path=%s parsed=%s",
+                #     relative_path,
+                #     parsed is not None,
+                #     )
                 # ? parsed 정보 :
                 # raw_text             : 파일 원문 텍스트
                 # project_id           : 프로젝트 아이디
@@ -139,8 +134,6 @@ class RAGService:
                 # saved_path           : 저장 경로
                 # file_path            : 실제 파일 경로
                 # file_size            : 파일 크기
-                # source_type          : 업로드 원본 타입
-                # root_container_name  : 루트 zip 이름
                 # layer_type           : 계층 타입 (controller/service/repository/mapper/config 등)
                 # content_type         : 내용 타입 (api_endpoint/sql_select/ddl_create 등)
                 # class_name           : 클래스명
@@ -171,24 +164,24 @@ class RAGService:
                         )
                     continue
 
-                logger.info(
-                    "[rag_service.py][index_files] parsed summary relative_path=%s language=%s layer_type=%s content_type=%s class_name=%s package=%s",
-                    parsed.get("relative_path"),
-                    parsed.get("language"),
-                    parsed.get("layer_type"),
-                    parsed.get("content_type"),
-                    parsed.get("class_name"),
-                    parsed.get("package"),
-                )
+                # logger.info(
+                #     "[rag_service.py][index_files] parsed summary relative_path=%s language=%s layer_type=%s content_type=%s class_name=%s package=%s",
+                #     parsed.get("relative_path"),
+                #     parsed.get("language"),
+                #     parsed.get("layer_type"),
+                #     parsed.get("content_type"),
+                #     parsed.get("class_name"),
+                #     parsed.get("package"),
+                # )
 
                 # 파일 청킹
                 chunks = self.chunk_service.chunk_parsed_file(parsed)
 
-                logger.info(
-                    "[rag_service.py][index_files] chunk_parsed_file completed relative_path=%s chunk_count=%d",
-                    relative_path,
-                    len(chunks or []),
-                )
+                # logger.info(
+                #     "[rag_service.py][index_files] chunk_parsed_file completed relative_path=%s chunk_count=%d",
+                #     relative_path,
+                #     len(chunks or []),
+                # )
 
                 # ? chunks 정보 : 벡터DB(Qdrant)에 저장할 청크 리스트
                 # project_id         : 프로젝트 아이디
@@ -199,8 +192,6 @@ class RAGService:
                 # saved_path         : 저장 경로
                 # file_path          : 실제 파일 경로
                 # file_size          : 파일 크기
-                # source_type        : 업로드 원본 타입
-                # root_container_name: 루트 zip 이름
                 # layer_type         : 계층 타입
                 # class_name         : 클래스명
                 # package            : 패키지명
@@ -235,12 +226,12 @@ class RAGService:
                 # 공백 청크 제거
                 valid_chunks = [chunk for chunk in chunks if (chunk.get("text") or "").strip()]
 
-                logger.info(
-                    "[rag_service.py][index_files] valid_chunks filtered relative_path=%s raw_chunk_count=%d valid_chunk_count=%d",
-                    relative_path,
-                    len(chunks or []),
-                    len(valid_chunks),
-                )
+                # logger.info(
+                #     "[rag_service.py][index_files] valid_chunks filtered relative_path=%s raw_chunk_count=%d valid_chunk_count=%d",
+                #     relative_path,
+                #     len(chunks or []),
+                #     len(valid_chunks),
+                # )
 
                 if not valid_chunks:
                     failed += 1
@@ -280,6 +271,7 @@ class RAGService:
                     len(sparse_vectors or []),
                     len(sparse_vectors[0].indices) if sparse_vectors else 0,
                 )
+                logger.info("============================================================")
 
                 # Qdrant 저장
                 upserted = self.qdrant_service.upsert_chunks(valid_chunks, dense_vectors, sparse_vectors)
@@ -291,29 +283,30 @@ class RAGService:
                     upserted,
                     total_chunks,
                 )
+                logger.info("============================================================")
 
-                project_id = parsed.get("project_id", "") or target.get("project_id", "")
-                project_name = parsed.get("project_name", "") or target.get("project_name", "")
+                project_id = parsed.get("project_id", "")
+                project_name = parsed.get("project_name", "")
 
                 # SQLite file_index 저장용 메타데이터 누적
                 file_index_rows.append(
                     {
                         "project_id": project_id,
                         "project_name": project_name,
-                        "file_name": parsed.get("file_name", "") or target.get("file_name", ""),
-                        "relative_path": parsed.get("relative_path", "") or target.get("relative_path", ""),
-                        "extension": parsed.get("extension", "") or target.get("extension", ""),
-                        "file_size": int(parsed.get("file_size", 0) or target.get("file_size", 0) or 0),
+                        "file_name": parsed.get("file_name", ""),
+                        "relative_path": parsed.get("relative_path", ""),
+                        "extension": parsed.get("extension", ""),
+                        "file_size": int(parsed.get("file_size", 0)),
                     }
                 )
 
-                logger.info(
-                    "[rag_service.py][index_files] file_index_rows appended project_id=%s project_name=%s relative_path=%s current_file_index_rows=%d",
-                    project_id,
-                    project_name,
-                    parsed.get("relative_path", "") or target.get("relative_path", ""),
-                    len(file_index_rows),
-                    )
+                # logger.info(
+                #     "[rag_service.py][index_files] file_index_rows appended project_id=%s project_name=%s relative_path=%s current_file_index_rows=%d",
+                #     project_id,
+                #     project_name,
+                #     parsed.get("relative_path", "") or target.get("relative_path", ""),
+                #     len(file_index_rows),
+                #     )
 
                 try:
                     # 정적 분석 추출
@@ -336,8 +329,6 @@ class RAGService:
                     # saved_path            : 저장 경로
                     # layer_type            : 계층 타입
                     # content_type          : 내용 타입
-                    # class_name            : 클래스명
-                    # package               : 패키지명
                     # xml_namespace         : XML namespace
                     # xml_sql_fragments     : XML sql fragment id 목록
                     # xml_statements        : xml select/insert/update/delete id 목록
@@ -348,33 +339,33 @@ class RAGService:
                     if analysis:
                         key = (project_id, project_name)
                         code_elements_rows_by_project.setdefault(key, []).append(analysis)
-                        logger.debug(
-                            "static analysis prepared: %s / layer=%s / class=%s",
-                            analysis.get("relative_path"),
-                            analysis.get("layer_type"),
-                            analysis.get("class_name"),
-                        )
-                        logger.info(
-                            "[rag_service.py][index_files] code_elements_rows_by_project appended project_id=%s project_name=%s current_project_elements=%d",
-                            project_id,
-                            project_name,
-                            len(code_elements_rows_by_project.get(key, [])),
-                        )
+                        # logger.debug(
+                        #     "static analysis prepared: %s / layer=%s / class=%s",
+                        #     analysis.get("relative_path"),
+                        #     analysis.get("layer_type"),
+                        #     analysis.get("class_name"),
+                        # )
+                        # logger.info(
+                        #     "[rag_service.py][index_files] code_elements_rows_by_project appended project_id=%s project_name=%s current_project_elements=%d",
+                        #     project_id,
+                        #     project_name,
+                        #     len(code_elements_rows_by_project.get(key, [])),
+                        # )
                 except Exception:
                     logger.exception("[rag_service.py][index_files] extract_static_analysis failed relative_path=%s", relative_path)
 
                 success += 1
                 logs.append(f"[ok] indexed {relative_path} ({upserted} chunks)")
 
-                logger.info(
-                    "[rag_service.py][index_files] target completed step=%d/%d relative_path=%s success=%d failed=%d total_chunks=%d",
-                    index,
-                    total_targets,
-                    relative_path,
-                    success,
-                    failed,
-                    total_chunks,
-                )
+                # logger.info(
+                #     "[rag_service.py][index_files] target completed step=%d/%d relative_path=%s success=%d failed=%d total_chunks=%d",
+                #     index,
+                #     total_targets,
+                #     relative_path,
+                #     success,
+                #     failed,
+                #     total_chunks,
+                # )
 
                 if progress_callback:
                     # ? progress_callback kwargs :
@@ -433,11 +424,11 @@ class RAGService:
         indexed_files = 0
         code_elements_count = 0
 
-        logger.info(
-            "[rag_service.py][index_files] before sqlite save file_index_rows=%d project_groups=%d",
-            len(file_index_rows),
-            len(code_elements_rows_by_project),
-        )
+        # logger.info(
+        #     "[rag_service.py][index_files] before sqlite save file_index_rows=%d project_groups=%d",
+        #     len(file_index_rows),
+        #     len(code_elements_rows_by_project),
+        # )
 
         try:
             # SQLite file_index 테이블 일괄 저장
@@ -455,13 +446,13 @@ class RAGService:
             for (project_id, project_name), elements in code_elements_rows_by_project.items():
                 inserted = insert_code_elements(project_id, project_name, elements)
                 code_elements_count += inserted
-                logger.info(
-                    "[rag_service.py][index_files] insert_code_elements completed project_id=%s project_name=%s inserted=%d accumulated_code_elements=%d",
-                    project_id,
-                    project_name,
-                    inserted,
-                    code_elements_count,
-                )
+                # logger.info(
+                #     "[rag_service.py][index_files] insert_code_elements completed project_id=%s project_name=%s inserted=%d accumulated_code_elements=%d",
+                #     project_id,
+                #     project_name,
+                #     inserted,
+                #     code_elements_count,
+                # )
         except Exception as error:
             logger.exception("[rag_service.py][index_files] insert_code_elements failed")
             logs.append(f"[error] insert_code_elements: {error}")
@@ -475,15 +466,15 @@ class RAGService:
             "logs": logs[-100:],
         }
 
-        logger.info(
-            "[rag_service.py][index_files] completed success=%d failed=%d total_chunks=%d indexed_files=%d code_elements=%d log_count=%d",
-            result["success"],
-            result["failed"],
-            result["total_chunks"],
-            result["indexed_files"],
-            result["code_elements"],
-            len(result["logs"]),
-        )
+        # logger.info(
+        #     "[rag_service.py][index_files] completed success=%d failed=%d total_chunks=%d indexed_files=%d code_elements=%d log_count=%d",
+        #     result["success"],
+        #     result["failed"],
+        #     result["total_chunks"],
+        #     result["indexed_files"],
+        #     result["code_elements"],
+        #     len(result["logs"]),
+        # )
 
         return result
 
@@ -533,11 +524,15 @@ class RAGService:
         partial_hits: list[dict[str, Any]] = []
         others: list[dict[str, Any]] = []
 
+        logger.info("=== for 문 실행중 ===")
         for hit in hits:
             text = str(hit.get("text") or "").strip()
             text_norm = text.lower()
 
             copied = dict(hit)
+
+            logger.info("text_norm :: %s", text_norm)
+            logger.info("needle_norm :: %s", needle_norm)
 
             if text_norm == needle_norm:
                 copied["match_type"] = "exact"
@@ -549,14 +544,15 @@ class RAGService:
                 others.append(copied)
 
         merged = exact_hits + partial_hits + others
+        logger.info("=== merged 완성 ===")
 
-        logger.info(
-            "[rag_service.py][_make_exact_match_hits] needle=%s exact_count=%d partial_count=%d other_count=%d",
-            needle,
-            len(exact_hits),
-            len(partial_hits),
-            len(others),
-        )
+        # logger.info(
+        #     "[rag_service.py][_make_exact_match_hits] needle=%s exact_count=%d partial_count=%d other_count=%d",
+        #     needle,
+        #     len(exact_hits),
+        #     len(partial_hits),
+        #     len(others),
+        # )
         return merged
 
     def _make_line_level_exact_hits(self, hits: list[dict[str, Any]] | None, needle: str) -> list[dict[str, Any]]:
@@ -607,7 +603,7 @@ class RAGService:
                 copied["matched_line"] = idx + 1
 
                 dedupe_key = (
-                    copied.get("relative_path") or copied.get("file_name") or copied.get("filename"),
+                    copied.get("relative_path") or copied.get("file_name"),
                     copied.get("chunk_index"),
                 )
                 if dedupe_key not in used_keys:
@@ -696,30 +692,30 @@ class RAGService:
         if top_k is None:
             top_k = self.settings.top_k
 
-        logger.info(
-            "[rag_service.py][ask_with_context_stream] start query_type=%s project_id=%s project_name=%s top_k=%s layer_filter=%s extension_filter=%s question_len=%d retrieval_question_len=%d chat_history_count=%d recent_entities_count=%d",
-            query_type,
-            project_id,
-            project_name,
-            top_k,
-            layer_filter,
-            extension_filter,
-            len(question or ""),
-            len(retrieval_question or ""),
-            len(chat_history or []),
-            len(recent_entities or []),
-        )
+        # logger.info(
+        #     "[rag_service.py][ask_with_context_stream] start query_type=%s project_id=%s project_name=%s top_k=%s layer_filter=%s extension_filter=%s question_len=%d retrieval_question_len=%d chat_history_count=%d recent_entities_count=%d",
+        #     query_type,
+        #     project_id,
+        #     project_name,
+        #     top_k,
+        #     layer_filter,
+        #     extension_filter,
+        #     len(question or ""),
+        #     len(retrieval_question or ""),
+        #     len(chat_history or []),
+        #     len(recent_entities or []),
+        # )
 
         # 검색용 질의문 결정
         retrieval_text = (retrieval_question or question or "").strip()
-        if not retrieval_text:
-            retrieval_text = (question or "").strip()
+        # if not retrieval_text:
+        #     retrieval_text = (question or "").strip()
 
-        logger.info(
-            "[rag_service.py][ask_with_context_stream] retrieval_text prepared length=%d preview=%s",
-            len(retrieval_text),
-            retrieval_text[:200],
-        )
+        # logger.info(
+        #     "[rag_service.py][ask_with_context_stream] retrieval_text prepared length=%d preview=%s",
+        #     len(retrieval_text),
+        #     retrieval_text[:200],
+        # )
 
         # 질의 임베딩
         dense_query_vector = self.embedding_service.embed_query_dense(retrieval_text)
@@ -735,38 +731,45 @@ class RAGService:
         # 사용자의 질문을 임베딩 모델로 변환한 검색용 벡터
         # Qdrant 유사도 검색 입력값으로 사용됨
 
-        candidate_top_k = max(top_k or self.settings.top_k, self.settings.reranker_candidate_top_k) #Reranker
+        logger.info("intent 에서 넘어온 top_k : %s", top_k)
+        logger.info("default top_k : %s", self.settings.top_k)
+        logger.info("reranker_candidate_top_k : %s", self.settings.reranker_candidate_top_k)
+
+        candidate_top_k = max(top_k or self.settings.top_k, self.settings.reranker_candidate_top_k) # Reranker
+        logger.info("최종 셋팅 top_k :: %s", candidate_top_k)
 
         # Qdrant 유사도 검색
         hits = self.qdrant_service.search(
             dense_query_vector,
             sparse_query_vector,
             project_id=project_id,
-            top_k=candidate_top_k,  #Reranker
+            top_k=candidate_top_k,  # Reranker
             layer_filter=layer_filter,
             extension_filter=extension_filter,
         )
 
-        raw_hit_count = len(hits or []) if isinstance(hits, list) else 0
-        if isinstance(hits, list) and hits:
-            logger.info(
-                "[rag_service.py][ask_with_context_stream] raw first hit type=%s repr=%s",
-                type(hits[0]).__name__,
-                str(hits[0])[:500],
-            )
+        # raw_hit_count = len(hits or []) if isinstance(hits, list) else 0
+        # if isinstance(hits, list) and hits:
+        #     logger.info(
+        #         "[rag_service.py][ask_with_context_stream] raw first hit type=%s repr=%s",
+        #         type(hits[0]).__name__,
+        #         str(hits[0])[:500],
+        #     )
 
         hits = self._flatten_hits(hits)
 
-        logger.info(
-            "[rag_service.py][ask_with_context_stream] qdrant search completed raw_hit_count=%d flattened_hit_count=%d",
-            raw_hit_count,
-            len(hits or []),
-        )
+        # logger.info(
+        #     "[rag_service.py][ask_with_context_stream] qdrant search completed raw_hit_count=%d flattened_hit_count=%d",
+        #     raw_hit_count,
+        #     len(hits or []),
+        # )
 
         # exact grep (독립 리터럴 검색), Reranker
         # edit 계열 요청: vector 전(우선) exact grep 리터럴 검색 → 최우선 증거로 병합
         if query_type in {"edit_text_one", "edit_text_all"}:
             grep_needle = (edit_source or retrieval_text or "").strip()
+
+            logger.info("변경 요청 질의 확인 (grep_needle) :: %s", grep_needle)
 
             # 1) vector 검색과 무관하게 프로젝트 전체 소스에서 리터럴 grep
             grep_hits: list[dict[str, Any]] = []
@@ -796,7 +799,7 @@ class RAGService:
             #    (grep hit 의 text/line_no 는 그대로 보존하여 step3 정확한 줄/전후값 답변에 사용)
             vector_hits = self._make_exact_match_hits(hits, grep_needle)
             vector_hits = self._make_line_level_exact_hits(vector_hits, grep_needle)
-            vector_hits = self._flatten_hits(vector_hits)
+            vector_hits = self._flatten_hits(vector_hits) 
 
             # 3) 병합: grep 결과 최우선. grep hit 있으면 vector 후보는 보조(fallback)로 제한.
             if grep_hits:
@@ -825,24 +828,24 @@ class RAGService:
                 final_top_n=top_k or self.settings.reranker_final_top_n,
             )
             hits = self._flatten_hits(reranked_hits)
-            logger.info(
-                "ragservice.py ask_with_context_stream rerank completed before=%d after=%d",
-                len(reranked_hits or []),
-                len(hits or []),
-            )
+            # logger.info(
+            #     "ragservice.py ask_with_context_stream rerank completed before=%d after=%d",
+            #     len(reranked_hits or []),
+            #     len(hits or []),
+            # )
         else:
             hits = list(hits or [])
             # edit_text_all 은 grep 발생 위치 전체를 보존 (step3 전체 변경 답변용). 그 외만 top_k 로 절단.
             if query_type != "edit_text_all":
                 hits = hits[: top_k or self.settings.top_k]
 
-            logger.info(
-                "ragservice.py ask_with_context_stream rerank skipped enabled=%s query_type=%s hit_count=%d final_hit_count=%d",
-                self.settings.reranker_enabled,
-                query_type,
-                len(hits or []),
-                len(hits or []),
-            )
+            # logger.info(
+            #     "ragservice.py ask_with_context_stream rerank skipped enabled=%s query_type=%s hit_count=%d final_hit_count=%d",
+            #     self.settings.reranker_enabled,
+            #     query_type,
+            #     len(hits or []),
+            #     len(hits or []),
+            # )
 
         first_hit = self._safe_first_hit(hits)
         if first_hit:

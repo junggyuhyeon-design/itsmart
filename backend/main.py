@@ -207,7 +207,7 @@ async def save_upload_stream(upload_file: UploadFile, destination: Path) -> None
                 await output_file.write(chunk)
         
         logger.info(
-            "[main.py][save_upload_stream] completed file=%s destination=%s total_written=%d",
+            "[main.py][save_upload_stream][파일 업로드] completed file=%s destination=%s total_written=%d",
             upload_file.filename,
             str(destination),
             total_written,
@@ -267,13 +267,9 @@ def normalize_target_item(item: dict[str, Any]) -> dict[str, Any]:
         "project_name": item.get("project_name"),
         "saved_path": item.get("saved_path"),
         "relative_path": item.get("relative_path"),
-        "original_name": item.get("original_name") or item.get("file_name"),
-        "file_name": item.get("file_name") or item.get("original_name"),
+        "file_name": item.get("file_name"),
         "extension": item.get("extension"),
-        "file_size": int(item.get("file_size") or item.get("size") or 0),
-        "file_path": item.get("file_path") or item.get("saved_path"),
-        "source_type": item.get("source_type", ""),
-        "root_container_name": item.get("root_container_name", ""),
+        "file_size": int(item.get("file_size")),
     }
 
 
@@ -286,6 +282,8 @@ def build_listing_context_summary(summary: dict[str, Any], extension_filter: str
     files = summary.get("files", [])
 
     if extension_filter:
+        logger.info("[main.py][build_listing_context_summary][확장자 필터] exist filter=%s", extension_filter)
+
         filtered_files = [item for item in files if item.get("extension") == extension_filter]
         lines.append(f"{extension_filter.upper()} files: {len(filtered_files)}")
         for item in filtered_files:
@@ -293,6 +291,7 @@ def build_listing_context_summary(summary: dict[str, Any], extension_filter: str
         return "\n".join(lines)
 
     lines.append(f"Total files: {summary.get('total', 0)}")
+    logger.info("[main.py][build_listing_context_summary][확장자 NO 필터] total filter=%d", summary.get('total', 0))
 
     by_extension: dict[str, list[str]] = {}
     for item in files:
@@ -482,16 +481,16 @@ def run_index_job(rag_service: RAGService, job_id: str, targets: list[dict[str, 
         logger.info("[main.py][run_index_job] update_index_job running set job_id=%s", job_id)
 
         def progress_callback(**kwargs):
-            logger.info(
-                "[main.py][run_index_job.progress_callback] job_id=%s processed_targets=%s total_chunks=%s success_count=%s failed_count=%s message=%s error=%s",
-                job_id,
-                kwargs.get("processed_targets"),
-                kwargs.get("total_chunks"),
-                kwargs.get("success_count"),
-                kwargs.get("failed_count"),
-                kwargs.get("message"),
-                kwargs.get("error"),
-            )
+#             logger.info(
+#                 "[main.py][run_index_job.progress_callback] job_id=%s processed_targets=%s total_chunks=%s success_count=%s failed_count=%s message=%s error=%s",
+#                 job_id,
+#                 kwargs.get("processed_targets"),
+#                 kwargs.get("total_chunks"),
+#                 kwargs.get("success_count"),
+#                 kwargs.get("failed_count"),
+#                 kwargs.get("message"),
+#                 kwargs.get("error"),
+#             )
             update_index_job(
                 job_id,
                 status="running",
@@ -506,15 +505,15 @@ def run_index_job(rag_service: RAGService, job_id: str, targets: list[dict[str, 
 
         result = rag_service.index_files(targets, progress_callback=progress_callback)
 
-        logger.info(
-            "[main.py][run_index_job] rag_service.index_files completed job_id=%s success=%s failed=%s total_chunks=%s indexed_files=%s code_elements=%s",
-            job_id,
-            result.get("success", 0),
-            result.get("failed", 0),
-            result.get("total_chunks", 0),
-            result.get("indexed_files", 0),
-            result.get("code_elements", 0),
-        )
+        # logger.info(
+        #     "[main.py][run_index_job] rag_service.index_files completed job_id=%s success=%s failed=%s total_chunks=%s indexed_files=%s code_elements=%s",
+        #     job_id,
+        #     result.get("success", 0),
+        #     result.get("failed", 0),
+        #     result.get("total_chunks", 0),
+        #     result.get("indexed_files", 0),
+        #     result.get("code_elements", 0),
+        # )
 
         update_index_job(
             job_id,
@@ -533,7 +532,7 @@ def run_index_job(rag_service: RAGService, job_id: str, targets: list[dict[str, 
             finished=True,
         )
 
-        logger.info("[main.py][run_index_job] completed job_id=%s", job_id)
+        # logger.info("[main.py][run_index_job] completed job_id=%s", job_id)
 
     except Exception as error:
         logger.exception("[main.py][run_index_job] failed job_id=%s", job_id)
@@ -618,10 +617,10 @@ async def upload(
                 status_code=400,
                 detail=f"unsupported upload extension: {upload_file.filename}",
             )
-        sanitized_name = safe_filename(upload_file.filename) # 안전한 파일명으로 변환
+        sanitized_name = safe_filename(upload_file.filename)
 
         user_upload_dir = upload_dir / user_id
-        ensure_dir(user_upload_dir)            # 해당 경로 directory 생성
+        ensure_dir(user_upload_dir)
 
         destination = user_upload_dir / sanitized_name
         
@@ -661,20 +660,19 @@ async def upload(
         project_id = getattr(target, "project_id", None)
         project_name = getattr(target, "project_name", None)
         saved_path = getattr(target, "saved_path", None)
-        root_container_name = getattr(target, "root_container_name", None)
 
-        logger.info(
-            "[main.py][upload] raw target project_id=%s project_name=%s relative_path=%s saved_path=%s extension=%s",
-            project_id,
-            project_name,
-            getattr(target, "relative_path", None),
-            saved_path,
-            getattr(target, "extension", None),
-        )
-        logger.info("============================================================")
+        # logger.info(
+        #     "[main.py][upload] raw target project_id=%s project_name=%s relative_path=%s saved_path=%s extension=%s",
+        #     project_id,
+        #     project_name,
+        #     getattr(target, "relative_path", None),
+        #     saved_path,
+        #     getattr(target, "extension", None),
+        # )
+        # logger.info("============================================================")
 
         if project_id and project_id not in projects_created:
-            origin_saved_path = upload_name_map.get(root_container_name or "", "")
+            origin_saved_path = upload_name_map.get(project_name, "")
             projects_created[project_id] = {
                 "project_name": project_name or "",
                 "saved_path": origin_saved_path,
@@ -693,12 +691,9 @@ async def upload(
                 "project_name": project_name,
                 "saved_path": saved_path,
                 "relative_path": getattr(target, "relative_path", None),
-                "original_name": getattr(target, "original_name", None),
                 "file_name": getattr(target, "original_name", None),
                 "extension": getattr(target, "extension", None),
                 "file_size": getattr(target, "size", 0),
-                "source_type": getattr(target, "source_type", None),
-                "root_container_name": root_container_name,
             }
         )
 
@@ -725,8 +720,6 @@ async def upload(
 
     return {
         "targets": normalized_targets,
-        "count": len(normalized_targets),
-        "projects": len(projects_created),
     }
 
 @app.post("/index-jobs")
@@ -741,6 +734,14 @@ async def create_job(
     logger.info("[main.py][create_job] start user_id=%s", user_id)
 
     targets = payload.get("targets", [])
+    # "project_id": project_id,
+    # "project_name": project_name,
+    # "saved_path": saved_path,
+    # "relative_path": getattr(target, "relative_path", None),
+    # "file_name": getattr(target, "original_name", None),
+    # "extension": getattr(target, "extension", None),
+    # "file_size": getattr(target, "size", 0), # TODO : pgy : 필요한가
+
     if not targets:
         logger.warning("[main.py][create_job] targets are required")
         raise HTTPException(status_code=400, detail="targets are required")
@@ -926,30 +927,19 @@ async def ask(
         payload: dict[str, Any] = Body(...),
         x_user_id: str | None = Header(default=None),
 ):
-    # pgy : 확인용[payload]
-    # "question": question,
-    # "top_k": 5,
-    #  project_id
-    #  project_name
-    # "extra_context": "",  --> extract_context 는 없음.
-
-    # read csv and plot graph
-
     user_id = require_user(x_user_id)
 
     question = (payload.get("question") or "").strip()
     project_name = payload.get("project_name")
     project_id = payload.get("project_id")
     extra_context = payload.get("extra_context", "")
-    top_k = int(payload.get("top_k") or settings.top_k) # default = 8
 
     if not question:
         raise HTTPException(status_code=400, detail="question is required")
 
-    history_limit = max(1, min(settings.chat_history_turns, 20)) # default = 8
+    history_limit = max(1, min(settings.chat_history_turns, 20))
     chat_history = list(reversed(get_history(user_id, project_id=project_id, limit=history_limit)))
-    recent_entities = get_recent_entities(user_id, limit=20, project_id=project_id) # 이게 뭐지..
-    
+    recent_entities = get_recent_entities(user_id, limit=20, project_id=project_id)
 
     intent = query_analyzer.analyze(question)
     rag_service = get_rag_service(request)
@@ -962,10 +952,14 @@ async def ask(
         summary = get_file_index_summary(project_id)
         if summary.get("total", 0) > 0:
             structure_context = build_listing_context_summary(summary, intent.extension_filter)
+            logger.info("============================================================")
+            logger.info("structure_context ::: %s", structure_context)
 
     sqlite_context = ""
     if project_id and detect_meta_request(question):
         sqlite_context = build_sqlite_context(project_id, project_name or "", question)
+        logger.info("============================================================")
+        logger.info("sqlite_context ::: %s", sqlite_context)
 
     generator, hits = await call_ask_with_context_stream(
         rag_service=rag_service,
@@ -975,7 +969,7 @@ async def ask(
         project_name=project_name,
         extra_context=structure_context or extra_context,
         sqlite_context=sqlite_context,
-        top_k=top_k,
+        top_k=intent.top_k,
         layer_filter=intent.layer_filter,
         extension_filter=intent.extension_filter,
         query_type=intent.query_type,

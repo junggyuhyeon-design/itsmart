@@ -37,18 +37,18 @@ class OllamaService:
             edit_source: str | None = None, #변경 파일/줄/전후값 중심 답변 패치
             edit_target: str | None = None, #변경 파일/줄/전후값 중심 답변 패치
     ):
-        logger.info(
-            "[ollama_service.py][generate_response_stream][1.시작] query_type=%s project_name=%s question_len=%d hits=%d struct_context_len=%d chat_history_count=%d recent_entities_count=%d sqlite_context_len=%d question_preview=%s",
-            query_type,
-            project_name,
-            len(question or ""),
-            len(hits or []),
-            len(struct_context or ""),
-            len(chat_history or []),
-            len(recent_entities or []),
-            len(sqlite_context or ""),
-            _preview_text(question, 300),
-        )
+        # logger.info(
+        #     "[ollama_service.py][generate_response_stream][1.시작] query_type=%s project_name=%s question_len=%d hits=%d struct_context_len=%d chat_history_count=%d recent_entities_count=%d sqlite_context_len=%d question_preview=%s",
+        #     query_type,
+        #     project_name,
+        #     len(question or ""),
+        #     len(hits or []),
+        #     len(struct_context or ""),
+        #     len(chat_history or []),
+        #     len(recent_entities or []),
+        #     len(sqlite_context or ""),
+        #     _preview_text(question, 300),
+        # )
 
         messages = self.prompt_builder.build_messages(
             question=question,
@@ -64,13 +64,13 @@ class OllamaService:
             edit_target=edit_target, #변경 파일/줄/전후값 중심 답변 패치
         )
 
-        logger.info(
-            "[ollama_service.py][generate_response_stream][2.messages 생성완료] message_count=%d last_message_role=%s last_message_len=%d last_message_preview=%s",
-            len(messages or []),
-            messages[-1].get("role") if messages else "",
-            len((messages[-1].get("content") if messages else "") or ""),
-            _preview_text((messages[-1].get("content") if messages else "") or "", 500),
-        )
+        # logger.info(
+        #     "[ollama_service.py][generate_response_stream][2.messages 생성완료] message_count=%d last_message_role=%s last_message_len=%d last_message_preview=%s",
+        #     len(messages or []),
+        #     messages[-1].get("role") if messages else "",
+        #     len((messages[-1].get("content") if messages else "") or ""),
+        #     _preview_text((messages[-1].get("content") if messages else "") or "", 500),
+        # )
 
         logger.info(
             "[ollama_service.py][generate_response_stream][messages 전체 덤프] %s",
@@ -98,10 +98,10 @@ class OllamaService:
             )
 
             async with client.stream("POST", url, json=payload) as response:
-                logger.info(
-                    "[ollama_service.py][generate_response_stream][5.ollama 응답수신] status_code=%d",
-                    response.status_code,
-                )
+                # logger.info(
+                #     "[ollama_service.py][generate_response_stream][5.ollama 응답수신] status_code=%d",
+                #     response.status_code,
+                # )
                 response.raise_for_status()
 
                 chunk_count = 0
@@ -118,20 +118,20 @@ class OllamaService:
                         chunk_count += 1
                         total_content_length += len(content)
 
-                        logger.info(
-                            "[ollama_service.py][generate_response_stream][6.stream 청크수신] chunk_count=%d content_len=%d content_preview=%s",
-                            chunk_count,
-                            len(content),
-                            _preview_text(content, 200),
-                        )
+                        # logger.info(
+                        #     "[ollama_service.py][generate_response_stream][6.stream 청크수신] chunk_count=%d content_len=%d content_preview=%s",
+                        #     chunk_count,
+                        #     len(content),
+                        #     _preview_text(content, 200),
+                        # )
                         yield content
 
                     if chunk.get("done"):
-                        logger.info(
-                            "[ollama_service.py][generate_response_stream][7.stream 종료] chunk_count=%d total_content_length=%d done=%s done_reason=%s",
-                            chunk_count,
-                            total_content_length,
-                            chunk.get("done"),
-                            chunk.get("done_reason"),
-                        )
+                        # logger.info(
+                        #     "[ollama_service.py][generate_response_stream][7.stream 종료] chunk_count=%d total_content_length=%d done=%s done_reason=%s",
+                        #     chunk_count,
+                        #     total_content_length,
+                        #     chunk.get("done"),
+                        #     chunk.get("done_reason"),
+                        # )
                         break

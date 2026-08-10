@@ -71,13 +71,13 @@ class RerankerService:
 
         rescored.sort(key=lambda x: x.get("rerank_score", 0.0), reverse=True)
 
-        logger.info(
-            "reranker_service.py rerank completed input_hits=%d valid_hits=%d output_hits=%d top_relative_path=%s top_score=%s",
-            len(hits),
-            len(valid_hits),
-            min(len(rescored), limit),
-            rescored[0].get("relative_path") if rescored else None,
-            rescored[0].get("rerank_score") if rescored else None,
-        )
+        # logger.info(
+        #     "reranker_service.py rerank completed input_hits=%d valid_hits=%d output_hits=%d top_relative_path=%s top_score=%s",
+        #     len(hits),
+        #     len(valid_hits),
+        #     min(len(rescored), limit),
+        #     rescored[0].get("relative_path") if rescored else None,
+        #     rescored[0].get("rerank_score") if rescored else None,
+        # )
 
         return rescored[:limit]

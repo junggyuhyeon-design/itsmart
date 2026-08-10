@@ -85,12 +85,12 @@ def read_text_file(path: str) -> str:
     for encoding in ("utf-8", "cp949", "euc-kr", "latin-1"):
         try:
             text = file_path.read_text(encoding=encoding)
-            logger.info(
-                "[file_parser.py][read_text_file] success path=%s encoding=%s text_length=%d",
-                path,
-                encoding,
-                len(text),
-            )
+#             logger.info(
+#                 "[file_parser.py][read_text_file] success path=%s encoding=%s text_length=%d",
+#                 path,
+#                 encoding,
+#                 len(text),
+#             )
             return text
         except UnicodeDecodeError:
             logger.debug("[file_parser.py][read_text_file] decode failed path=%s encoding=%s", path, encoding)
@@ -127,10 +127,10 @@ def detect_language(file_name: str, text: str) -> str:
     파일명과 본문을 바탕으로 언어/문서 유형을 추정한다.
 
     우선순위:
-    1) 확장자 기반 빠른 판별
-    2) pygments guess_lexer_for_filename()
-    3) pygments get_lexer_for_filename()
-    4) pygments guess_lexer()
+    1) pygments guess_lexer_for_filename()
+    2) pygments get_lexer_for_filename()
+    3) pygments guess_lexer()
+    4) 확장자 기반 빠른 판별
     5) 그래도 실패하면 extension 또는 text 반환
 
     사용처:
@@ -139,12 +139,57 @@ def detect_language(file_name: str, text: str) -> str:
     """
     extension = normalize_extension(Path(file_name).suffix)
 
-    logger.info(
-        "[file_parser.py][detect_language] start file_name=%s extension=%s text_length=%d",
-        file_name,
-        extension,
-        len(text or ""),
-    )
+    # logger.info(
+    #     "[file_parser.py][detect_language] start file_name=%s extension=%s text_length=%d",
+    #     file_name,
+    #     extension,
+    #     len(text or ""),
+    # )
+
+    try:
+        lexer = guess_lexer_for_filename(file_name, text)
+        alias = (lexer.aliases[0] if getattr(lexer, "aliases", None) else "").lower()
+        if alias:
+            logger.info(
+                "[file_parser.py][detect_language] detected by guess_lexer_for_filename file_name=%s language=%s",
+                file_name,
+                alias,
+            )
+            return alias
+    except ClassNotFound:
+        logger.debug("[file_parser.py][detect_language] guess_lexer_for_filename class not found file_name=%s", file_name)
+    except Exception as error:
+        logger.debug("[file_parser.py][detect_language] guess_lexer_for_filename failed file_name=%s error=%s", file_name, error)
+
+    try:
+        lexer = get_lexer_for_filename(file_name)
+        alias = (lexer.aliases[0] if getattr(lexer, "aliases", None) else "").lower()
+        if alias:
+            logger.info(
+                "[file_parser.py][detect_language] detected by get_lexer_for_filename file_name=%s language=%s",
+                file_name,
+                alias,
+            )
+            return alias
+    except ClassNotFound:
+        logger.debug("[file_parser.py][detect_language] get_lexer_for_filename class not found file_name=%s", file_name)
+    except Exception as error:
+        logger.debug("[file_parser.py][detect_language] get_lexer_for_filename failed file_name=%s error=%s", file_name, error)
+
+    try:
+        lexer = guess_lexer(text)
+        alias = (lexer.aliases[0] if getattr(lexer, "aliases", None) else "").lower()
+        if alias:
+            logger.info(
+                "[file_parser.py][detect_language] detected by guess_lexer file_name=%s language=%s",
+                file_name,
+                alias,
+            )
+            return alias
+    except ClassNotFound:
+        logger.debug("[file_parser.py][detect_language] guess_lexer class not found file_name=%s", file_name)
+    except Exception as error:
+        logger.debug("[file_parser.py][detect_language] guess_lexer failed file_name=%s error=%s", file_name, error)
 
     if extension in SQL_LIKE_EXTENSIONS:
         logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=sql", file_name)
@@ -194,51 +239,6 @@ def detect_language(file_name: str, text: str) -> str:
     if extension in TEMPLATE_EXTENSIONS:
         logger.info("[file_parser.py][detect_language] detected by extension file_name=%s language=%s", file_name, extension)
         return extension
-
-    try:
-        lexer = guess_lexer_for_filename(file_name, text)
-        alias = (lexer.aliases[0] if getattr(lexer, "aliases", None) else "").lower()
-        if alias:
-            logger.info(
-                "[file_parser.py][detect_language] detected by guess_lexer_for_filename file_name=%s language=%s",
-                file_name,
-                alias,
-            )
-            return alias
-    except ClassNotFound:
-        logger.debug("[file_parser.py][detect_language] guess_lexer_for_filename class not found file_name=%s", file_name)
-    except Exception as error:
-        logger.debug("[file_parser.py][detect_language] guess_lexer_for_filename failed file_name=%s error=%s", file_name, error)
-
-    try:
-        lexer = get_lexer_for_filename(file_name)
-        alias = (lexer.aliases[0] if getattr(lexer, "aliases", None) else "").lower()
-        if alias:
-            logger.info(
-                "[file_parser.py][detect_language] detected by get_lexer_for_filename file_name=%s language=%s",
-                file_name,
-                alias,
-            )
-            return alias
-    except ClassNotFound:
-        logger.debug("[file_parser.py][detect_language] get_lexer_for_filename class not found file_name=%s", file_name)
-    except Exception as error:
-        logger.debug("[file_parser.py][detect_language] get_lexer_for_filename failed file_name=%s error=%s", file_name, error)
-
-    try:
-        lexer = guess_lexer(text)
-        alias = (lexer.aliases[0] if getattr(lexer, "aliases", None) else "").lower()
-        if alias:
-            logger.info(
-                "[file_parser.py][detect_language] detected by guess_lexer file_name=%s language=%s",
-                file_name,
-                alias,
-            )
-            return alias
-    except ClassNotFound:
-        logger.debug("[file_parser.py][detect_language] guess_lexer class not found file_name=%s", file_name)
-    except Exception as error:
-        logger.debug("[file_parser.py][detect_language] guess_lexer failed file_name=%s error=%s", file_name, error)
 
     detected = extension or "text"
     logger.info("[file_parser.py][detect_language] fallback file_name=%s language=%s", file_name, detected)
@@ -1109,53 +1109,42 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
     - 후속 청킹, 정적 분석, DB 저장에 쓸 기본 메타데이터 dict
     - 필수 키 누락, 읽기 실패, 빈 파일이면 {}
     """
-    logger.info(
-        "[file_parser.py][parse_text_file] start project_id=%s project_name=%s relative_path=%s saved_path=%s",
-        file_info.get("project_id", file_info.get("projectid", "")),
-        file_info.get("project_name", file_info.get("projectname", "")),
-        file_info.get("relative_path", file_info.get("relativepath", "")),
-        file_info.get("saved_path", file_info.get("savedpath", "")),
-    )
+    # logger.info(
+    #     "[file_parser.py][parse_text_file] start project_id=%s project_name=%s relative_path=%s saved_path=%s",
+    #     file_info.get("project_id", ""),
+    #     file_info.get("project_name", ""),
+    #     file_info.get("relative_path", ""),
+    #     file_info.get("saved_path", ""),
+    # )
 
     try:
-        # 여러 업로드 경로 키명을 허용해 saved_path를 최대한 유연하게 찾음
-        saved_path = (
-                file_info.get("saved_path")
-                or file_info.get("savedpath")
-                or file_info.get("file_path")
-                or file_info.get("filepath")
-        )
-        if not saved_path:
-            raise KeyError("saved_path")
-
-        logger.info("[file_parser.py][parse_text_file] resolved saved_path=%s", saved_path)
+        # logger.info("[file_parser.py][parse_text_file] resolved saved_path=%s", saved_path)
 
         # 파일 원문 전체 텍스트
+        saved_path = file_info.get("saved_path")
+
         raw_text = read_text_file(saved_path)
-        logger.info("[file_parser.py][parse_text_file] read_text_file completed saved_path=%s text_length=%d", saved_path, len(raw_text))
+#         logger.info("[file_parser.py][parse_text_file] read_text_file completed saved_path=%s text_length=%d", saved_path, len(raw_text))
 
         if not raw_text.strip():
-            logger.warning("[file_parser.py][parse_text_file] empty file saved_path=%s", saved_path)
+#             logger.warning("[file_parser.py][parse_text_file] empty file saved_path=%s", saved_path)
             return {}
 
         # 원본 파일명 우선, 없으면 저장된 경로의 파일명 사용
-        file_name = file_info.get(
-            "file_name",
-            file_info.get("filename", file_info.get("original_name", file_info.get("originalname", Path(saved_path).name))),
-        )
+        file_name = file_info.get("file_name") or Path(saved_path).name
 
         # 프로젝트 루트 기준 상대경로
-        relative_path = file_info.get("relative_path", file_info.get("relativepath", ""))
+        relative_path = file_info.get("relative_path", "")
 
         # 확장자 정규화
         extension = normalize_extension(file_info.get("extension") or Path(file_name).suffix)
 
-        logger.info(
-            "[file_parser.py][parse_text_file] file identity file_name=%s relative_path=%s extension=%s",
-            file_name,
-            relative_path,
-            extension,
-        )
+        # logger.info(
+        #     "[file_parser.py][parse_text_file] file identity file_name=%s relative_path=%s extension=%s",
+        #     file_name,
+        #     relative_path,
+        #     extension,
+        # )
 
         # MIME 타입 추정
         mime_type = detect_mime_type(saved_path)
@@ -1205,14 +1194,14 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
             else {}
         )
 
-        logger.info(
-            "[file_parser.py][parse_text_file] metadata extracted xml_namespace=%s xml_statement_count=%d sql_statement_type=%s sql_table_count=%d template_script_blocks=%s",
-            xml_meta.get("namespace", ""),
-            len(xml_meta.get("statement_ids", [])),
-            sql_meta.get("statement_type", ""),
-            len(sql_meta.get("table_names", [])),
-            template_meta.get("script_blocks", 0) if template_meta else 0,
-        )
+        # logger.info(
+        #     "[file_parser.py][parse_text_file] metadata extracted xml_namespace=%s xml_statement_count=%d sql_statement_type=%s sql_table_count=%d template_script_blocks=%s",
+        #     xml_meta.get("namespace", ""),
+        #     len(xml_meta.get("statement_ids", [])),
+        #     sql_meta.get("statement_type", ""),
+        #     len(sql_meta.get("table_names", [])),
+        #     template_meta.get("script_blocks", 0) if template_meta else 0,
+        # )
 
         # mapper XML의 경우 namespace만 있고 class_name이 없으면 namespace 마지막 토큰을 대표명으로 사용
         if extension == "xml" and xml_meta.get("namespace") and not class_name:
@@ -1226,8 +1215,8 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
 
         result = {
             "raw_text": raw_text,  # 파일 원문 전체 텍스트, 추가 분석의 기준 데이터
-            "project_id": file_info.get("project_id", file_info.get("projectid", "")),  # 프로젝트 식별자
-            "project_name": file_info.get("project_name", file_info.get("projectname", "")),  # 프로젝트명
+            "project_id": file_info.get("project_id", ""),  # 프로젝트 식별자
+            "project_name": file_info.get("project_name", ""),  # 프로젝트명
             "file_name": file_name,  # 파일명, UI/로그/언어 감지에 사용
             "extension": extension,  # 정규화된 확장자
             "language": language,  # 감지된 프로그래밍 언어/문서 종류
@@ -1235,9 +1224,7 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
             "relative_path": relative_path,  # 프로젝트 내 상대경로, 중복 식별/정렬/검색용
             "saved_path": saved_path,  # 서버 내 실제 저장 경로
             "file_path": saved_path,  # 타 모듈 호환용 파일 경로 별칭
-            "file_size": file_info.get("file_size", file_info.get("size", 0)),  # 파일 크기(byte)
-            "source_type": file_info.get("source_type", file_info.get("sourcetype", "")),  # 업로드 출처 유형(stream/file/local/url/file-legacy)
-            "root_container_name": file_info.get("root_container_name", file_info.get("rootcontainername", "")),  # zip 루트 폴더명 등 상위 컨테이너 정보
+            "file_size": file_info.get("file_size", 0),  # 파일 크기(byte)
             "layer_type": layer_type,  # 추정 레이어(controller/service/repository/mapper/config/ddl)
             "content_type": content_type,  # 추정 콘텐츠 역할(api/sql ddl/dml 등)
             "class_name": class_name,  # 대표 클래스/타입명
@@ -1249,20 +1236,20 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
             "sql_meta": sql_meta,  # SQL statement type / table names 등 상세 SQL 메타데이터
         }
 
-        logger.info(
-            "[file_parser.py][parse_text_file] completed file_name=%s language=%s layer_type=%s content_type=%s class_name=%s package=%s",
-            result["file_name"],
-            result["language"],
-            result["layer_type"],
-            result["content_type"],
-            result["class_name"],
-            result["package"],
-        )
+        # logger.info(
+        #     "[file_parser.py][parse_text_file] completed file_name=%s language=%s layer_type=%s content_type=%s class_name=%s package=%s",
+        #     result["file_name"],
+        #     result["language"],
+        #     result["layer_type"],
+        #     result["content_type"],
+        #     result["class_name"],
+        #     result["package"],
+        # )
 
-        logger.info(
-            "[파일파싱 결과 JSON] %s",
-            _to_log_json(result),
-        )
+        # logger.info(
+        #     "[파일파싱 결과 JSON] %s",
+        #     _to_log_json(result),
+        # )
 
 
         return result
@@ -1274,7 +1261,7 @@ def parse_text_file(file_info: dict[str, Any]) -> dict[str, Any]:
         logger.error(
             "[file_parser.py][parse_text_file] failed error=%s path=%s",
             error,
-            file_info.get("saved_path", file_info.get("savedpath", "")),
+            file_info.get("saved_path", ""),
         )
         return {}
 
@@ -1307,13 +1294,13 @@ def extract_static_analysis(parsed: dict[str, Any]) -> dict[str, Any]:
         logger.warning("[file_parser.py][extract_static_analysis] empty parsed input")
         return {}
 
-    logger.info(
-        "[file_parser.py][extract_static_analysis] start file_name=%s relative_path=%s language=%s extension=%s",
-        parsed.get("file_name", ""),
-        parsed.get("relative_path", ""),
-        parsed.get("language", ""),
-        parsed.get("extension", ""),
-    )
+    # logger.info(
+    #     "[file_parser.py][extract_static_analysis] start file_name=%s relative_path=%s language=%s extension=%s",
+    #     parsed.get("file_name", ""),
+    #     parsed.get("relative_path", ""),
+    #     parsed.get("language", ""),
+    #     parsed.get("extension", ""),
+    # )
 
     # 1차 파싱 결과 재사용
     raw_text = parsed["raw_text"]
@@ -1368,18 +1355,18 @@ def extract_static_analysis(parsed: dict[str, Any]) -> dict[str, Any]:
         "methods": methods,                                         # (ADD) 함수/메서드 목록(name, signature, params)
     }
 
-    logger.info(
-        "[file_parser.py][extract_static_analysis] completed file_name=%s imports=%d methods=%d table_names=%d",
-        result["file_name"],
-        len(result["imports"]),
-        len(result["methods"]),
-        len(result["table_names"]),
-    )
+    # logger.info(
+    #     "[file_parser.py][extract_static_analysis] completed file_name=%s imports=%d methods=%d table_names=%d",
+    #     result["file_name"],
+    #     len(result["imports"]),
+    #     len(result["methods"]),
+    #     len(result["table_names"]),
+    # )
 
-    logger.info(
-        "[file_parser.py][parse_text_file][result_json] %s",
-        _to_log_json(result),
-    )
+    # logger.info(
+    #     "[file_parser.py][parse_text_file][result_json] %s",
+    #     _to_log_json(result),
+    # )
 
     return result
 

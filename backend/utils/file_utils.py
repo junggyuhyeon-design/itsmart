@@ -23,15 +23,13 @@ INVALID_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._\- ]+")
 
 @dataclass(frozen=True)
 class AnalysisTargetFile:
-    source_type: str
-    original_name: str
+    file_name: str
     saved_path: str
     relative_path: str
     extension: str
     size: int
     project_id: str
     project_name: str
-    root_container_name: str
 
 
 def ensure_dir(path: Path) -> Path:
@@ -70,15 +68,13 @@ def _collect_regular_file(saved_path: Path) -> list[AnalysisTargetFile]:
 
     return [
         AnalysisTargetFile(
-            source_type="file",
-            original_name=saved_path.name,
+            file_name=saved_path.name,
             saved_path=str(saved_path),
             relative_path=saved_path.name,
             extension=saved_path.suffix.lower().lstrip("."),
             size=saved_path.stat().st_size if saved_path.exists() else 0,
             project_id=project_id,
             project_name=project_name,
-            root_container_name=saved_path.name,
         )
     ]
 
@@ -92,9 +88,9 @@ def _extract_zip(saved_zip: Path, extract_root: Path, user_id: str) -> list[Anal
     # logger.info("saved_path ::: %s", str(saved_zip))       # /data/uploads/admin/board_final-master.zip
 
     if target_root.exists():
-        logger.info("[INFO] 기존 디렉토리를 제거: %s", target_root)
+        logger.info("[file_utils.py][_extract_zip] 존재하는 디렉토리 경로 제거 : %s", target_root)
         shutil.rmtree(target_root, ignore_errors=True)
-    ensure_dir(target_root) # 경로 생성
+    ensure_dir(target_root)
 
     results: list[AnalysisTargetFile] = []
 
@@ -114,15 +110,13 @@ def _extract_zip(saved_zip: Path, extract_root: Path, user_id: str) -> list[Anal
         relative_path = str(path.relative_to(target_root)).replace("\\", "/")
         results.append(
             AnalysisTargetFile(
-                source_type="zip_entry",
-                original_name=path.name,
+                file_name=path.name,
                 saved_path=str(path),
                 relative_path=relative_path,
                 extension=path.suffix.lower().lstrip("."),
                 size=path.stat().st_size,
                 project_id=project_id,
                 project_name=project_name,
-                root_container_name=saved_zip.name,
             )
         )
 

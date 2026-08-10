@@ -111,7 +111,7 @@ class QueryAnalyzer:
     """
 
     def __init__(self, default_top_k: int = 5) -> None:
-        # 기본 top_k 값 (설정에서 넘겨줄 수 있도록 파라미터화)
+        # 기본 top_k 값 : config 에는 8로 설정되어있다. 
         self.default_top_k = default_top_k
         logger.info(
             "[query_analyzer.py][__init__][초기 설정] %s",
@@ -125,6 +125,7 @@ class QueryAnalyzer:
         """
         question = (question or "").strip()
 
+        logger.info("============================================================")
         logger.info(
             "[query_analyzer.py][analyze][질문 분석 시작] %s",
             _json_log({"question": question}),
@@ -225,20 +226,20 @@ class QueryAnalyzer:
             edit_target=edit_target,
         )
 
-        logger.info(
-            "[query_analyzer.py][analyze][최종 결과] %s",
-            _json_log({
-                "query_type": intent.query_type,
-                "top_k": intent.top_k,
-                "layer_filter": intent.layer_filter,
-                "extension_filter": intent.extension_filter,
-                "entity_hint": intent.entity_hint,
-                "keywords": intent.keywords,
-                "search_query": intent.search_query,
-                "edit_source": intent.edit_source,
-                "edit_target": intent.edit_target,
-            }),
-        )
+        # logger.info(
+        #     "[query_analyzer.py][analyze][최종 결과] %s",
+        #     _json_log({
+        #         "query_type": intent.query_type,
+        #         "top_k": intent.top_k,
+        #         "layer_filter": intent.layer_filter,
+        #         "extension_filter": intent.extension_filter,
+        #         "entity_hint": intent.entity_hint,
+        #         "keywords": intent.keywords,
+        #         "search_query": intent.search_query,
+        #         "edit_source": intent.edit_source,
+        #         "edit_target": intent.edit_target,
+        #     }),
+        # )
 
         return intent
 
@@ -619,23 +620,23 @@ class QueryAnalyzer:
             match = re.search(pattern, question)
             if match:
                 entity = match.group(1)
-                logger.info(
-                    "[query_analyzer.py][extract_entity][대표 엔티티 추출 완료] %s",
-                    _json_log({
-                        "question": question,
-                        "matched_pattern": pattern,
-                        "entity_hint": entity,
-                    }),
-                )
+                # logger.info(
+                #     "[query_analyzer.py][extract_entity][대표 엔티티 추출 완료] %s",
+                #     _json_log({
+                #         "question": question,
+                #         "matched_pattern": pattern,
+                #         "entity_hint": entity,
+                #     }),
+                # )
                 return entity
 
-        logger.info(
-            "[query_analyzer.py][extract_entity][엔티티 미검출] %s",
-            _json_log({
-                "question": question,
-                "entity_hint": None,
-            }),
-        )
+        # logger.info(
+        #     "[query_analyzer.py][extract_entity][엔티티 미검출] %s",
+        #     _json_log({
+        #         "question": question,
+        #         "entity_hint": None,
+        #     }),
+        # )
         return None
 
     def extract_edit_pair(self, question: str) -> tuple[str | None, str | None]:
@@ -654,12 +655,16 @@ class QueryAnalyzer:
             return None, None
 
         patterns = [
-            re.compile(r'"([^"]+)"\s*에서\s*"([^"]+)"\s*로\s*(?:전체|모두|전부|일괄|다)?\s*(?:바꿔|변경|수정|치환|교체)'),
-            re.compile(r"\'([^\']+)\'\s*에서\s*\'([^\']+)\'\s*로\s*(?:전체|모두|전부|일괄|다)?\s*(?:바꿔|변경|수정|치환|교체)"),
-            re.compile(r'"([^"]+)"\s*을\s*"([^"]+)"\s*로\s*(?:전체|모두|전부|일괄|다)?\s*(?:바꿔|변경|수정|치환|교체)'),
-            re.compile(r"\'([^\']+)\'\s*을\s*\'([^\']+)\'\s*로\s*(?:전체|모두|전부|일괄|다)?\s*(?:바꿔|변경|수정|치환|교체)"),
-            re.compile(r'"([^"]+)"\s*를\s*"([^"]+)"\s*로\s*(?:전체|모두|전부|일괄|다)?\s*(?:바꿔|변경|수정|치환|교체)'),
-            re.compile(r"\'([^\']+)\'\s*를\s*\'([^\']+)\'\s*로\s*(?:전체|모두|전부|일괄|다)?\s*(?:바꿔|변경|수정|치환|교체)"),
+            re.compile(r'"([^"]+)"\s*에서\s*"([^"]+)"\s*로\s*(?:바꿔|변경|수정|치환|교체)'),
+            re.compile(r"'([^']+)'\s*에서\s*'([^']+)'\s*로\s*(?:바꿔|변경|수정|치환|교체)"),
+            re.compile(r'(\S+)\s*에서\s*(\S+)\s*로\s*(?:바꿔|변경|수정|치환|교체)'),
+            re.compile(r'"([^"]+)"\s*을\s*"([^"]+)"\s*로\s*(?:바꿔|변경|수정|치환|교체)'),
+            re.compile(r"'([^']+)'\s*을\s*'([^']+)'\s*로\s*(?:바꿔|변경|수정|치환|교체)"),
+            re.compile(r'(\S+)\s*을\s*(\S+)\s*로\s*(?:바꿔|변경|수정|치환|교체)'),
+            re.compile(r'"([^"]+)"\s*를\s*"([^"]+)"\s*로\s*(?:바꿔|변경|수정|치환|교체)'),
+            re.compile(r"'([^']+)'\s*를\s*'([^']+)'\s*로\s*(?:바꿔|변경|수정|치환|교체)"),
+            re.compile(r'(\S+)\s*를\s*(\S+)\s*로\s*(?:바꿔|변경|수정|치환|교체)'),
+
         ]
 
         for pattern in patterns:
@@ -667,25 +672,25 @@ class QueryAnalyzer:
             if match:
                 edit_source = match.group(1).strip()
                 edit_target = match.group(2).strip()
-                logger.info(
-                    "[query_analyzer.py][extract_edit_pair][편집 쌍 추출 완료] %s",
-                    _json_log({
-                        "question": question,
-                        "matched_pattern": pattern.pattern,
-                        "edit_source": edit_source,
-                        "edit_target": edit_target,
-                    }),
-                )
+                # logger.info(
+                #     "[query_analyzer.py][extract_edit_pair][편집 쌍 추출 완료] %s",
+                #     _json_log({
+                #         "question": question,
+                #         "matched_pattern": pattern.pattern,
+                #         "edit_source": edit_source,
+                #         "edit_target": edit_target,
+                #     }),
+                # )
                 return edit_source, edit_target
 
-        logger.info(
-            "[query_analyzer.py][extract_edit_pair][편집 쌍 미검출] %s",
-            _json_log({
-                "question": question,
-                "edit_source": None,
-                "edit_target": None,
-            }),
-        )
+        # logger.info(
+        #     "[query_analyzer.py][extract_edit_pair][편집 쌍 미검출] %s",
+        #     _json_log({
+        #         "question": question,
+        #         "edit_source": None,
+        #         "edit_target": None,
+        #     }),
+        # )
         return None, None
 
     def extract_keywords(self, question: str) -> list[str]:
@@ -720,15 +725,15 @@ class QueryAnalyzer:
         # 최대 12개까지만 사용
         keywords = result[:12]
 
-        logger.info(
-            "[query_analyzer.py][extract_keywords][핵심 키워드 추출 완료] %s",
-            _json_log({
-                "question": question,
-                "tokens": tokens,
-                "keywords": keywords,
-                "keyword_count": len(keywords),
-            }),
-        )
+        # logger.info(
+        #     "[query_analyzer.py][extract_keywords][핵심 키워드 추출 완료] %s",
+        #     _json_log({
+        #         "question": question,
+        #         "tokens": tokens,
+        #         "keywords": keywords,
+        #         "keyword_count": len(keywords),
+        #     }),
+        # )
 
         return keywords
 

@@ -11,6 +11,7 @@ from qdrant_client.http.models import (
     FilterSelector,      # 필터를 지정하여 삭제/조회 등에서 사용할 대상 선택
     Filter,              # 여러 FieldCondition을 조합한 전체 필터
     MatchValue,          # 특정 값과 일치하는 조건 (예: file_type="py")
+    Modifier,            # Sparse Vector IDF 수정자 (BM25 가중)
     PointStruct,         # Qdrant에 저장할 데이터(벡터 + payload + id)
     VectorParams,        # Dense Vector 컬렉션 생성 시 벡터 크기, 거리 방식 설정
 
@@ -184,8 +185,6 @@ class QdrantService:
                 "start_line": chunk.get("start_line"),
                 "end_line": chunk.get("end_line"),
                 "file_size": chunk.get("file_size", 0),
-                "source_type": chunk.get("source_type", ""),
-                "root_container_name": chunk.get("root_container_name", ""),
                 "layer_type": chunk.get("layer_type", ""),
                 "class_name": chunk.get("class_name", ""),
                 "package": chunk.get("package", ""),
@@ -193,14 +192,14 @@ class QdrantService:
                 "chunk_type": chunk.get("chunk_type", "text"),
             }
 
-            logger.info(
-                "[qdrant_service.py][upsert_chunks][포인트 준비 ★] step=%d relative_path=%s chunk_index=%s text_len=%d sparse_indices_len=%s",
-                index + 1,
-                chunk.get("relative_path", ""),
-                chunk.get("chunk_index", index),
-                len(chunk.get("text", "") or ""),
-                len(sparse_vector.indices) if sparse_vector is not None else 0,
-                )
+            # logger.info(
+            #     "[qdrant_service.py][upsert_chunks][포인트 준비 ★] step=%d relative_path=%s chunk_index=%s text_len=%d sparse_indices_len=%s",
+            #     index + 1,
+            #     chunk.get("relative_path", ""),
+            #     chunk.get("chunk_index", index),
+            #     len(chunk.get("text", "") or ""),
+            #     len(sparse_vector.indices) if sparse_vector is not None else 0,
+            #     )
 
             points.append(
                 PointStruct(
@@ -231,6 +230,7 @@ class QdrantService:
             len(points),
             self.settings.qdrant_collection,
         )
+        logger.info("============================================================")
 
         return len(points)
 
