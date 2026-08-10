@@ -9,13 +9,13 @@ itsmart_codeMind/
 │  ├─ Dockerfile
 │  ├─ health_service.py
 │  ├─ main.py
+│  ├─ health_service.py
 │  ├─ requirements.txt
-│  ├─ database
+│  ├─ database/
 │  │  ├─ database.py
 │  │  ├─ history_repository.py
 │  │  └─ init_db.py
-│  ├─ embedder
-│  │  ├─ __init__.py
+│  ├─ embedder/
 │  │  └─ embedder.py
 │  ├─ parser
 │  │  ├─ __init__.py

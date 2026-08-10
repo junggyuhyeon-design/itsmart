@@ -1,8 +1,14 @@
 # UI
-streamlit==1.58.0
+streamlit==1.45.1
 
 # FastAPI 통신
 httpx==0.28.1
 
 # 환경변수
-python-dotenv==1.0.0
+python-dotenv==1.2.2
+
+# 브라우저 쿠키로 UUID 영구 저장 (Streamlit 1.45 호환)
+extra-streamlit-components==0.1.71
+
+# 브라우저 백그라운드 작업상태 자동새로고침
+streamlit-autorefresh
