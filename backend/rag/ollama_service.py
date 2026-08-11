@@ -129,13 +129,13 @@ class OllamaService:
                         yield content
 
                     if chunk.get("done"):
-                        # logger.info(
-                        #     "[ollama_service.py][generate_response_stream][7.stream 종료] chunk_count=%d total_content_length=%d done=%s done_reason=%s",
-                        #     chunk_count,
-                        #     total_content_length,
-                        #     chunk.get("done"),
-                        #     chunk.get("done_reason"),
-                        # )
+                        logger.info(
+                            "[ollama_service.py][generate_response_stream][7.stream 종료] chunk_count=%d total_content_length=%d done=%s done_reason=%s",
+                            chunk_count,
+                            total_content_length,
+                            chunk.get("done"),
+                            chunk.get("done_reason"),
+                        )
                         break
 
                 # 스트리밍 완료 후 전체 응답 로깅
