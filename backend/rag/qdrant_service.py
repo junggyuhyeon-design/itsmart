@@ -11,6 +11,7 @@ from qdrant_client.http.models import (
     FilterSelector,      # 필터를 지정하여 삭제/조회 등에서 사용할 대상 선택
     Filter,              # 여러 FieldCondition을 조합한 전체 필터
     MatchValue,          # 특정 값과 일치하는 조건 (예: file_type="py")
+    Modifier,            # Sparse Vector IDF 수정자 (BM25 가중)
     PointStruct,         # Qdrant에 저장할 데이터(벡터 + payload + id)
     VectorParams,        # Dense Vector 컬렉션 생성 시 벡터 크기, 거리 방식 설정
 
