@@ -106,6 +106,7 @@ class OllamaService:
 
                 chunk_count = 0
                 total_content_length = 0
+                full_response = "" # 전체 응답 누적 버퍼 추가
 
                 async for line in response.aiter_lines():
                     if not line:
@@ -117,6 +118,7 @@ class OllamaService:
                     if content:
                         chunk_count += 1
                         total_content_length += len(content)
+                        full_response += content # 전체 응답 누적
 
                         # logger.info(
                         #     "[ollama_service.py][generate_response_stream][6.stream 청크수신] chunk_count=%d content_len=%d content_preview=%s",
@@ -135,3 +137,9 @@ class OllamaService:
                         #     chunk.get("done_reason"),
                         # )
                         break
+
+                # 스트리밍 완료 후 전체 응답 로깅
+                logger.info(
+                    "[ollama_service.py][generate_response_stream][COMPLETE] chunk_count=%d content_len=%d full_response=%s",
+                    chunk_count, total_content_length, full_response
+                )
